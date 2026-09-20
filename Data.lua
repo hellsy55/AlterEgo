@@ -220,7 +220,31 @@ function Data:GetCurrencies()
   local currencies = {}
   local seasonID = self:GetCurrentSeason()
   TableForEach(self.currencies, function(currency)
-    if currency.seasonID ~= seasonID then
+    if currency.seasonID ~= nil and currency.seasonID ~= seasonID then
+      return
+    end
+    if currency.currencyType == "quest" then
+      ---@type AE_CurrencyInfo
+      local questInfo = {
+        id = currency.id,
+        name = currency.name,
+        description = currency.description or (
+          currency.resets == "weekly"
+          and "Weekly quest. Resets every week."
+          or "One-time quest. Can only be completed once per account."
+        ),
+        iconFileID = currency.iconFileID,
+        quality = Enum.ItemQuality.Rare,
+        currencyType = currency.currencyType,
+        resets = currency.resets,
+        tooltipNote = currency.tooltipNote,
+        maxQuantity = 0,
+        maxWeeklyQuantity = 0,
+        quantity = 0,
+        totalEarned = 0,
+        quantityEarnedThisWeek = 0,
+      }
+      table.insert(currencies, questInfo)
       return
     end
     if currency.currencyType == "delveMap" then
@@ -252,6 +276,19 @@ function Data:GetCurrencies()
     end
   end)
   return currencies
+end
+
+---Whether a one-time (per account) quest tracker was completed by any stored character
+---@param currencyID number
+---@return boolean
+function Data:IsQuestCompletedOnAccount(currencyID)
+  for _, character in pairs(self.db.global.characters) do
+    local characterCurrency = TableGet(character.currencies or {}, "id", currencyID)
+    if characterCurrency and characterCurrency.questCompleted then
+      return true
+    end
+  end
+  return false
 end
 
 ---Get stored character by GUID
@@ -701,7 +738,8 @@ function Data:TaskWeeklyReset()
         if characterCurrency.maxWeeklyQuantity and characterCurrency.maxWeeklyQuantity > 0 then
           characterCurrency.quantityEarnedThisWeek = 0
         end
-        if characterCurrency.currencyType == "delveMap" then
+        if characterCurrency.currencyType == "delveMap"
+          or (characterCurrency.currencyType == "quest" and characterCurrency.resets == "weekly") then
           characterCurrency.questCompleted = false
         end
       end)
@@ -787,6 +825,18 @@ function Data:loadGameData()
         raid.encounters[encounterIndex] = encounter
         encounterIndex = encounterIndex + 1
         _, _, bossID = EJ_GetEncounterInfoByIndex(encounterIndex, raid.journalInstanceID)
+      end
+      -- Encounter Journal data is not always populated yet for brand-new raids (e.g. right at season
+      -- launch/PTR). Fall back to generic placeholder bosses so the raid still occupies its correct
+      -- number of slots (and honors raid.order) in the grid until Blizzard populates the journal.
+      if #raid.encounters == 0 and raid.numEncounters and raid.numEncounters > 0 then
+        for placeholderIndex = 1, raid.numEncounters do
+          raid.encounters[placeholderIndex] = {
+            index = placeholderIndex,
+            name = format("%s (%d)", raid.name, placeholderIndex),
+            instanceID = raid.instanceID,
+          }
+        end
       end
       raid.modifiedInstanceInfo = C_ModifiedInstance.GetModifiedInstanceInfoFromMapID(raid.instanceID)
     end
@@ -1006,7 +1056,32 @@ function Data:UpdateCurrencies()
   character.currencies = wipe(character.currencies or {})
 
   TableForEach(self.currencies or {}, function(dataCurrency)
-    if dataCurrency.seasonID ~= seasonID then
+    if dataCurrency.seasonID ~= nil and dataCurrency.seasonID ~= seasonID then
+      return
+    end
+    if dataCurrency.currencyType == "quest" then
+      local questCompleted = C_QuestLog.IsQuestFlaggedCompleted(dataCurrency.questID) == true
+      -- One-time quests can be flagged account-wide (warband) instead of on the character
+      if not questCompleted and dataCurrency.resets == "account" and C_QuestLog.IsQuestFlaggedCompletedOnAccount then
+        questCompleted = C_QuestLog.IsQuestFlaggedCompletedOnAccount(dataCurrency.questID) == true
+      end
+
+      local bagCount = 0
+      if dataCurrency.itemID then
+        bagCount = C_Item.GetItemCount(dataCurrency.itemID, true) or 0
+      end
+
+      ---@type AE_CharacterCurrency
+      local questCurrency = {
+        id = dataCurrency.id,
+        currencyType = dataCurrency.currencyType,
+        name = dataCurrency.name,
+        iconFileID = dataCurrency.iconFileID,
+        resets = dataCurrency.resets,
+        questCompleted = questCompleted,
+        bagCount = bagCount,
+      }
+      table.insert(character.currencies, questCurrency)
       return
     end
     if dataCurrency.currencyType == "delveMap" then

@@ -23,11 +23,15 @@ Data.currencies = {
   {seasonID = 18, seasonDisplayID = 2, id = 3444, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Champion Mistcrest
   {seasonID = 18, seasonDisplayID = 2, id = 3445, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Hero Mistcrest
   {seasonID = 18, seasonDisplayID = 2, id = 3446, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Myth Mistcrest
-  {seasonID = 18, seasonDisplayID = 2, id = 3465, useTotalEarnedForMaxQty = true,  currencyType = "catalyst"},                                                                                                                                        -- Venomblight Manaflux
+  {seasonID = 18, seasonDisplayID = 2, id = 3465, useTotalEarnedForMaxQty = true,  currencyType = "catalyst"},																																		  -- Venomblight Manaflux
+  {seasonID = 18, seasonDisplayID = 2, id = 3418, useTotalEarnedForMaxQty = true,  currencyType = "bonusroll"},                                                                                                                                       -- Nebulous Voidcore
   {seasonID = 18, seasonDisplayID = 2, id = 3509, useTotalEarnedForMaxQty = true,  currencyType = "spark"},                                                                                                                                           -- Tidal Spark Dust
-  {seasonID = 18, seasonDisplayID = 2, id = 3418, useTotalEarnedForMaxQty = true,  currencyType = "bonusroll"},                                                                                                                                          -- Nebulous Voidcore
   {seasonID = 18, seasonDisplayID = 2, id = 3310, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Coffer Key Shards
   {seasonID = 18, seasonDisplayID = 2, id = 3028, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Restored Coffer key
   {seasonID = 18, seasonDisplayID = 2, id = 3356, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Untainted Mana-Crystals
   {seasonID = 18, seasonDisplayID = 2, id = 274374, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1293799},
+  {id = 95520, currencyType = "quest", resets = "weekly",  name = "Purge",  questID = 95520, iconFileID = 7966624},
+  {id = 97064, currencyType = "quest", resets = "weekly",  name = "Dundun",  questID = 97064, iconFileID = 647701},
+  {id = 97910, currencyType = "quest", resets = "character", name = "Cracked Keystone",  questID = 97910, iconFileID = 4352494, itemID = 279012},
+  {id = 97913, currencyType = "quest", resets = "character", name = "Azta'rec", questID = 97913, iconFileID = 8032873},
 }

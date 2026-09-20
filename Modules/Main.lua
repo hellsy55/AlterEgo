@@ -2506,6 +2506,56 @@ function Module:Render()
               GameTooltip:Show()
               SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
             end)
+          elseif currency.currencyType == "quest" then
+            local isAccountQuest = currency.resets == "account"
+            local completed = characterCurrency ~= nil and characterCurrency.questCompleted == true
+            if isAccountQuest and not completed then
+              -- Once per account: completed on any character counts for all of them
+              completed = Data:IsQuestCompletedOnAccount(currency.id)
+            end
+
+            local availableAtlas = "Recurringavailablequesticon"
+            if isAccountQuest and C_Texture.GetAtlasInfo("QuestNormal") then
+              availableAtlas = "QuestNormal"
+            end
+
+            local pendingTurnin = not completed and characterCurrency ~= nil and (characterCurrency.bagCount or 0) > 0
+
+            local statusValue = "-"
+            local cellText = GRAY_FONT_COLOR:WrapTextInColorCode("-")
+            if completed then
+              statusValue = "Completed"
+              cellText = CreateAtlasMarkup("common-icon-checkmark", 16, 16)
+            elseif pendingTurnin then
+              statusValue = "In bags"
+              cellText = CreateSimpleTextureMarkup([[Interface\Icons\INV_Misc_QuestionMark]], 16, 16)
+            elseif characterCurrency then
+              statusValue = "Available"
+              cellText = CreateAtlasMarkup(availableAtlas, 16, 16)
+            end
+
+            currencyFrame.Text:SetText(cellText)
+            currencyFrame.Text:SetJustifyH(Data.db.global.currencies.alignCenter and "CENTER" or "LEFT")
+            currencyFrame:SetScript("OnEnter", function()
+              GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
+              GameTooltip:SetText(currency.name, 1, 1, 1)
+              if not characterCurrency and not completed then
+                GameTooltip:AddDoubleLine("Status:", "No Data", nil, nil, nil, 1, 1, 1)
+                GameTooltip:AddLine("Log your character to update.", 1, 1, 1, true)
+              else
+                GameTooltip:AddDoubleLine("Status:", statusValue, nil, nil, nil, 1, 1, 1)
+                if pendingTurnin then
+                  GameTooltip:AddDoubleLine("In bags:", tostring(characterCurrency.bagCount), nil, nil, nil, 1, 1, 1)
+                end
+                GameTooltip:AddDoubleLine("Resets:", isAccountQuest and "Never (once per account)" or "Weekly", nil, nil, nil, 1, 1, 1)
+              end
+              if currency.tooltipNote then
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
+              end
+              GameTooltip:Show()
+              SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
+            end)
           else
             local infoMaxQuantity = currency.maxQuantity or 0
             local infoMaxWeeklyQuantity = currency.maxWeeklyQuantity or 0
@@ -2549,13 +2599,15 @@ function Module:Render()
             currencyFrame:SetScript("OnEnter", function()
               GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
               GameTooltip:SetText("Currency Progress", 1, 1, 1)
-              GameTooltip:AddDoubleLine("Owned:", tostring(charQuantity), nil, nil, nil, 1, 1, 1)
               if infoMaxWeeklyQuantity > 0 then
                 GameTooltip:AddDoubleLine("Weekly Maximum:", format("%d/%d", charEarnedThisWeek, infoMaxWeeklyQuantity), nil, nil, nil, 1, 1, 1)
               end
               if currency.useTotalEarnedForMaxQty then
                 if infoMaxQuantity > 0 then
                   GameTooltip:AddDoubleLine("Season Maximum:", format("%d/%d", charTotalEarned, infoMaxQuantity), nil, nil, nil, 1, 1, 1)
+                  if currency.currencyType == "crest" then
+                    GameTooltip:AddDoubleLine("Remaining:", tostring(math.max(0, infoMaxQuantity - charTotalEarned)), nil, nil, nil, 1, 1, 1)
+                  end
                 else
                   if charTotalEarned > 0 then
                     GameTooltip:AddDoubleLine("Season Earned:", tostring(charTotalEarned), nil, nil, nil, 1, 1, 1)
