@@ -1,1 +1,9 @@
 .pkgmeta-cache/
+
+# Claude Code workspace files
+.claude/
+CLAUDE.md
+CLAUDE_PATTERNS.md
+
+# Developer scripts
+*.ps1
