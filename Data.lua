@@ -90,6 +90,7 @@ Data.defaultDB = {
       showMaxEarned = true,
       alignCenter = true,
     },
+    trackerOverrides = {}, ---@type table<any, {order: number, category: "currency"|"weekly"|"seasonalChore"}> Custom order/category set via the Currencies/Weeklies/Seasonal Chores hover arrows
     interface = {
       -- fontSize = 12,
       windowScale = 100,
@@ -317,7 +318,180 @@ function Data:GetCurrencies()
       table.insert(currencies, currencyInfo)
     end
   end)
-  return currencies
+  return self:ApplyTrackerOverrides(currencies)
+end
+
+---Fixed macro order the three tracker sections are always displayed in.
+local TRACKER_CATEGORIES = { "currency", "weekly", "seasonalChore" }
+
+---Sections in display order, paired with the db keys holding their enabled/hidden-item state.
+local TRACKER_SECTIONS = {
+  { category = "currency",      settingsKey = "currencies" },
+  { category = "weekly",        settingsKey = "weeklies" },
+  { category = "seasonalChore", settingsKey = "seasonalChores" },
+}
+
+---The "plain currency" section is represented as category == nil throughout the codebase
+---(see Render()'s TableFilter calls), while it's easier to work with an explicit string
+---internally. These two helpers convert between the two representations.
+---@param category string?
+---@return string
+local function NormalizeTrackerCategory(category)
+  return category or "currency"
+end
+
+---@param category string
+---@return string?
+local function DenormalizeTrackerCategory(category)
+  if category == "currency" then return nil end
+  return category
+end
+
+---Apply user-customized order/category overrides (set via the Currencies/Weeklies/Seasonal
+---Chores hover arrows) on top of the static tracker definitions, then renormalize each
+---section's order to a clean 1..n sequence. Mirrors how Data:GetCharacters() renormalizes
+---character.order.
+---@param currencies AE_CurrencyInfo[]
+---@return AE_CurrencyInfo[]
+function Data:ApplyTrackerOverrides(currencies)
+  local overrides = self.db.global.trackerOverrides
+  local byCategory = {}
+
+  TableForEach(currencies, function(currency, naturalIndex)
+    local override = currency.id ~= nil and overrides[currency.id]
+    local category = (override and override.category) or NormalizeTrackerCategory(currency.category)
+    currency.order = (override and override.order) or naturalIndex
+    byCategory[category] = byCategory[category] or {}
+    table.insert(byCategory[category], currency)
+  end)
+
+  local sorted = {}
+  TableForEach(TRACKER_CATEGORIES, function(category)
+    local group = byCategory[category] or {}
+    table.sort(group, function(a, b) return a.order < b.order end)
+    local order = 1
+    TableForEach(group, function(currency)
+      currency.category = DenormalizeTrackerCategory(category)
+      currency.order = order
+      if currency.id ~= nil then
+        overrides[currency.id] = overrides[currency.id] or {}
+        overrides[currency.id].category = category
+        overrides[currency.id].order = order
+      end
+      order = order + 1
+      table.insert(sorted, currency)
+    end)
+  end)
+
+  return sorted
+end
+
+---Get the sections (currency/weekly/seasonalChore) that are currently enabled, in fixed
+---display order, each with the trackers actually shown in it (order applied, hidden ones
+---excluded). A section that's enabled but currently has no trackers in it (e.g. everything got
+---moved out of it) still appears here as an empty entry, so the hover arrows know it's a valid
+---place to move a tracker into.
+---@return { category: string, items: AE_CurrencyInfo[] }[]
+function Data:GetTrackerSections()
+  local allTrackers = self:GetCurrencies()
+  local sections = {}
+  TableForEach(TRACKER_SECTIONS, function(section)
+    local sectionSettings = self.db.global[section.settingsKey]
+    if not sectionSettings or not sectionSettings.enabled then
+      return
+    end
+    local hidden = sectionSettings.hiddenCurrencies or {}
+    local items = {}
+    TableForEach(allTrackers, function(tracker)
+      if NormalizeTrackerCategory(tracker.category) == section.category and not hidden[tracker.id] then
+        table.insert(items, tracker)
+      end
+    end)
+    table.insert(sections, { category = section.category, items = items })
+  end)
+  return sections
+end
+
+---Get the trackers (currencies/weeklies/seasonal chores) actually shown on screen right now,
+---in display order, skipping disabled sections and hidden individual trackers.
+---@return AE_CurrencyInfo[]
+function Data:GetVisibleTrackers()
+  local visible = {}
+  TableForEach(self:GetTrackerSections(), function(section)
+    TableForEach(section.items, function(tracker) table.insert(visible, tracker) end)
+  end)
+  return visible
+end
+
+---Move a tracker up/down among the ones currently shown. Reordering within the same section
+---simply swaps places with the neighbor. At the edge of a section, it crosses into the nearest
+---enabled section in that direction (even if that section is currently empty), landing at the
+---near edge, right next to where it came from. The neighbor/section it left never changes.
+---@param tracker AE_CurrencyInfo
+---@param direction number -1 to move up/earlier, 1 to move down/later
+function Data:SortTracker(tracker, direction)
+  if tracker.id == nil then return end
+
+  local overrides = self.db.global.trackerOverrides
+  local sections = self:GetTrackerSections()
+
+  local sectionIndex, itemIndex
+  for si, section in ipairs(sections) do
+    for ii, t in ipairs(section.items) do
+      if t.id == tracker.id then
+        sectionIndex, itemIndex = si, ii
+        break
+      end
+    end
+    if sectionIndex then break end
+  end
+  if not sectionIndex then return end -- tracker isn't currently visible
+
+  local section = sections[sectionIndex]
+
+  if direction < 0 and itemIndex > 1 then
+    -- Move up within the section: swap with the previous item
+    local neighbor = section.items[itemIndex - 1]
+    overrides[tracker.id] = overrides[tracker.id] or {}
+    overrides[neighbor.id] = overrides[neighbor.id] or {}
+    local trackerOrder, neighborOrder = tracker.order or 0, neighbor.order or 0
+    overrides[tracker.id].category, overrides[tracker.id].order = section.category, neighborOrder
+    overrides[neighbor.id].category, overrides[neighbor.id].order = section.category, trackerOrder
+    return
+  end
+
+  if direction > 0 and itemIndex < #section.items then
+    -- Move down within the section: swap with the next item
+    local neighbor = section.items[itemIndex + 1]
+    overrides[tracker.id] = overrides[tracker.id] or {}
+    overrides[neighbor.id] = overrides[neighbor.id] or {}
+    local trackerOrder, neighborOrder = tracker.order or 0, neighbor.order or 0
+    overrides[tracker.id].category, overrides[tracker.id].order = section.category, neighborOrder
+    overrides[neighbor.id].category, overrides[neighbor.id].order = section.category, trackerOrder
+    return
+  end
+
+  -- At the edge of the section: cross into the nearest enabled section in that direction,
+  -- whether or not it currently has any trackers of its own.
+  local targetSection = sections[sectionIndex + direction]
+  if not targetSection then return end -- already at the very top/bottom
+
+  overrides[tracker.id] = overrides[tracker.id] or {}
+  overrides[tracker.id].category = targetSection.category
+  if #targetSection.items == 0 then
+    overrides[tracker.id].order = 1
+  elseif direction < 0 then
+    -- Joining the section above: land at its bottom, next to where we came from
+    overrides[tracker.id].order = (targetSection.items[#targetSection.items].order or 0) + 0.5
+  else
+    -- Joining the section below: land at its top, next to where we came from
+    overrides[tracker.id].order = (targetSection.items[1].order or 0) - 0.5
+  end
+end
+
+---Clear all custom tracker order/category overrides, restoring the default layout.
+function Data:ResetTrackerOrder()
+  self.db.global.trackerOverrides = {}
 end
 
 ---The weekly +50% reputation buff each classic-raid Timewalking event grants the player.

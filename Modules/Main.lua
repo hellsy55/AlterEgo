@@ -1202,6 +1202,16 @@ function Module:Render()
   local currencies = TableFilter(allCurrencies, function(currency) return currency.category == nil end)
   local weeklies = TableFilter(allCurrencies, function(currency) return currency.category == "weekly" end)
   local seasonalChores = TableFilter(allCurrencies, function(currency) return currency.category == "seasonalChore" end)
+  local trackerSections = Data:GetTrackerSections()
+  local trackerMoveState = {}
+  TableForEach(trackerSections, function(section, sectionIndex)
+    TableForEach(section.items, function(tracker, itemIndex)
+      trackerMoveState[tracker.id] = {
+        canMoveUp = itemIndex > 1 or sectionIndex > 1,
+        canMoveDown = itemIndex < #section.items or sectionIndex < #trackerSections,
+      }
+    end)
+  end)
   local raidDifficulties = Data:GetRaidDifficulties()
   local characterInfo = self:GetCharacterInfo()
   local raids = Data:GetRaids()
@@ -1672,6 +1682,16 @@ function Module:Render()
                 currency.id
               )
             end)
+            do
+              local resetTrackerOrderButton = menu:CreateButton("Reset custom order", function()
+                Data:ResetTrackerOrder()
+                self:Render()
+              end)
+              resetTrackerOrderButton:SetTooltip(function(tooltip, elm)
+                tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+                tooltip:AddLine("Undo any reordering/recategorizing done via the hover arrows on Currencies, Weeklies and Seasonal Chores.", nil, nil, nil, true)
+              end)
+            end
             menu:CreateDivider()
             menu:CreateTitle(INTERFACE_OPTIONS)
             menu:CreateCheckbox(
@@ -2307,9 +2327,32 @@ function Module:Render()
             label.text:SetJustifyH("LEFT")
             label.text:SetFontObject("GameFontHighlight_NoShadow")
             self.window.body.sidebar.currencyLabels[currencyIndex] = label
+            label.SortUpButton = CreateFrame("Button", label:GetName() .. "SortUp", label)
+            label.SortUpButton:SetSize(14, Constants.sizes.row / 2)
+            label.SortUpButton:SetPoint("TOPRIGHT", label, "TOPRIGHT")
+            label.SortUpButton.Icon = label.SortUpButton:CreateTexture(label.SortUpButton:GetName() .. "Icon", "ARTWORK")
+            label.SortUpButton.Icon:SetAtlas("common-icon-forwardarrow", true)
+            label.SortUpButton.Icon:SetRotation(math.rad(90))
+            label.SortUpButton.Icon:SetDesaturation(1)
+            label.SortUpButton.Icon:SetSize(8, 8)
+            label.SortUpButton.Icon:SetPoint("CENTER", label.SortUpButton, "CENTER", 0, 0)
+            label.SortUpButton:Hide()
+            
+            label.SortDownButton = CreateFrame("Button", label:GetName() .. "SortDown", label)
+            label.SortDownButton:SetSize(14, Constants.sizes.row / 2)
+            label.SortDownButton:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT")
+            label.SortDownButton.Icon = label.SortDownButton:CreateTexture(label.SortDownButton:GetName() .. "Icon", "ARTWORK")
+            label.SortDownButton.Icon:SetAtlas("common-icon-forwardarrow", true)
+            label.SortDownButton.Icon:SetRotation(math.rad(-90))
+            label.SortDownButton.Icon:SetDesaturation(1)
+            label.SortDownButton.Icon:SetSize(8, 8)
+            label.SortDownButton.Icon:SetPoint("CENTER", label.SortDownButton, "CENTER", 0, 0)
+            label.SortDownButton:Hide()
           end
 
-          local color = ITEM_QUALITY_COLORS[currency.quality or Enum.ItemQuality.Common]
+          local color = EPIC_PURPLE_COLOR -- match Heroic difficulty skulls
+
+          local trackerMove = trackerMoveState[currency.id]
 
           label:SetScript("OnEnter", function()
             GameTooltip:SetOwner(label, "ANCHOR_RIGHT")
@@ -2322,9 +2365,53 @@ function Module:Render()
               GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
             end
             GameTooltip:Show()
+            label.SortUpButton:Hide()
+            label.SortDownButton:Hide()
+            if not InCombatLockdown() then
+              label.SortUpButton:SetPropagateMouseMotion(true)
+              label.SortDownButton:SetPropagateMouseMotion(true)
+              if trackerMove and trackerMove.canMoveUp then label.SortUpButton:Show() end
+              if trackerMove and trackerMove.canMoveDown then label.SortDownButton:Show() end
+            end
           end)
           label:SetScript("OnLeave", function()
             GameTooltip:Hide()
+            label.SortUpButton:Hide()
+            label.SortDownButton:Hide()
+          end)
+
+          label.SortUpButton:SetScript("OnEnter", function()
+            label.SortUpButton.Icon:SetDesaturation(0)
+            GameTooltip:SetOwner(label.SortUpButton, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Custom Order", 1, 1, 1, 1, true)
+            GameTooltip:AddLine("Move this tracker up.")
+            GameTooltip:AddLine("At the top of a section, it moves into the section above.", nil, nil, nil, true)
+            GameTooltip:Show()
+          end)
+          label.SortUpButton:SetScript("OnLeave", function()
+            label.SortUpButton.Icon:SetDesaturation(1)
+            GameTooltip:Hide()
+          end)
+          label.SortUpButton:SetScript("OnClick", function()
+            Data:SortTracker(currency, -1)
+            self:Render()
+          end)
+
+          label.SortDownButton:SetScript("OnEnter", function()
+            label.SortDownButton.Icon:SetDesaturation(0)
+            GameTooltip:SetOwner(label.SortDownButton, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Custom Order", 1, 1, 1, 1, true)
+            GameTooltip:AddLine("Move this tracker down.")
+            GameTooltip:AddLine("At the bottom of a section, it moves into the section below.", nil, nil, nil, true)
+            GameTooltip:Show()
+          end)
+          label.SortDownButton:SetScript("OnLeave", function()
+            label.SortDownButton.Icon:SetDesaturation(1)
+            GameTooltip:Hide()
+          end)
+          label.SortDownButton:SetScript("OnClick", function()
+            Data:SortTracker(currency, 1)
+            self:Render()
           end)
 
           label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
@@ -2334,6 +2421,7 @@ function Module:Render()
           label.text:SetText(currency.short and currency.short or currency.name)
           label.text:SetTextColor(color.r, color.g, color.b)
           label:Show()
+          RegisterRowHighlightFrame(label, totalHeight, Constants.sizes.row)
           rowCount = rowCount + 1
           totalHeight = totalHeight + Constants.sizes.row
         end)
@@ -2386,9 +2474,32 @@ function Module:Render()
             label.text:SetJustifyH("LEFT")
             label.text:SetFontObject("GameFontHighlight_NoShadow")
             self.window.body.sidebar.weeklyLabels[currencyIndex] = label
+            label.SortUpButton = CreateFrame("Button", label:GetName() .. "SortUp", label)
+            label.SortUpButton:SetSize(14, Constants.sizes.row / 2)
+            label.SortUpButton:SetPoint("TOPRIGHT", label, "TOPRIGHT")
+            label.SortUpButton.Icon = label.SortUpButton:CreateTexture(label.SortUpButton:GetName() .. "Icon", "ARTWORK")
+            label.SortUpButton.Icon:SetAtlas("common-icon-forwardarrow", true)
+            label.SortUpButton.Icon:SetRotation(math.rad(90))
+            label.SortUpButton.Icon:SetDesaturation(1)
+            label.SortUpButton.Icon:SetSize(8, 8)
+            label.SortUpButton.Icon:SetPoint("CENTER", label.SortUpButton, "CENTER", 0, 0)
+            label.SortUpButton:Hide()
+            
+            label.SortDownButton = CreateFrame("Button", label:GetName() .. "SortDown", label)
+            label.SortDownButton:SetSize(14, Constants.sizes.row / 2)
+            label.SortDownButton:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT")
+            label.SortDownButton.Icon = label.SortDownButton:CreateTexture(label.SortDownButton:GetName() .. "Icon", "ARTWORK")
+            label.SortDownButton.Icon:SetAtlas("common-icon-forwardarrow", true)
+            label.SortDownButton.Icon:SetRotation(math.rad(-90))
+            label.SortDownButton.Icon:SetDesaturation(1)
+            label.SortDownButton.Icon:SetSize(8, 8)
+            label.SortDownButton.Icon:SetPoint("CENTER", label.SortDownButton, "CENTER", 0, 0)
+            label.SortDownButton:Hide()
           end
 
-          local color = ITEM_QUALITY_COLORS[currency.quality or Enum.ItemQuality.Common]
+          local color = RARE_BLUE_COLOR -- match Normal difficulty skulls
+
+          local trackerMove = trackerMoveState[currency.id]
 
           label:SetScript("OnEnter", function()
             GameTooltip:SetOwner(label, "ANCHOR_RIGHT")
@@ -2401,9 +2512,53 @@ function Module:Render()
               GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
             end
             GameTooltip:Show()
+            label.SortUpButton:Hide()
+            label.SortDownButton:Hide()
+            if not InCombatLockdown() then
+              label.SortUpButton:SetPropagateMouseMotion(true)
+              label.SortDownButton:SetPropagateMouseMotion(true)
+              if trackerMove and trackerMove.canMoveUp then label.SortUpButton:Show() end
+              if trackerMove and trackerMove.canMoveDown then label.SortDownButton:Show() end
+            end
           end)
           label:SetScript("OnLeave", function()
             GameTooltip:Hide()
+            label.SortUpButton:Hide()
+            label.SortDownButton:Hide()
+          end)
+
+          label.SortUpButton:SetScript("OnEnter", function()
+            label.SortUpButton.Icon:SetDesaturation(0)
+            GameTooltip:SetOwner(label.SortUpButton, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Custom Order", 1, 1, 1, 1, true)
+            GameTooltip:AddLine("Move this tracker up.")
+            GameTooltip:AddLine("At the top of a section, it moves into the section above.", nil, nil, nil, true)
+            GameTooltip:Show()
+          end)
+          label.SortUpButton:SetScript("OnLeave", function()
+            label.SortUpButton.Icon:SetDesaturation(1)
+            GameTooltip:Hide()
+          end)
+          label.SortUpButton:SetScript("OnClick", function()
+            Data:SortTracker(currency, -1)
+            self:Render()
+          end)
+
+          label.SortDownButton:SetScript("OnEnter", function()
+            label.SortDownButton.Icon:SetDesaturation(0)
+            GameTooltip:SetOwner(label.SortDownButton, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Custom Order", 1, 1, 1, 1, true)
+            GameTooltip:AddLine("Move this tracker down.")
+            GameTooltip:AddLine("At the bottom of a section, it moves into the section below.", nil, nil, nil, true)
+            GameTooltip:Show()
+          end)
+          label.SortDownButton:SetScript("OnLeave", function()
+            label.SortDownButton.Icon:SetDesaturation(1)
+            GameTooltip:Hide()
+          end)
+          label.SortDownButton:SetScript("OnClick", function()
+            Data:SortTracker(currency, 1)
+            self:Render()
           end)
 
           label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
@@ -2466,9 +2621,32 @@ function Module:Render()
             label.text:SetJustifyH("LEFT")
             label.text:SetFontObject("GameFontHighlight_NoShadow")
             self.window.body.sidebar.seasonalChoreLabels[currencyIndex] = label
+            label.SortUpButton = CreateFrame("Button", label:GetName() .. "SortUp", label)
+            label.SortUpButton:SetSize(14, Constants.sizes.row / 2)
+            label.SortUpButton:SetPoint("TOPRIGHT", label, "TOPRIGHT")
+            label.SortUpButton.Icon = label.SortUpButton:CreateTexture(label.SortUpButton:GetName() .. "Icon", "ARTWORK")
+            label.SortUpButton.Icon:SetAtlas("common-icon-forwardarrow", true)
+            label.SortUpButton.Icon:SetRotation(math.rad(90))
+            label.SortUpButton.Icon:SetDesaturation(1)
+            label.SortUpButton.Icon:SetSize(8, 8)
+            label.SortUpButton.Icon:SetPoint("CENTER", label.SortUpButton, "CENTER", 0, 0)
+            label.SortUpButton:Hide()
+            
+            label.SortDownButton = CreateFrame("Button", label:GetName() .. "SortDown", label)
+            label.SortDownButton:SetSize(14, Constants.sizes.row / 2)
+            label.SortDownButton:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT")
+            label.SortDownButton.Icon = label.SortDownButton:CreateTexture(label.SortDownButton:GetName() .. "Icon", "ARTWORK")
+            label.SortDownButton.Icon:SetAtlas("common-icon-forwardarrow", true)
+            label.SortDownButton.Icon:SetRotation(math.rad(-90))
+            label.SortDownButton.Icon:SetDesaturation(1)
+            label.SortDownButton.Icon:SetSize(8, 8)
+            label.SortDownButton.Icon:SetPoint("CENTER", label.SortDownButton, "CENTER", 0, 0)
+            label.SortDownButton:Hide()
           end
 
-          local color = ITEM_QUALITY_COLORS[currency.quality or Enum.ItemQuality.Common]
+          local color = LEGENDARY_ORANGE_COLOR -- match Mythic difficulty skulls
+
+          local trackerMove = trackerMoveState[currency.id]
 
           label:SetScript("OnEnter", function()
             GameTooltip:SetOwner(label, "ANCHOR_RIGHT")
@@ -2481,9 +2659,53 @@ function Module:Render()
               GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
             end
             GameTooltip:Show()
+            label.SortUpButton:Hide()
+            label.SortDownButton:Hide()
+            if not InCombatLockdown() then
+              label.SortUpButton:SetPropagateMouseMotion(true)
+              label.SortDownButton:SetPropagateMouseMotion(true)
+              if trackerMove and trackerMove.canMoveUp then label.SortUpButton:Show() end
+              if trackerMove and trackerMove.canMoveDown then label.SortDownButton:Show() end
+            end
           end)
           label:SetScript("OnLeave", function()
             GameTooltip:Hide()
+            label.SortUpButton:Hide()
+            label.SortDownButton:Hide()
+          end)
+
+          label.SortUpButton:SetScript("OnEnter", function()
+            label.SortUpButton.Icon:SetDesaturation(0)
+            GameTooltip:SetOwner(label.SortUpButton, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Custom Order", 1, 1, 1, 1, true)
+            GameTooltip:AddLine("Move this tracker up.")
+            GameTooltip:AddLine("At the top of a section, it moves into the section above.", nil, nil, nil, true)
+            GameTooltip:Show()
+          end)
+          label.SortUpButton:SetScript("OnLeave", function()
+            label.SortUpButton.Icon:SetDesaturation(1)
+            GameTooltip:Hide()
+          end)
+          label.SortUpButton:SetScript("OnClick", function()
+            Data:SortTracker(currency, -1)
+            self:Render()
+          end)
+
+          label.SortDownButton:SetScript("OnEnter", function()
+            label.SortDownButton.Icon:SetDesaturation(0)
+            GameTooltip:SetOwner(label.SortDownButton, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Custom Order", 1, 1, 1, 1, true)
+            GameTooltip:AddLine("Move this tracker down.")
+            GameTooltip:AddLine("At the bottom of a section, it moves into the section below.", nil, nil, nil, true)
+            GameTooltip:Show()
+          end)
+          label.SortDownButton:SetScript("OnLeave", function()
+            label.SortDownButton.Icon:SetDesaturation(1)
+            GameTooltip:Hide()
+          end)
+          label.SortDownButton:SetScript("OnClick", function()
+            Data:SortTracker(currency, 1)
+            self:Render()
           end)
 
           label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
@@ -3142,7 +3364,13 @@ function Module:Render()
             end
 
             local isKilled = bossKills[boss.key]
-            local color = isKilled and boss.color or CreateColor(1, 1, 1)
+            local color = CreateColor(1, 1, 1)
+            if isKilled then
+              color = UNCOMMON_GREEN_COLOR
+              if Data.db.global.raids.colors then
+                color = boss.color
+              end
+            end
             local alpha = isKilled and 0.5 or 0.08
 
             iconFrame.Background:SetTexture(killIcon.texture)
@@ -3209,6 +3437,7 @@ function Module:Render()
           currencyFrame:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
           currencyFrame:SetHeight(Constants.sizes.row)
           currencyFrame:Show()
+          RegisterRowHighlightFrame(currencyFrame, totalHeight, Constants.sizes.row)
           rowCount = rowCount + 1
           totalHeight = totalHeight + Constants.sizes.row
         end)
