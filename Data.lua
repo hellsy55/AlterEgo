@@ -32,9 +32,13 @@ Data.defaultDB = {
     showAffixColors = true,
     showAffixHeader = true,
     showZeroRatedCharacters = true,
+    showEquippedItemLevel = false,
+    showItemLevelDecimals = false,
     showRealms = true,
     showGuildInformation = false,
     currentCharacterMarker = "dot",
+    currentCharacterMarkerColor = nil, ---@type ColorTable? Falls back to DIM_GREEN_FONT_COLOR when unset
+    cachedTimewalkingEra = nil, ---@type "bc"|"wrath"|"cata"|nil Last era read outside protected content
     announceKeystones = {
       autoParty = true,
       multiline = false,
@@ -57,6 +61,7 @@ Data.defaultDB = {
       hiddenDifficulties = {},
       killIcon = "skull",
       modifiedInstanceOnly = true,
+      timewalkingLockouts = false,
     },
     dungeons = {
       enabled = true,
@@ -65,6 +70,20 @@ Data.defaultDB = {
       enabled = true,
     },
     currencies = {
+      enabled = true,
+      hiddenCurrencies = {},
+      showIcons = true,
+      showMaxEarned = true,
+      alignCenter = true,
+    },
+    weeklies = {
+      enabled = true,
+      hiddenCurrencies = {},
+      showIcons = true,
+      showMaxEarned = true,
+      alignCenter = true,
+    },
+    seasonalChores = {
       enabled = true,
       hiddenCurrencies = {},
       showIcons = true,
@@ -236,6 +255,7 @@ function Data:GetCurrencies()
         iconFileID = currency.iconFileID,
         quality = Enum.ItemQuality.Rare,
         currencyType = currency.currencyType,
+        category = currency.category,
         resets = currency.resets,
         tooltipNote = currency.tooltipNote,
         maxQuantity = 0,
@@ -256,6 +276,7 @@ function Data:GetCurrencies()
         iconFileID = C_Item.GetItemIconByID(currency.id) or 0,
         quality = Enum.ItemQuality.Rare,
         currencyType = currency.currencyType,
+        category = currency.category,
         useTotalEarnedForMaxQty = currency.useTotalEarnedForMaxQty,
         tooltipNote = currency.tooltipNote,
         maxQuantity = 0,
@@ -267,10 +288,31 @@ function Data:GetCurrencies()
       table.insert(currencies, currencyInfo)
       return
     end
+    if currency.currencyType == "gildedStash" then
+      ---@type AE_CurrencyInfo
+      local gildedStashInfo = {
+        id = currency.id,
+        name = currency.name or "Gilded Stash",
+        description = "Weekly Gilded Stash progress from Delves.",
+        iconFileID = currency.iconFileID,
+        quality = Enum.ItemQuality.Rare,
+        currencyType = currency.currencyType,
+        category = currency.category,
+        tooltipNote = currency.tooltipNote,
+        maxQuantity = 0,
+        maxWeeklyQuantity = 0,
+        quantity = 0,
+        totalEarned = 0,
+        quantityEarnedThisWeek = 0,
+      }
+      table.insert(currencies, gildedStashInfo)
+      return
+    end
     local currencyInfo = C_CurrencyInfo.GetCurrencyInfo(currency.id)
     if currencyInfo then
       currencyInfo.id = currency.id
       currencyInfo.currencyType = currency.currencyType
+      currencyInfo.category = currency.category
       currencyInfo.tooltipNote = currency.tooltipNote
       table.insert(currencies, currencyInfo)
     end
@@ -278,7 +320,84 @@ function Data:GetCurrencies()
   return currencies
 end
 
----Whether a one-time (per account) quest tracker was completed by any stored character
+---The weekly +50% reputation buff each classic-raid Timewalking event grants the player.
+---These are stable, hardcoded spell IDs (not tied to the calendar), so checking for them directly
+---is far more reliable than trying to parse calendar event text.
+local TIMEWALKING_ERA_BUFFS = {
+  { key = "bc", spellID = 335148 }, -- Sign of the Twisting Nether
+  { key = "wrath", spellID = 335149 }, -- Sign of the Scourge
+  { key = "cata", spellID = 335150 }, -- Sign of the Destroyer
+}
+
+---Detect which classic-raid Timewalking event (if any) is currently active, by checking for the
+---weekly reputation buff each event grants the player. Reading auras is blocked inside protected
+---content (e.g. Midnight raid instances), so the last successfully-read result is persisted and
+---reused whenever a fresh read isn't allowed, instead of losing the detection while inside.
+---@return "bc"|"wrath"|"cata"|nil
+function Data:GetActiveTimewalkingEra()
+  local ok, result = pcall(function()
+    for _, buff in ipairs(TIMEWALKING_ERA_BUFFS) do
+      local aura = C_UnitAuras.GetPlayerAuraBySpellID(buff.spellID)
+      if aura then
+        return buff.key
+      end
+    end
+    return nil
+  end)
+
+  if ok then
+    self.db.global.cachedTimewalkingEra = result
+    return result
+  end
+
+  -- Aura data isn't readable here (protected content); fall back to the last known reading.
+  return self.db.global.cachedTimewalkingEra
+end
+
+---Check this week's lockout status for the classic Timewalking raid finale bosses: Illidan
+---Stormrage (Black Temple), Yogg-Saron (Ulduar) and Ragnaros (Firelands).
+---@return table<string, boolean> killed keyed by "illidan" | "yoggsaron" | "ragnaros"
+---Check this week's lockout status for the classic Timewalking raid finale bosses: Illidan
+---Stormrage (Black Temple), Yogg-Saron (Ulduar) and Ragnaros (Firelands), for a specific stored
+---character. Reading saved-instance data is blocked inside protected content (e.g. Midnight raid
+---instances), so the last successfully-read result is persisted per character and reused whenever
+---a fresh read isn't allowed (such as when that same character is the one currently inside).
+---@param character AE_Character
+---@return table<string, boolean> killed keyed by "illidan" | "yoggsaron" | "ragnaros"
+function Data:GetTimewalkingBossKills(character)
+  local defaultKills = { illidan = false, yoggsaron = false, ragnaros = false }
+  if not character then return defaultKills end
+
+  local bossesByInstance = {
+    ["black temple"] = { key = "illidan", bossName = "illidan stormrage" },
+    ["ulduar"] = { key = "yoggsaron", bossName = "yogg-saron" },
+    ["firelands"] = { key = "ragnaros", bossName = "ragnaros" },
+  }
+
+  local ok, kills = pcall(function()
+    local result = { illidan = false, yoggsaron = false, ragnaros = false }
+    TableForEach(character.raids.savedInstances or {}, function(savedInstance)
+      if not (savedInstance.expires > time()) then return end
+      local instanceMatch = bossesByInstance[string.lower(savedInstance.name or "")]
+      if not instanceMatch then return end
+      TableForEach(savedInstance.encounters or {}, function(encounter)
+        if string.lower(encounter.bossName or "") == instanceMatch.bossName then
+          result[instanceMatch.key] = encounter.isKilled == true
+        end
+      end)
+    end)
+    return result
+  end)
+
+  if ok then
+    character.raids.cachedTimewalkingKills = kills
+    return kills
+  end
+
+  -- Saved-instance data isn't readable here (protected content); fall back to the last known
+  -- reading for this character, or all-false if we never got one.
+  return character.raids.cachedTimewalkingKills or defaultKills
+end
 ---@param currencyID number
 ---@return boolean
 function Data:IsQuestCompletedOnAccount(currencyID)
@@ -991,6 +1110,92 @@ function Data:UpdatePreyProgress()
   end)
 end
 
+---Compute the character's equipped item level and its "including bags" counterpart using the same
+---simple unweighted-average methodology for both, so the two numbers are always directly
+---comparable (potential is guaranteed to be >= equipped). Blizzard's own GetAverageItemLevel()
+---uses a different (weighted) formula for its equipped value and doesn't factor in bags at all
+---despite older documentation suggesting otherwise, so mixing the two produced nonsensical results
+---(bags appearing lower than equipped). Computing both ourselves avoids that mismatch.
+---@return number? equippedLevel, number? potentialLevel
+---Estimate the average per-slot item level upgrade currently sitting unequipped in bags, by
+---comparing each equipped item against any matching item in bags and taking the difference. This
+---is meant to be added on top of Blizzard's own (official, character-panel-accurate)
+---avgItemLevelEquipped, rather than used as a standalone number, since our own per-slot average
+---uses different weighting than Blizzard's formula and wouldn't match the character panel if
+---displayed directly. Adding a non-negative delta on top keeps the displayed equipped value
+---exactly what the character panel shows, while guaranteeing "in bags" is never lower than it.
+---@return number delta Always >= 0
+function Data:CalculateBagItemLevelUpgrade()
+  local slotEquipLocs = {
+    [INVSLOT_HEAD] = { "INVTYPE_HEAD" },
+    [INVSLOT_NECK] = { "INVTYPE_NECK" },
+    [INVSLOT_SHOULDER] = { "INVTYPE_SHOULDER" },
+    [INVSLOT_BACK] = { "INVTYPE_CLOAK" },
+    [INVSLOT_CHEST] = { "INVTYPE_CHEST", "INVTYPE_ROBE" },
+    [INVSLOT_WRIST] = { "INVTYPE_WRIST" },
+    [INVSLOT_HAND] = { "INVTYPE_HAND" },
+    [INVSLOT_WAIST] = { "INVTYPE_WAIST" },
+    [INVSLOT_LEGS] = { "INVTYPE_LEGS" },
+    [INVSLOT_FEET] = { "INVTYPE_FEET" },
+    [INVSLOT_FINGER1] = { "INVTYPE_FINGER" },
+    [INVSLOT_FINGER2] = { "INVTYPE_FINGER" },
+    [INVSLOT_TRINKET1] = { "INVTYPE_TRINKET" },
+    [INVSLOT_TRINKET2] = { "INVTYPE_TRINKET" },
+    [INVSLOT_MAINHAND] = { "INVTYPE_WEAPON", "INVTYPE_2HWEAPON", "INVTYPE_WEAPONMAINHAND", "INVTYPE_RANGED", "INVTYPE_RANGEDRIGHT", "INVTYPE_RELIC" },
+    [INVSLOT_OFFHAND] = { "INVTYPE_WEAPON", "INVTYPE_WEAPONOFFHAND", "INVTYPE_SHIELD", "INVTYPE_HOLDABLE" },
+  }
+  local twoHandEquipLocs = { INVTYPE_2HWEAPON = true, INVTYPE_RANGED = true, INVTYPE_RANGEDRIGHT = true }
+
+  local equippedMainHandLink = GetInventoryItemLink("player", INVSLOT_MAINHAND)
+  local mainHandIsTwoHanded = false
+  if equippedMainHandLink then
+    local _, _, _, mainHandEquipLoc = C_Item.GetItemInfoInstant(equippedMainHandLink)
+    mainHandIsTwoHanded = mainHandEquipLoc ~= nil and twoHandEquipLocs[mainHandEquipLoc] == true
+  end
+
+  -- Index bag items by equip location for quick lookup.
+  local bagItemsByEquipLoc = {}
+  for bag = 0, NUM_BAG_SLOTS do
+    local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+    for containerSlot = 1, numSlots do
+      local itemLink = C_Container.GetContainerItemLink(bag, containerSlot)
+      if itemLink then
+        local _, _, _, equipLoc = C_Item.GetItemInfoInstant(itemLink)
+        if equipLoc and equipLoc ~= "" and equipLoc ~= "INVTYPE_NON_EQUIP_IGNORE" then
+          bagItemsByEquipLoc[equipLoc] = bagItemsByEquipLoc[equipLoc] or {}
+          table.insert(bagItemsByEquipLoc[equipLoc], itemLink)
+        end
+      end
+    end
+  end
+
+  local deltaTotal, count = 0, 0
+  for slotID, equipLocs in pairs(slotEquipLocs) do
+    if not (slotID == INVSLOT_OFFHAND and mainHandIsTwoHanded) then
+      local equippedLink = GetInventoryItemLink("player", slotID)
+      local equippedLevel = equippedLink and C_Item.GetDetailedItemLevelInfo(equippedLink)
+      if equippedLevel and equippedLevel > 0 then
+        local bestLevel = equippedLevel
+
+        for _, equipLoc in ipairs(equipLocs) do
+          for _, itemLink in ipairs(bagItemsByEquipLoc[equipLoc] or {}) do
+            local itemLevel = C_Item.GetDetailedItemLevelInfo(itemLink)
+            if itemLevel and itemLevel > bestLevel then
+              bestLevel = itemLevel
+            end
+          end
+        end
+
+        deltaTotal = deltaTotal + (bestLevel - equippedLevel)
+        count = count + 1
+      end
+    end
+  end
+
+  if count == 0 then return 0 end
+  return deltaTotal / count
+end
+
 ---Refresh general character info from the API
 function Data:UpdateCharacterInfo()
   local character = self:GetCharacter()
@@ -1003,6 +1208,7 @@ function Data:UpdateCharacterInfo()
   local playerClassName, playerClassFile, playerClassID = UnitClass("player")
   local playerFactionGroupEnglish, playerFactionGroupLocalized = UnitFactionGroup("player")
   local avgItemLevel, avgItemLevelEquipped, avgItemLevelPvp = GetAverageItemLevel()
+  local bagUpgradeDelta = self:CalculateBagItemLevelUpgrade()
   local itemLevelColorR, itemLevelColorG, itemLevelColorB = GetItemLevelColor()
   local guildName, guildRankName, guildRankIndex, guildRealm = GetGuildInfo("player")
   local isInGuild = IsInGuild()
@@ -1024,6 +1230,7 @@ function Data:UpdateCharacterInfo()
   if avgItemLevel then character.info.ilvl.level = avgItemLevel end
   if avgItemLevelEquipped then character.info.ilvl.equipped = avgItemLevelEquipped end
   if avgItemLevelPvp then character.info.ilvl.pvp = avgItemLevelPvp end
+  if avgItemLevelEquipped then character.info.ilvl.potential = avgItemLevelEquipped + bagUpgradeDelta end
   if itemLevelColorR and itemLevelColorG and itemLevelColorB then character.info.ilvl.color = CreateColor(itemLevelColorR, itemLevelColorG, itemLevelColorB):GenerateHexColor() end
   if type(character.info.guild) ~= "table" then character.info.guild = self.defaultCharacter.info.guild end
   character.info.guild.name = guildName
@@ -1052,6 +1259,11 @@ function Data:UpdateCurrencies()
   local character = self:GetCharacter()
   if not character then return end
   local seasonID = self:GetCurrentSeason()
+
+  -- Gilded Stash progress is only readable from the API while near Silvermoon City (or otherwise
+  -- triggering the spell visual). Grab whatever we already had stored before wiping the table, so
+  -- it can be carried forward when the live widget has nothing to report this time.
+  local previousGildedStash = TableGet(character.currencies or {}, "id", "gildedStash")
 
   character.currencies = wipe(character.currencies or {})
 
@@ -1106,6 +1318,34 @@ function Data:UpdateCurrencies()
         questCompleted = dataCurrency.questID ~= nil and C_QuestLog.IsQuestFlaggedCompleted(dataCurrency.questID) == true,
       }
       table.insert(character.currencies, delveMapCurrency)
+      return
+    end
+    if dataCurrency.currencyType == "gildedStash" then
+      -- Mirrors how WeeklyRewards reads Gilded Stash progress: this widget is only populated
+      -- client-side after visiting Silvermoon City (or otherwise triggering the spell visual).
+      local fulfilled = nil
+      local widget = dataCurrency.spellID and C_UIWidgetManager.GetSpellDisplayVisualizationInfo(dataCurrency.spellID)
+      if widget and widget.spellInfo and widget.spellInfo.tooltip then
+        local _, fulfilledText = widget.spellInfo.tooltip:match("COLOR:([^%d]*(%d)/4)")
+        fulfilled = tonumber(fulfilledText)
+      end
+
+      if fulfilled == nil and previousGildedStash then
+        -- Not near Silvermoon (or logged out and back in) right now: keep the last known reading
+        -- instead of resetting the display to "No Data".
+        fulfilled = previousGildedStash.fulfilled
+      end
+
+      ---@type AE_CharacterCurrency
+      local gildedStashCurrency = {
+        id = dataCurrency.id,
+        currencyType = dataCurrency.currencyType,
+        name = dataCurrency.name or "Gilded Stash",
+        iconFileID = dataCurrency.iconFileID,
+        fulfilled = fulfilled,
+        total = fulfilled ~= nil and 4 or nil,
+      }
+      table.insert(character.currencies, gildedStashCurrency)
       return
     end
 

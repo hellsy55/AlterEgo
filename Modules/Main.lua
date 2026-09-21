@@ -484,7 +484,8 @@ function Module:GetCharacterInfo(unfiltered)
           return coloredName
         end
         local marker = Data.db.global.currentCharacterMarker
-        local currentColor = GREEN_FONT_COLOR
+        local markerColor = Data.db.global.currentCharacterMarkerColor
+        local currentColor = markerColor and CreateColor(markerColor.r, markerColor.g, markerColor.b) or GREEN_FONT_COLOR
         if marker == "brackets" then
           return currentColor:WrapTextInColorCode("[ ") .. coloredName .. currentColor:WrapTextInColorCode(" ]")
         end
@@ -602,8 +603,16 @@ function Module:GetCharacterInfo(unfiltered)
         local itemLevel = "-"
         local itemLevelColor = LIGHTGRAY_FONT_COLOR:GenerateHexColor()
         if character.info.ilvl ~= nil then
-          if character.info.ilvl.level ~= nil then
-            itemLevel = tostring(floor(character.info.ilvl.level))
+          local displayLevel = character.info.ilvl.potential or character.info.ilvl.level
+          if Data.db.global.showEquippedItemLevel and character.info.ilvl.equipped ~= nil then
+            displayLevel = character.info.ilvl.equipped
+          end
+          if displayLevel ~= nil then
+            if Data.db.global.showItemLevelDecimals then
+              itemLevel = format("%.2f", displayLevel)
+            else
+              itemLevel = tostring(floor(displayLevel))
+            end
           end
           if character.info.ilvl.color then
             itemLevelColor = character.info.ilvl.color
@@ -617,16 +626,19 @@ function Module:GetCharacterInfo(unfiltered)
         local itemLevelTooltip = ""
         local itemLevelTooltip2 = STAT_AVERAGE_ITEM_LEVEL_TOOLTIP
         if character.info.ilvl ~= nil then
-          if character.info.ilvl.level ~= nil then
-            itemLevelTooltip = itemLevelTooltip .. HIGHLIGHT_FONT_COLOR_CODE .. format(PAPERDOLLFRAME_TOOLTIP_FORMAT, STAT_AVERAGE_ITEM_LEVEL) .. " " .. floor(character.info.ilvl.level)
-          end
-          if character.info.ilvl.level ~= nil and character.info.ilvl.equipped ~= nil and character.info.ilvl.level ~= character.info.ilvl.equipped then
-            itemLevelTooltip = itemLevelTooltip .. "  " .. format(STAT_AVERAGE_ITEM_LEVEL_EQUIPPED, character.info.ilvl.equipped)
-          end
-          if character.info.ilvl.level ~= nil then
+          local decimals = Data.db.global.showItemLevelDecimals and 2 or 0
+          local equipped = character.info.ilvl.equipped
+          local inBags = character.info.ilvl.potential or character.info.ilvl.level
+          if equipped ~= nil then
+            itemLevelTooltip = HIGHLIGHT_FONT_COLOR_CODE .. "Item Level " .. format("%." .. decimals .. "f", equipped)
+            if inBags ~= nil and floor(inBags) ~= floor(equipped) then
+              itemLevelTooltip = itemLevelTooltip .. format(" (%." .. decimals .. "f in bags)", inBags)
+            end
             itemLevelTooltip = itemLevelTooltip .. FONT_COLOR_CODE_CLOSE
+          elseif inBags ~= nil then
+            itemLevelTooltip = HIGHLIGHT_FONT_COLOR_CODE .. "Item Level " .. format("%." .. decimals .. "f", inBags) .. FONT_COLOR_CODE_CLOSE
           end
-          if character.info.ilvl.level ~= nil and character.info.ilvl.pvp ~= nil and floor(character.info.ilvl.level) ~= character.info.ilvl.pvp then
+          if inBags ~= nil and character.info.ilvl.pvp ~= nil and floor(inBags) ~= character.info.ilvl.pvp then
             itemLevelTooltip2 = itemLevelTooltip2 .. "\n\n" .. STAT_AVERAGE_PVP_ITEM_LEVEL:format(tostring(floor(character.info.ilvl.pvp)))
           end
         end
@@ -875,12 +887,321 @@ function Module:GetCharacterInfo(unfiltered)
   end)
 end
 
+---Populate a currency/seasonal-chore cell text and tooltip based on its currencyType.
+---@param currencyFrame table
+---@param currency AE_CurrencyInfo
+---@param characterCurrency AE_CharacterCurrency?
+---@param settings table
+---Show a full-width row highlight spanning the sidebar and every character column, at the given
+---vertical offset. Used so hovering any cell in a Currencies/Weeklies/Seasonal Chores row makes it
+---obvious which row that is across the whole grid.
+---@param rowTop number
+---@param rowHeight number
+function Module:ShowRowHighlight(rowTop, rowHeight)
+  if not self.window then return end
+
+  local sidebar = self.window.body.sidebar
+  if sidebar then
+    local highlight = sidebar.rowHighlight
+    if not highlight then
+      highlight = sidebar:CreateTexture(nil, "OVERLAY")
+      highlight:SetColorTexture(1, 1, 1, 0.06)
+      sidebar.rowHighlight = highlight
+    end
+    highlight:ClearAllPoints()
+    highlight:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 0, -rowTop)
+    highlight:SetPoint("TOPRIGHT", sidebar, "TOPRIGHT", 0, -rowTop)
+    highlight:SetHeight(rowHeight)
+    highlight:Show()
+  end
+
+  local scrollContent = self.window.body.content and self.window.body.content.scrollArea and self.window.body.content.scrollArea.content
+  if scrollContent then
+    local highlight = scrollContent.rowHighlight
+    if not highlight then
+      highlight = scrollContent:CreateTexture(nil, "OVERLAY")
+      highlight:SetColorTexture(1, 1, 1, 0.06)
+      scrollContent.rowHighlight = highlight
+    end
+    highlight:ClearAllPoints()
+    highlight:SetPoint("TOPLEFT", scrollContent, "TOPLEFT", 0, -rowTop)
+    highlight:SetPoint("TOPRIGHT", scrollContent, "TOPRIGHT", 0, -rowTop)
+    highlight:SetHeight(rowHeight)
+    highlight:Show()
+  end
+end
+
+---Hide the full-width row highlight shown by Module:ShowRowHighlight.
+function Module:HideRowHighlight()
+  if not self.window then return end
+  local sidebar = self.window.body.sidebar
+  if sidebar and sidebar.rowHighlight then
+    sidebar.rowHighlight:Hide()
+  end
+  local scrollContent = self.window.body.content and self.window.body.content.scrollArea and self.window.body.content.scrollArea.content
+  if scrollContent and scrollContent.rowHighlight then
+    scrollContent.rowHighlight:Hide()
+  end
+end
+
+---Register (or refresh) a frame for the full-row highlight system. Safe to call every render:
+---entries are rebuilt from scratch each time via ResetRowHighlightFrames, so this just appends.
+---A single throttled OnUpdate poller (installed once, see EnsureRowHighlightPoller) checks
+---IsMouseOver() on these each frame instead of relying on OnEnter/OnLeave, since those events
+---don't reliably refire when Module:Render() hides/repositions/reshows frames under an already
+---stationary cursor (which happens on every periodic data refresh), causing the highlight to
+---silently stop working after the first hover.
+---@param frame table
+---@param rowTop number
+---@param rowHeight number
+local function RegisterRowHighlightFrame(frame, rowTop, rowHeight)
+  Module.rowHighlightFrames = Module.rowHighlightFrames or {}
+  table.insert(Module.rowHighlightFrames, { frame = frame, rowTop = rowTop, rowHeight = rowHeight })
+end
+
+---Clear the list of frames tracked for the row-highlight poller. Called at the start of each
+---Render() so stale entries (e.g. for a currency that got hidden) don't linger.
+local function ResetRowHighlightFrames()
+  Module.rowHighlightFrames = {}
+end
+
+---Install the row-highlight poller once. Throttled to a few times a second; cheap since it's
+---just IsMouseOver() checks against a short list.
+local function EnsureRowHighlightPoller(window)
+  if window.rowHighlightPollerInstalled then return end
+  window.rowHighlightPollerInstalled = true
+  local elapsed = 0
+  window:HookScript("OnUpdate", function(_, dt)
+    elapsed = elapsed + dt
+    if elapsed < 0.05 then return end
+    elapsed = 0
+    local hovered = nil
+    for _, entry in ipairs(Module.rowHighlightFrames or {}) do
+      if entry.frame:IsShown() and entry.frame:IsMouseOver() then
+        hovered = entry
+        break
+      end
+    end
+    if hovered then
+      Module:ShowRowHighlight(hovered.rowTop, hovered.rowHeight)
+    else
+      Module:HideRowHighlight()
+    end
+  end)
+end
+
+local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, settings)
+  local cellColor = CAMPAIGN_COMPLETE_COLOR
+  local cellValue = "0"
+  local infoIcon = CreateSimpleTextureMarkup(currency.iconFileID or [[Interface\Icons\INV_Misc_QuestionMark]])
+
+  if currency.currencyType == "delveMap" then
+    local statusValue = "-"
+    local cellText = GRAY_FONT_COLOR:WrapTextInColorCode("-")
+    if characterCurrency then
+      if characterCurrency.hasBuff then
+        statusValue = "Active"
+        cellText = CreateAtlasMarkup("QuestTurnin", 16, 16)
+      elseif (characterCurrency.bagCount or 0) > 0 then
+        statusValue = "In bags"
+        cellText = CreateAtlasMarkup("QuestTurnin", 16, 16)
+      elseif characterCurrency.questCompleted then
+        statusValue = "Completed"
+        cellText = CreateAtlasMarkup("common-icon-checkmark", 16, 16)
+      else
+        statusValue = "Available"
+        cellText = CreateAtlasMarkup("Recurringavailablequesticon", 16, 16)
+      end
+    end
+
+    currencyFrame.Text:SetText(cellText)
+    currencyFrame.Text:SetJustifyH(settings.alignCenter and "CENTER" or "LEFT")
+    currencyFrame:SetScript("OnEnter", function()
+      GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
+      GameTooltip:SetText(currency.name, 1, 1, 1)
+      if not characterCurrency then
+        GameTooltip:AddDoubleLine("Status:", "No Data", nil, nil, nil, 1, 1, 1)
+        GameTooltip:AddLine("Log your character to update.", 1, 1, 1, true)
+      else
+        GameTooltip:AddDoubleLine("Status:", statusValue, nil, nil, nil, 1, 1, 1)
+        GameTooltip:AddDoubleLine("In bags:", tostring(characterCurrency.bagCount or 0), nil, nil, nil, 1, 1, 1)
+        GameTooltip:AddDoubleLine("Buff active:", characterCurrency.hasBuff and "Yes" or "No", nil, nil, nil, 1, 1, 1)
+      end
+      if currency.tooltipNote then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
+      end
+      GameTooltip:Show()
+      SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
+    end)
+  elseif currency.currencyType == "quest" then
+    local isAccountQuest = currency.resets == "account"
+    local completed = characterCurrency ~= nil and characterCurrency.questCompleted == true
+    if isAccountQuest and not completed then
+      -- Once per account: completed on any character counts for all of them
+      completed = Data:IsQuestCompletedOnAccount(currency.id)
+    end
+
+    local availableAtlas = "Recurringavailablequesticon"
+    if isAccountQuest and C_Texture.GetAtlasInfo("QuestNormal") then
+      availableAtlas = "QuestNormal"
+    end
+
+    local pendingTurnin = not completed and characterCurrency ~= nil and (characterCurrency.bagCount or 0) > 0
+
+    local statusValue = "-"
+    local cellText = GRAY_FONT_COLOR:WrapTextInColorCode("-")
+    if completed then
+      statusValue = "Completed"
+      cellText = CreateAtlasMarkup("common-icon-checkmark", 16, 16)
+    elseif pendingTurnin then
+      statusValue = "In bags"
+      cellText = CreateSimpleTextureMarkup([[Interface\RaidFrame\ReadyCheck-Waiting]], 16, 16)
+    elseif characterCurrency then
+      statusValue = "Available"
+      cellText = CreateAtlasMarkup(availableAtlas, 16, 16)
+    end
+
+    currencyFrame.Text:SetText(cellText)
+    currencyFrame.Text:SetJustifyH(settings.alignCenter and "CENTER" or "LEFT")
+    currencyFrame:SetScript("OnEnter", function()
+      GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
+      GameTooltip:SetText(currency.name, 1, 1, 1)
+      if not characterCurrency and not completed then
+        GameTooltip:AddDoubleLine("Status:", "No Data", nil, nil, nil, 1, 1, 1)
+        GameTooltip:AddLine("Log your character to update.", 1, 1, 1, true)
+      else
+        GameTooltip:AddDoubleLine("Status:", statusValue, nil, nil, nil, 1, 1, 1)
+        if pendingTurnin then
+          GameTooltip:AddDoubleLine("In bags:", tostring(characterCurrency.bagCount), nil, nil, nil, 1, 1, 1)
+        end
+        if currency.resets ~= "character" then
+          GameTooltip:AddDoubleLine("Resets:", isAccountQuest and "Never (once per account)" or "Weekly", nil, nil, nil, 1, 1, 1)
+        end
+      end
+      if currency.tooltipNote then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
+      end
+      GameTooltip:Show()
+      SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
+    end)
+  elseif currency.currencyType == "gildedStash" then
+    local fulfilled = characterCurrency and characterCurrency.fulfilled
+    local total = characterCurrency and characterCurrency.total or 4
+    local cellText = GRAY_FONT_COLOR:WrapTextInColorCode("-")
+    if fulfilled ~= nil then
+      cellText = format("%d/%d", fulfilled, total)
+      if fulfilled >= total then
+        cellText = GREEN_FONT_COLOR:WrapTextInColorCode(cellText)
+      end
+    end
+
+    currencyFrame.Text:SetText(cellText)
+    currencyFrame.Text:SetJustifyH(settings.alignCenter and "CENTER" or "LEFT")
+    currencyFrame:SetScript("OnEnter", function()
+      GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
+      GameTooltip:SetText(currency.name, 1, 1, 1)
+      if fulfilled == nil then
+        GameTooltip:AddDoubleLine("Status:", "No Data", nil, nil, nil, 1, 1, 1)
+        GameTooltip:AddLine("Visit Silvermoon City to update the progress.", 1, 1, 1, true)
+      else
+        GameTooltip:AddDoubleLine("Progress:", format("%d/%d", fulfilled, total), nil, nil, nil, 1, 1, 1)
+      end
+      if currency.tooltipNote then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
+      end
+      GameTooltip:Show()
+      SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
+    end)
+  else
+    local infoMaxQuantity = currency.maxQuantity or 0
+    local infoMaxWeeklyQuantity = currency.maxWeeklyQuantity or 0
+    local charQuantity = 0
+    local charTotalEarned = 0
+    local charEarnedThisWeek = 0
+    local hasEarnedMax = false
+
+    if characterCurrency then
+      charQuantity = characterCurrency.quantity or 0
+      charTotalEarned = characterCurrency.totalEarned or 0
+      charEarnedThisWeek = characterCurrency.quantityEarnedThisWeek or 0
+    end
+
+    if infoMaxQuantity > 0 then
+      hasEarnedMax = charQuantity >= infoMaxQuantity
+      if currency.useTotalEarnedForMaxQty then
+        hasEarnedMax = charTotalEarned >= infoMaxQuantity
+      end
+    end
+    if infoMaxWeeklyQuantity > 0 and charEarnedThisWeek >= infoMaxWeeklyQuantity then
+      hasEarnedMax = true
+    end
+
+    cellValue = tostring(charQuantity)
+    if settings.showIcons then
+      cellValue = format("%s %s", infoIcon, cellValue)
+    end
+
+    if settings.showMaxEarned and hasEarnedMax then
+      cellColor = DULL_RED_FONT_COLOR
+    elseif charQuantity == 0 then
+      cellColor = GRAY_FONT_COLOR
+      if currency.currencyType == "crest" and charTotalEarned == 0 then
+        cellValue = "-"
+      end
+    end
+
+    currencyFrame.Text:SetText(cellColor:WrapTextInColorCode(cellValue))
+    currencyFrame.Text:SetJustifyH(settings.alignCenter and "CENTER" or "LEFT")
+    currencyFrame:SetScript("OnEnter", function()
+      GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
+      GameTooltip:SetText("Currency Progress", 1, 1, 1)
+      if infoMaxWeeklyQuantity > 0 then
+        GameTooltip:AddDoubleLine("Weekly Maximum:", format("%d/%d", charEarnedThisWeek, infoMaxWeeklyQuantity), nil, nil, nil, 1, 1, 1)
+      end
+      if currency.useTotalEarnedForMaxQty then
+        if infoMaxQuantity > 0 then
+          GameTooltip:AddDoubleLine("Season Maximum:", format("%d/%d", charTotalEarned, infoMaxQuantity), nil, nil, nil, 1, 1, 1)
+          if currency.currencyType == "crest" then
+            GameTooltip:AddDoubleLine("Remaining:", tostring(math.max(0, infoMaxQuantity - charTotalEarned)), nil, nil, nil, 1, 1, 1)
+          end
+        else
+          if charTotalEarned > 0 then
+            GameTooltip:AddDoubleLine("Season Earned:", tostring(charTotalEarned), nil, nil, nil, 1, 1, 1)
+          end
+          GameTooltip:AddDoubleLine("Season Maximum:", "No limit", nil, nil, nil, 1, 1, 1)
+        end
+      else
+        if charTotalEarned > 0 then
+          GameTooltip:AddDoubleLine("Total Earned:", tostring(charTotalEarned), nil, nil, nil, 1, 1, 1)
+        end
+        if infoMaxQuantity > 0 then
+          GameTooltip:AddDoubleLine("Total Maximum:", tostring(infoMaxQuantity), nil, nil, nil, 1, 1, 1)
+        end
+      end
+      if currency.tooltipNote then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
+      end
+      GameTooltip:Show()
+      SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
+    end)
+  end
+
+end
+
 ---Render the main window
 function Module:Render()
+  ResetRowHighlightFrames()
   local currentAffixes = Data:GetCurrentAffixes()
   local seasonID = Data:GetCurrentSeason()
   local dungeons = Data:GetDungeons()
-  local currencies = Data:GetCurrencies()
+  local allCurrencies = Data:GetCurrencies()
+  local currencies = TableFilter(allCurrencies, function(currency) return currency.category == nil end)
+  local weeklies = TableFilter(allCurrencies, function(currency) return currency.category == "weekly" end)
+  local seasonalChores = TableFilter(allCurrencies, function(currency) return currency.category == "seasonalChore" end)
   local raidDifficulties = Data:GetRaidDifficulties()
   local characterInfo = self:GetCharacterInfo()
   local raids = Data:GetRaids()
@@ -921,6 +1242,36 @@ function Module:Render()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Mark the character you are playing in the grid.", nil, nil, nil, true)
             end)
+            do
+              local markerColor = Data.db.global.currentCharacterMarkerColor or DIM_GREEN_FONT_COLOR
+              local colorInfo = {
+                r = markerColor.r,
+                g = markerColor.g,
+                b = markerColor.b,
+                swatchFunc = function()
+                  local r, g, b = ColorPickerFrame:GetColorRGB()
+                  if r then
+                    Data.db.global.currentCharacterMarkerColor = { r = r, g = g, b = b }
+                    self:Render()
+                  end
+                end,
+                cancelFunc = function(previousColor)
+                  if previousColor and previousColor.r then
+                    Data.db.global.currentCharacterMarkerColor = { r = previousColor.r, g = previousColor.g, b = previousColor.b }
+                  else
+                    Data.db.global.currentCharacterMarkerColor = nil
+                  end
+                  self:Render()
+                end,
+              }
+              menu:CreateColorSwatch(
+                "Current character color",
+                function()
+                  ColorPickerFrame:SetupColorPickerAndShow(colorInfo)
+                end,
+                colorInfo
+              )
+            end
             menu:CreateCheckbox(
               "Show characters with zero rating",
               function() return Data.db.global.showZeroRatedCharacters end,
@@ -931,6 +1282,28 @@ function Module:Render()
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Too many alts?", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Show Equipped Item Level",
+              function() return Data.db.global.showEquippedItemLevel end,
+              function()
+                Data.db.global.showEquippedItemLevel = not Data.db.global.showEquippedItemLevel
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show only the item level of what's currently equipped, instead of what's possible including bags.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Show Item Level Decimals",
+              function() return Data.db.global.showItemLevelDecimals end,
+              function()
+                Data.db.global.showItemLevelDecimals = not Data.db.global.showItemLevelDecimals
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show item level with 2 decimal places.", nil, nil, nil, true)
             end)
             menu:CreateCheckbox(
               "Show realm",
@@ -1127,6 +1500,17 @@ function Module:Render()
                 difficulty.id
               )
             end)
+            raidDifficultiesSetting:CreateCheckbox(
+              "Timewalking",
+              function() return Data.db.global.raids.timewalkingLockouts end,
+              function()
+                Data.db.global.raids.timewalkingLockouts = not Data.db.global.raids.timewalkingLockouts
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Shows Illidan/Yogg-Saron/Ragnaros lockouts while their Timewalking event is active.", nil, nil, nil, true)
+            end)
             menu:CreateTitle("Currencies")
             menu:CreateCheckbox(
               "Enable Currencies",
@@ -1176,12 +1560,113 @@ function Module:Render()
               "Currencies"
             )
             TableForEach(Data:GetCurrencies(), function(currency)
+              if currency.category ~= nil then return end
               local hiddenCurrencies = Data.db.global.currencies.hiddenCurrencies or {}
               enabledCurrenciesOption:CreateCheckbox(
                 currency.name,
                 function(id) return not hiddenCurrencies[id] end,
                 function(id)
                   Data.db.global.currencies.hiddenCurrencies[id] = not hiddenCurrencies[id]
+                  self:Render()
+                end,
+                currency.id
+              )
+            end)
+            menu:CreateTitle("Weeklies")
+            menu:CreateCheckbox(
+              "Enable Weeklies",
+              function() return Data.db.global.weeklies.enabled end,
+              function()
+                Data.db.global.weeklies.enabled = not Data.db.global.weeklies.enabled
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Track this week's dailies... I mean weeklies.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Show icons",
+              function() return Data.db.global.weeklies.showIcons end,
+              function()
+                Data.db.global.weeklies.showIcons = not Data.db.global.weeklies.showIcons
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("So fancy!", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Align text center",
+              function() return Data.db.global.weeklies.alignCenter end,
+              function()
+                Data.db.global.weeklies.alignCenter = not Data.db.global.weeklies.alignCenter
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Left or right? Center it is!", nil, nil, nil, true)
+            end)
+            local enabledWeekliesOption = menu:CreateButton(
+              "Weeklies"
+            )
+            TableForEach(Data:GetCurrencies(), function(currency)
+              if currency.category ~= "weekly" then return end
+              local hiddenCurrencies = Data.db.global.weeklies.hiddenCurrencies or {}
+              enabledWeekliesOption:CreateCheckbox(
+                currency.name,
+                function(id) return not hiddenCurrencies[id] end,
+                function(id)
+                  Data.db.global.weeklies.hiddenCurrencies[id] = not hiddenCurrencies[id]
+                  self:Render()
+                end,
+                currency.id
+              )
+            end)
+            menu:CreateTitle("Seasonal Chores")
+            menu:CreateCheckbox(
+              "Enable Seasonal Chores",
+              function() return Data.db.global.seasonalChores.enabled end,
+              function()
+                Data.db.global.seasonalChores.enabled = not Data.db.global.seasonalChores.enabled
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Adulting, but for your alts.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Show icons",
+              function() return Data.db.global.seasonalChores.showIcons end,
+              function()
+                Data.db.global.seasonalChores.showIcons = not Data.db.global.seasonalChores.showIcons
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("So fancy!", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Align text center",
+              function() return Data.db.global.seasonalChores.alignCenter end,
+              function()
+                Data.db.global.seasonalChores.alignCenter = not Data.db.global.seasonalChores.alignCenter
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Left or right? Center it is!", nil, nil, nil, true)
+            end)
+            local enabledSeasonalChoresOption = menu:CreateButton(
+              "Chores"
+            )
+            TableForEach(Data:GetCurrencies(), function(currency)
+              if currency.category ~= "seasonalChore" then return end
+              local hiddenCurrencies = Data.db.global.seasonalChores.hiddenCurrencies or {}
+              enabledSeasonalChoresOption:CreateCheckbox(
+                currency.name,
+                function(id) return not hiddenCurrencies[id] end,
+                function(id)
+                  Data.db.global.seasonalChores.hiddenCurrencies[id] = not hiddenCurrencies[id]
                   self:Render()
                 end,
                 currency.id
@@ -1431,6 +1916,7 @@ function Module:Render()
   end
 
   local scrollContent = self.window.body.content.scrollArea.content
+  EnsureRowHighlightPoller(self.window)
 
   do -- Titlebar: Affixes
     if numCharacters < 3 then
@@ -1749,6 +2235,32 @@ function Module:Render()
       end
     end
 
+    do -- Timewalking Lockouts Header
+      local label = self.window.body.sidebar.timewalkingDifficulty
+      if not label then
+        label = CreateFrame("Frame", "$parentTimewalkingDifficulty", self.window.body.sidebar)
+        label.text = label:CreateFontString(label:GetName() .. "Text", "OVERLAY")
+        label.text:SetPoint("TOPLEFT", label, "TOPLEFT", Constants.sizes.padding, -3)
+        label.text:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", -Constants.sizes.padding, 3)
+        label.text:SetJustifyH("LEFT")
+        label.text:SetFontObject("GameFontHighlight_NoShadow")
+        label.text:SetText("Timewalking")
+        self.window.body.sidebar.timewalkingDifficulty = label
+      end
+
+      local timewalkingEra = Data.db.global.raids.enabled and Data.db.global.raids.timewalkingLockouts and Data:GetActiveTimewalkingEra()
+      if timewalkingEra then
+        label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
+        label:SetPoint("TOPRIGHT", self.window.body.sidebar, "TOPRIGHT", 0, -totalHeight)
+        label:SetHeight(RAIDS_ROW_HEIGHT)
+        label:Show()
+        rowCount = rowCount + 1
+        totalHeight = totalHeight + RAIDS_ROW_HEIGHT
+      else
+        label:Hide()
+      end
+    end
+
     do -- Currencies Header
       local label = self.window.body.sidebar.currencyLabel
       if not label then
@@ -1828,6 +2340,166 @@ function Module:Render()
       end
     end
 
+    do -- Weeklies Header
+      local label = self.window.body.sidebar.weekliesLabel
+      if not label then
+        label = CreateFrame("Frame", "$parentWeekliesLabel", self.window.body.sidebar)
+        label.text = label:CreateFontString(label:GetName() .. "Text", "OVERLAY")
+        label.text:SetPoint("TOPLEFT", label, "TOPLEFT", Constants.sizes.padding, 0)
+        label.text:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", -Constants.sizes.padding, 0)
+        label.text:SetFontObject("GameFontHighlight_NoShadow")
+        label.text:SetJustifyH("LEFT")
+        label.text:SetText("Weeklies")
+        label.text:SetVertexColor(1.0, 0.82, 0.0, 1)
+        self.window.body.sidebar.weekliesLabel = label
+      end
+
+      if Data.db.global.weeklies.enabled then
+        label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
+        label:SetPoint("TOPRIGHT", self.window.body.sidebar, "TOPRIGHT", 0, -totalHeight)
+        label:SetHeight(Constants.sizes.row)
+        label:Show()
+        rowCount = rowCount + 1
+        totalHeight = totalHeight + Constants.sizes.row
+      else
+        label:Hide()
+      end
+    end
+
+    do -- Weeklies Labels
+      self.window.body.sidebar.weeklyLabels = self.window.body.sidebar.weeklyLabels or {}
+      TableForEach(self.window.body.sidebar.weeklyLabels, function(f) f:Hide() end)
+      if Data.db.global.weeklies.enabled then
+        TableForEach(weeklies, function(currency, currencyIndex)
+          if Data.db.global.weeklies.hiddenCurrencies and Data.db.global.weeklies.hiddenCurrencies[currency.id] then
+            return
+          end
+          local label = self.window.body.sidebar.weeklyLabels[currencyIndex]
+          if not label then
+            label = CreateFrame("Frame", "$parentWeekly" .. currencyIndex, self.window.body.sidebar)
+            label.icon = label:CreateTexture(label:GetName() .. "Icon", "ARTWORK")
+            label.icon:SetSize(16, 16)
+            label.icon:SetPoint("LEFT", label, "LEFT", Constants.sizes.padding, 0)
+            label.text = label:CreateFontString(label:GetName() .. "Text", "OVERLAY")
+            label.text:SetPoint("TOPLEFT", label, "TOPLEFT", 16 + Constants.sizes.padding * 2, -3)
+            label.text:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", -Constants.sizes.padding, 3)
+            label.text:SetJustifyH("LEFT")
+            label.text:SetFontObject("GameFontHighlight_NoShadow")
+            self.window.body.sidebar.weeklyLabels[currencyIndex] = label
+          end
+
+          local color = ITEM_QUALITY_COLORS[currency.quality or Enum.ItemQuality.Common]
+
+          label:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(label, "ANCHOR_RIGHT")
+            GameTooltip:SetText(currency.name, color.r, color.g, color.b)
+            if currency.description then
+              GameTooltip:AddLine(currency.description, nil, nil, nil, true)
+            end
+            if currency.tooltipNote then
+              GameTooltip:AddLine(" ")
+              GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
+            end
+            GameTooltip:Show()
+          end)
+          label:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+          end)
+
+          label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
+          label:SetPoint("TOPRIGHT", self.window.body.sidebar, "TOPRIGHT", 0, -totalHeight)
+          label:SetHeight(Constants.sizes.row)
+          label.icon:SetTexture(currency.iconFileID or [[Interface\Icons\INV_Misc_QuestionMark]])
+          label.text:SetText(currency.short and currency.short or currency.name)
+          label.text:SetTextColor(color.r, color.g, color.b)
+          label:Show()
+          RegisterRowHighlightFrame(label, totalHeight, Constants.sizes.row)
+          rowCount = rowCount + 1
+          totalHeight = totalHeight + Constants.sizes.row
+        end)
+      end
+    end
+
+    do -- Seasonal Chores Header
+      local label = self.window.body.sidebar.seasonalChoresLabel
+      if not label then
+        label = CreateFrame("Frame", "$parentSeasonalChoresLabel", self.window.body.sidebar)
+        label.text = label:CreateFontString(label:GetName() .. "Text", "OVERLAY")
+        label.text:SetPoint("TOPLEFT", label, "TOPLEFT", Constants.sizes.padding, 0)
+        label.text:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", -Constants.sizes.padding, 0)
+        label.text:SetFontObject("GameFontHighlight_NoShadow")
+        label.text:SetJustifyH("LEFT")
+        label.text:SetText("Seasonal Chores")
+        label.text:SetVertexColor(1.0, 0.82, 0.0, 1)
+        self.window.body.sidebar.seasonalChoresLabel = label
+      end
+
+      if Data.db.global.seasonalChores.enabled then
+        label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
+        label:SetPoint("TOPRIGHT", self.window.body.sidebar, "TOPRIGHT", 0, -totalHeight)
+        label:SetHeight(Constants.sizes.row)
+        label:Show()
+        rowCount = rowCount + 1
+        totalHeight = totalHeight + Constants.sizes.row
+      else
+        label:Hide()
+      end
+    end
+
+    do -- Seasonal Chores Labels
+      self.window.body.sidebar.seasonalChoreLabels = self.window.body.sidebar.seasonalChoreLabels or {}
+      TableForEach(self.window.body.sidebar.seasonalChoreLabels, function(f) f:Hide() end)
+      if Data.db.global.seasonalChores.enabled then
+        TableForEach(seasonalChores, function(currency, currencyIndex)
+          if Data.db.global.seasonalChores.hiddenCurrencies and Data.db.global.seasonalChores.hiddenCurrencies[currency.id] then
+            return
+          end
+          local label = self.window.body.sidebar.seasonalChoreLabels[currencyIndex]
+          if not label then
+            label = CreateFrame("Frame", "$parentSeasonalChore" .. currencyIndex, self.window.body.sidebar)
+            label.icon = label:CreateTexture(label:GetName() .. "Icon", "ARTWORK")
+            label.icon:SetSize(16, 16)
+            label.icon:SetPoint("LEFT", label, "LEFT", Constants.sizes.padding, 0)
+            label.text = label:CreateFontString(label:GetName() .. "Text", "OVERLAY")
+            label.text:SetPoint("TOPLEFT", label, "TOPLEFT", 16 + Constants.sizes.padding * 2, -3)
+            label.text:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", -Constants.sizes.padding, 3)
+            label.text:SetJustifyH("LEFT")
+            label.text:SetFontObject("GameFontHighlight_NoShadow")
+            self.window.body.sidebar.seasonalChoreLabels[currencyIndex] = label
+          end
+
+          local color = ITEM_QUALITY_COLORS[currency.quality or Enum.ItemQuality.Common]
+
+          label:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(label, "ANCHOR_RIGHT")
+            GameTooltip:SetText(currency.name, color.r, color.g, color.b)
+            if currency.description then
+              GameTooltip:AddLine(currency.description, nil, nil, nil, true)
+            end
+            if currency.tooltipNote then
+              GameTooltip:AddLine(" ")
+              GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
+            end
+            GameTooltip:Show()
+          end)
+          label:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+          end)
+
+          label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
+          label:SetPoint("TOPRIGHT", self.window.body.sidebar, "TOPRIGHT", 0, -totalHeight)
+          label:SetHeight(Constants.sizes.row)
+          label.icon:SetTexture(currency.iconFileID or [[Interface\Icons\INV_Misc_QuestionMark]])
+          label.text:SetText(currency.short and currency.short or currency.name)
+          label.text:SetTextColor(color.r, color.g, color.b)
+          label:Show()
+          RegisterRowHighlightFrame(label, totalHeight, Constants.sizes.row)
+          rowCount = rowCount + 1
+          totalHeight = totalHeight + Constants.sizes.row
+        end)
+      end
+    end
+
     windowHeight = windowHeight + totalHeight
   end
 
@@ -1847,6 +2519,8 @@ function Module:Render()
         characterFrame.preyHeader = CreateFrame("Frame", "$parentPreyHeader", characterFrame)
         characterFrame.raidHeader = CreateFrame("Frame", "$parentRaidHeader", characterFrame)
         characterFrame.currencyHeaderFrame = CreateFrame("Frame", "$parentCurrencies", characterFrame)
+        characterFrame.weekliesHeaderFrame = CreateFrame("Frame", "$parentWeeklies", characterFrame)
+        characterFrame.seasonalChoresHeaderFrame = CreateFrame("Frame", "$parentSeasonalChores", characterFrame)
         self.window.characterFrames[characterIndex] = characterFrame
       end
 
@@ -1862,22 +2536,22 @@ function Module:Render()
           overlay = CreateFrame("Frame", "$parentCurrentCharacterOverlay", characterFrame)
           overlay:SetAllPoints()
           overlay:EnableMouse(false)
-          local color = DIM_GREEN_FONT_COLOR
           overlay.background = overlay:CreateTexture(nil, "BACKGROUND")
           overlay.background:SetAllPoints()
-          overlay.background:SetColorTexture(color.r, color.g, color.b, 0.04)
           overlay.left = overlay:CreateTexture(nil, "ARTWORK")
           overlay.left:SetWidth(2)
           overlay.left:SetPoint("TOPLEFT")
           overlay.left:SetPoint("BOTTOMLEFT")
-          overlay.left:SetColorTexture(color.r, color.g, color.b, 0.15)
           overlay.right = overlay:CreateTexture(nil, "ARTWORK")
           overlay.right:SetWidth(2)
           overlay.right:SetPoint("TOPRIGHT")
           overlay.right:SetPoint("BOTTOMRIGHT")
-          overlay.right:SetColorTexture(color.r, color.g, color.b, 0.15)
           characterFrame.currentCharacterOverlay = overlay
         end
+        local color = Data.db.global.currentCharacterMarkerColor or DIM_GREEN_FONT_COLOR
+        overlay.background:SetColorTexture(color.r, color.g, color.b, 0.04)
+        overlay.left:SetColorTexture(color.r, color.g, color.b, 0.15)
+        overlay.right:SetColorTexture(color.r, color.g, color.b, 0.15)
         overlay:SetFrameLevel(characterFrame:GetFrameLevel() + 50)
         if character.GUID == UnitGUID("player") and Data.db.global.currentCharacterMarker == "border" then
           overlay:Show()
@@ -2430,6 +3104,67 @@ function Module:Render()
         end)
       end
 
+      do -- Timewalking Lockouts
+        characterFrame.timewalkingFrame = characterFrame.timewalkingFrame or CreateFrame("Frame", "$parentTimewalkingDifficulty", characterFrame)
+        local timewalkingFrame = characterFrame.timewalkingFrame
+        timewalkingFrame.iconFrames = timewalkingFrame.iconFrames or {}
+
+        local timewalkingEra = Data.db.global.raids.enabled and Data.db.global.raids.timewalkingLockouts and Data:GetActiveTimewalkingEra()
+        if timewalkingEra then
+          SetBackgroundColor(timewalkingFrame, 1, 1, 1, 0)
+          timewalkingFrame:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
+          timewalkingFrame:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
+          timewalkingFrame:SetHeight(RAIDS_ROW_HEIGHT)
+          timewalkingFrame:Show()
+          rowCount = rowCount + 1
+          totalHeight = totalHeight + RAIDS_ROW_HEIGHT
+
+          local bossKills = Data:GetTimewalkingBossKills(character)
+          local bosses = {
+            { key = "illidan", name = "Illidan Stormrage (Black Temple)", color = UNCOMMON_GREEN_COLOR },
+            { key = "yoggsaron", name = "Yogg-Saron (Ulduar)", color = RARE_BLUE_COLOR },
+            { key = "ragnaros", name = "Ragnaros (Firelands)", color = LEGENDARY_ORANGE_COLOR },
+          }
+
+          local killIcon = TableGet(Constants.raidKillIcons, "id", Data.db.global.raids.killIcon or "skull") or Constants.raidKillIcons[1]
+          local killIconScale = killIcon.scale or 1
+          local slotWidth = CHARACTER_WIDTH / 3
+          local iconHeight = math.min(slotWidth * 0.6, RAIDS_ROW_HEIGHT * 0.8) * killIconScale
+
+          TableForEach(timewalkingFrame.iconFrames, function(f) f:Hide() end)
+          TableForEach(bosses, function(boss, bossIndex)
+            local iconFrame = timewalkingFrame.iconFrames[bossIndex]
+            if not iconFrame then
+              iconFrame = CreateFrame("Frame", "$parentTimewalkingBoss" .. bossIndex, timewalkingFrame)
+              iconFrame.Background = iconFrame:CreateTexture("Background", "BACKGROUND")
+              iconFrame.Background:SetAllPoints()
+              timewalkingFrame.iconFrames[bossIndex] = iconFrame
+            end
+
+            local isKilled = bossKills[boss.key]
+            local color = isKilled and boss.color or CreateColor(1, 1, 1)
+            local alpha = isKilled and 0.5 or 0.08
+
+            iconFrame.Background:SetTexture(killIcon.texture)
+            iconFrame.Background:SetVertexColor(color.r, color.g, color.b, alpha)
+            iconFrame:SetSize(iconHeight, iconHeight)
+            iconFrame:SetPoint("CENTER", timewalkingFrame, "TOPLEFT", (bossIndex - 0.5) * slotWidth, -RAIDS_ROW_HEIGHT / 2)
+            iconFrame:SetScript("OnEnter", function()
+              GameTooltip:SetOwner(iconFrame, "ANCHOR_RIGHT")
+              GameTooltip:SetText(boss.name, 1, 1, 1)
+              GameTooltip:AddLine(isKilled and "Killed this week" or "Not killed this week", 1, 1, 1)
+              GameTooltip:Show()
+            end)
+            iconFrame:SetScript("OnLeave", function()
+              GameTooltip:Hide()
+            end)
+            iconFrame:Show()
+          end)
+        else
+          timewalkingFrame:Hide()
+        end
+      end
+
       do -- Currency Header
         if Data.db.global.currencies.enabled then
           characterFrame.currencyHeaderFrame:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
@@ -2463,174 +3198,7 @@ function Module:Render()
           end
 
           local characterCurrency = TableGet(character.currencies, "id", currency.id)
-          local cellColor = CAMPAIGN_COMPLETE_COLOR
-          local cellValue = "0"
-          local infoIcon = CreateSimpleTextureMarkup(currency.iconFileID or [[Interface\Icons\INV_Misc_QuestionMark]])
-
-          if currency.currencyType == "delveMap" then
-            local statusValue = "-"
-            local cellText = GRAY_FONT_COLOR:WrapTextInColorCode("-")
-            if characterCurrency then
-              if characterCurrency.hasBuff then
-                statusValue = "Active"
-                cellText = CreateAtlasMarkup("QuestTurnin", 16, 16)
-              elseif (characterCurrency.bagCount or 0) > 0 then
-                statusValue = "In bags"
-                cellText = CreateAtlasMarkup("QuestTurnin", 16, 16)
-              elseif characterCurrency.questCompleted then
-                statusValue = "Completed"
-                cellText = CreateAtlasMarkup("common-icon-checkmark", 16, 16)
-              else
-                statusValue = "Available"
-                cellText = CreateAtlasMarkup("Recurringavailablequesticon", 16, 16)
-              end
-            end
-
-            currencyFrame.Text:SetText(cellText)
-            currencyFrame.Text:SetJustifyH(Data.db.global.currencies.alignCenter and "CENTER" or "LEFT")
-            currencyFrame:SetScript("OnEnter", function()
-              GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
-              GameTooltip:SetText(currency.name, 1, 1, 1)
-              if not characterCurrency then
-                GameTooltip:AddDoubleLine("Status:", "No Data", nil, nil, nil, 1, 1, 1)
-                GameTooltip:AddLine("Log your character to update.", 1, 1, 1, true)
-              else
-                GameTooltip:AddDoubleLine("Status:", statusValue, nil, nil, nil, 1, 1, 1)
-                GameTooltip:AddDoubleLine("In bags:", tostring(characterCurrency.bagCount or 0), nil, nil, nil, 1, 1, 1)
-                GameTooltip:AddDoubleLine("Buff active:", characterCurrency.hasBuff and "Yes" or "No", nil, nil, nil, 1, 1, 1)
-              end
-              if currency.tooltipNote then
-                GameTooltip:AddLine(" ")
-                GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
-              end
-              GameTooltip:Show()
-              SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
-            end)
-          elseif currency.currencyType == "quest" then
-            local isAccountQuest = currency.resets == "account"
-            local completed = characterCurrency ~= nil and characterCurrency.questCompleted == true
-            if isAccountQuest and not completed then
-              -- Once per account: completed on any character counts for all of them
-              completed = Data:IsQuestCompletedOnAccount(currency.id)
-            end
-
-            local availableAtlas = "Recurringavailablequesticon"
-            if isAccountQuest and C_Texture.GetAtlasInfo("QuestNormal") then
-              availableAtlas = "QuestNormal"
-            end
-
-            local pendingTurnin = not completed and characterCurrency ~= nil and (characterCurrency.bagCount or 0) > 0
-
-            local statusValue = "-"
-            local cellText = GRAY_FONT_COLOR:WrapTextInColorCode("-")
-            if completed then
-              statusValue = "Completed"
-              cellText = CreateAtlasMarkup("common-icon-checkmark", 16, 16)
-            elseif pendingTurnin then
-              statusValue = "In bags"
-              cellText = CreateSimpleTextureMarkup([[Interface\Icons\INV_Misc_QuestionMark]], 16, 16)
-            elseif characterCurrency then
-              statusValue = "Available"
-              cellText = CreateAtlasMarkup(availableAtlas, 16, 16)
-            end
-
-            currencyFrame.Text:SetText(cellText)
-            currencyFrame.Text:SetJustifyH(Data.db.global.currencies.alignCenter and "CENTER" or "LEFT")
-            currencyFrame:SetScript("OnEnter", function()
-              GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
-              GameTooltip:SetText(currency.name, 1, 1, 1)
-              if not characterCurrency and not completed then
-                GameTooltip:AddDoubleLine("Status:", "No Data", nil, nil, nil, 1, 1, 1)
-                GameTooltip:AddLine("Log your character to update.", 1, 1, 1, true)
-              else
-                GameTooltip:AddDoubleLine("Status:", statusValue, nil, nil, nil, 1, 1, 1)
-                if pendingTurnin then
-                  GameTooltip:AddDoubleLine("In bags:", tostring(characterCurrency.bagCount), nil, nil, nil, 1, 1, 1)
-                end
-                GameTooltip:AddDoubleLine("Resets:", isAccountQuest and "Never (once per account)" or "Weekly", nil, nil, nil, 1, 1, 1)
-              end
-              if currency.tooltipNote then
-                GameTooltip:AddLine(" ")
-                GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
-              end
-              GameTooltip:Show()
-              SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
-            end)
-          else
-            local infoMaxQuantity = currency.maxQuantity or 0
-            local infoMaxWeeklyQuantity = currency.maxWeeklyQuantity or 0
-            local charQuantity = 0
-            local charTotalEarned = 0
-            local charEarnedThisWeek = 0
-            local hasEarnedMax = false
-
-            if characterCurrency then
-              charQuantity = characterCurrency.quantity or 0
-              charTotalEarned = characterCurrency.totalEarned or 0
-              charEarnedThisWeek = characterCurrency.quantityEarnedThisWeek or 0
-            end
-
-            if infoMaxQuantity > 0 then
-              hasEarnedMax = charQuantity >= infoMaxQuantity
-              if currency.useTotalEarnedForMaxQty then
-                hasEarnedMax = charTotalEarned >= infoMaxQuantity
-              end
-            end
-            if infoMaxWeeklyQuantity > 0 and charEarnedThisWeek >= infoMaxWeeklyQuantity then
-              hasEarnedMax = true
-            end
-
-            cellValue = tostring(charQuantity)
-            if Data.db.global.currencies.showIcons then
-              cellValue = format("%s %s", infoIcon, cellValue)
-            end
-
-            if Data.db.global.currencies.showMaxEarned and hasEarnedMax then
-              cellColor = DULL_RED_FONT_COLOR
-            elseif charQuantity == 0 then
-              cellColor = GRAY_FONT_COLOR
-              if currency.currencyType == "crest" and charTotalEarned == 0 then
-                cellValue = "-"
-              end
-            end
-
-            currencyFrame.Text:SetText(cellColor:WrapTextInColorCode(cellValue))
-            currencyFrame.Text:SetJustifyH(Data.db.global.currencies.alignCenter and "CENTER" or "LEFT")
-            currencyFrame:SetScript("OnEnter", function()
-              GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
-              GameTooltip:SetText("Currency Progress", 1, 1, 1)
-              if infoMaxWeeklyQuantity > 0 then
-                GameTooltip:AddDoubleLine("Weekly Maximum:", format("%d/%d", charEarnedThisWeek, infoMaxWeeklyQuantity), nil, nil, nil, 1, 1, 1)
-              end
-              if currency.useTotalEarnedForMaxQty then
-                if infoMaxQuantity > 0 then
-                  GameTooltip:AddDoubleLine("Season Maximum:", format("%d/%d", charTotalEarned, infoMaxQuantity), nil, nil, nil, 1, 1, 1)
-                  if currency.currencyType == "crest" then
-                    GameTooltip:AddDoubleLine("Remaining:", tostring(math.max(0, infoMaxQuantity - charTotalEarned)), nil, nil, nil, 1, 1, 1)
-                  end
-                else
-                  if charTotalEarned > 0 then
-                    GameTooltip:AddDoubleLine("Season Earned:", tostring(charTotalEarned), nil, nil, nil, 1, 1, 1)
-                  end
-                  GameTooltip:AddDoubleLine("Season Maximum:", "No limit", nil, nil, nil, 1, 1, 1)
-                end
-              else
-                if charTotalEarned > 0 then
-                  GameTooltip:AddDoubleLine("Total Earned:", tostring(charTotalEarned), nil, nil, nil, 1, 1, 1)
-                end
-                if infoMaxQuantity > 0 then
-                  GameTooltip:AddDoubleLine("Total Maximum:", tostring(infoMaxQuantity), nil, nil, nil, 1, 1, 1)
-                end
-              end
-              if currency.tooltipNote then
-                GameTooltip:AddLine(" ")
-                GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
-              end
-              GameTooltip:Show()
-              SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
-            end)
-          end
-
+          PopulateCurrencyCell(currencyFrame, currency, characterCurrency, Data.db.global.currencies)
           currencyFrame:SetScript("OnLeave", function()
             GameTooltip:Hide()
             SetHighlightColor(currencyFrame, 1, 1, 1, 0)
@@ -2641,6 +3209,106 @@ function Module:Render()
           currencyFrame:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
           currencyFrame:SetHeight(Constants.sizes.row)
           currencyFrame:Show()
+          rowCount = rowCount + 1
+          totalHeight = totalHeight + Constants.sizes.row
+        end)
+      end
+
+      do -- Weeklies Header
+        if Data.db.global.weeklies.enabled then
+          characterFrame.weekliesHeaderFrame:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
+          characterFrame.weekliesHeaderFrame:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
+          characterFrame.weekliesHeaderFrame:SetHeight(Constants.sizes.row)
+          characterFrame.weekliesHeaderFrame:Show()
+          SetBackgroundColor(characterFrame.weekliesHeaderFrame, 0, 0, 0, 0.3)
+          rowCount = rowCount + 1
+          totalHeight = totalHeight + Constants.sizes.row
+        else
+          characterFrame.weekliesHeaderFrame:Hide()
+        end
+      end
+
+      do -- Weeklies
+        characterFrame.weeklyFrames = characterFrame.weeklyFrames or {}
+        TableForEach(characterFrame.weeklyFrames, function(f) f:Hide() end)
+        TableForEach(weeklies, function(currency, currencyIndex)
+          if not Data.db.global.weeklies.enabled then return end
+          if Data.db.global.weeklies.hiddenCurrencies and Data.db.global.weeklies.hiddenCurrencies[currency.id] then return end
+
+          local currencyFrame = characterFrame.weeklyFrames[currencyIndex]
+          if not currencyFrame then
+            currencyFrame = CreateFrame("Frame", "$parentWeeklies" .. currencyIndex, characterFrame)
+            currencyFrame.Text = currencyFrame:CreateFontString(currencyFrame:GetName() .. "TextLeft", "OVERLAY")
+            currencyFrame.Text:SetFontObject("GameFontHighlight_NoShadow")
+            currencyFrame.Text:SetPoint("TOPLEFT", currencyFrame, "TOPLEFT", Constants.sizes.padding, -3)
+            currencyFrame.Text:SetPoint("BOTTOMRIGHT", currencyFrame, "BOTTOMRIGHT", -Constants.sizes.padding, 3)
+            currencyFrame.Text:SetJustifyH("LEFT")
+            characterFrame.weeklyFrames[currencyIndex] = currencyFrame
+          end
+
+          local characterCurrency = TableGet(character.currencies, "id", currency.id)
+          PopulateCurrencyCell(currencyFrame, currency, characterCurrency, Data.db.global.weeklies)
+          currencyFrame:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+            SetHighlightColor(currencyFrame, 1, 1, 1, 0)
+          end)
+
+          SetBackgroundColor(currencyFrame, 1, 1, 1, currencyIndex % 2 == 0 and 0.01 or 0)
+          currencyFrame:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
+          currencyFrame:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
+          currencyFrame:SetHeight(Constants.sizes.row)
+          currencyFrame:Show()
+          RegisterRowHighlightFrame(currencyFrame, totalHeight, Constants.sizes.row)
+          rowCount = rowCount + 1
+          totalHeight = totalHeight + Constants.sizes.row
+        end)
+      end
+
+      do -- Seasonal Chores Header
+        if Data.db.global.seasonalChores.enabled then
+          characterFrame.seasonalChoresHeaderFrame:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
+          characterFrame.seasonalChoresHeaderFrame:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
+          characterFrame.seasonalChoresHeaderFrame:SetHeight(Constants.sizes.row)
+          characterFrame.seasonalChoresHeaderFrame:Show()
+          SetBackgroundColor(characterFrame.seasonalChoresHeaderFrame, 0, 0, 0, 0.3)
+          rowCount = rowCount + 1
+          totalHeight = totalHeight + Constants.sizes.row
+        else
+          characterFrame.seasonalChoresHeaderFrame:Hide()
+        end
+      end
+
+      do -- Seasonal Chores
+        characterFrame.seasonalChoreFrames = characterFrame.seasonalChoreFrames or {}
+        TableForEach(characterFrame.seasonalChoreFrames, function(f) f:Hide() end)
+        TableForEach(seasonalChores, function(currency, currencyIndex)
+          if not Data.db.global.seasonalChores.enabled then return end
+          if Data.db.global.seasonalChores.hiddenCurrencies and Data.db.global.seasonalChores.hiddenCurrencies[currency.id] then return end
+
+          local currencyFrame = characterFrame.seasonalChoreFrames[currencyIndex]
+          if not currencyFrame then
+            currencyFrame = CreateFrame("Frame", "$parentSeasonalChores" .. currencyIndex, characterFrame)
+            currencyFrame.Text = currencyFrame:CreateFontString(currencyFrame:GetName() .. "TextLeft", "OVERLAY")
+            currencyFrame.Text:SetFontObject("GameFontHighlight_NoShadow")
+            currencyFrame.Text:SetPoint("TOPLEFT", currencyFrame, "TOPLEFT", Constants.sizes.padding, -3)
+            currencyFrame.Text:SetPoint("BOTTOMRIGHT", currencyFrame, "BOTTOMRIGHT", -Constants.sizes.padding, 3)
+            currencyFrame.Text:SetJustifyH("LEFT")
+            characterFrame.seasonalChoreFrames[currencyIndex] = currencyFrame
+          end
+
+          local characterCurrency = TableGet(character.currencies, "id", currency.id)
+          PopulateCurrencyCell(currencyFrame, currency, characterCurrency, Data.db.global.seasonalChores)
+          currencyFrame:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+            SetHighlightColor(currencyFrame, 1, 1, 1, 0)
+          end)
+
+          SetBackgroundColor(currencyFrame, 1, 1, 1, currencyIndex % 2 == 0 and 0.01 or 0)
+          currencyFrame:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
+          currencyFrame:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
+          currencyFrame:SetHeight(Constants.sizes.row)
+          currencyFrame:Show()
+          RegisterRowHighlightFrame(currencyFrame, totalHeight, Constants.sizes.row)
           rowCount = rowCount + 1
           totalHeight = totalHeight + Constants.sizes.row
         end)

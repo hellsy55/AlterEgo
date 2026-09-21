@@ -17,21 +17,28 @@ Data.currencies = {
   {seasonID = 17, seasonDisplayID = 1, id = 3310, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Coffer Key Shards
   {seasonID = 17, seasonDisplayID = 1, id = 3028, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Restored Coffer key
   {seasonID = 17, seasonDisplayID = 1, id = 3356, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Untainted Mana-Crystals
-  {seasonID = 17, seasonDisplayID = 1, id = 265714, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1254631},
   {seasonID = 18, seasonDisplayID = 2, id = 3442, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Adventurer Mistcrest
   {seasonID = 18, seasonDisplayID = 2, id = 3443, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Veteran Mistcrest
   {seasonID = 18, seasonDisplayID = 2, id = 3444, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Champion Mistcrest
   {seasonID = 18, seasonDisplayID = 2, id = 3445, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Hero Mistcrest
   {seasonID = 18, seasonDisplayID = 2, id = 3446, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Myth Mistcrest
-  {seasonID = 18, seasonDisplayID = 2, id = 3465, useTotalEarnedForMaxQty = true,  currencyType = "catalyst"},																																		  -- Venomblight Manaflux
+  {seasonID = 18, seasonDisplayID = 2, id = 3465, useTotalEarnedForMaxQty = true,  currencyType = "catalyst"},																																	  -- Venomblight Manaflux
   {seasonID = 18, seasonDisplayID = 2, id = 3418, useTotalEarnedForMaxQty = true,  currencyType = "bonusroll"},                                                                                                                                       -- Nebulous Voidcore
   {seasonID = 18, seasonDisplayID = 2, id = 3509, useTotalEarnedForMaxQty = true,  currencyType = "spark"},                                                                                                                                           -- Tidal Spark Dust
   {seasonID = 18, seasonDisplayID = 2, id = 3310, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Coffer Key Shards
   {seasonID = 18, seasonDisplayID = 2, id = 3028, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Restored Coffer key
   {seasonID = 18, seasonDisplayID = 2, id = 3356, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Untainted Mana-Crystals
-  {seasonID = 18, seasonDisplayID = 2, id = 274374, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1293799},
-  {id = 95520, currencyType = "quest", resets = "weekly",  name = "Purge",  questID = 95520, iconFileID = 7966624},
-  {id = 97064, currencyType = "quest", resets = "weekly",  name = "Dundun",  questID = 97064, iconFileID = 647701},
-  {id = 97910, currencyType = "quest", resets = "character", name = "Cracked Keystone",  questID = 97910, iconFileID = 4352494, itemID = 279012},
-  {id = 97913, currencyType = "quest", resets = "character", name = "Azta'rec", questID = 97913, iconFileID = 8032873},
+
+  -- Weeklies (fixed display order: Dundun, Gilded Stash, Trovehunter's Bounty, Purging the Vaults, Trailing Xal'atath, Unity Against the Void)
+  {id = 97064, currencyType = "quest", resets = "weekly",  name = "Dundun",  questID = 97064, iconFileID = 647701, category = "weekly"},
+  {id = "gildedStash", currencyType = "gildedStash", name = "Gilded Stash", spellID = 7591, iconFileID = 5872049, category = "weekly"},
+  {seasonID = 17, seasonDisplayID = 1, id = 265714, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1254631, category = "weekly"},
+  {seasonID = 18, seasonDisplayID = 2, id = 274374, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1293799, category = "weekly"},
+  {id = 95520, currencyType = "quest", resets = "weekly",  name = "Purging the Vaults",  questID = 95520, iconFileID = 7966624, category = "weekly"},
+  {id = 98172, currencyType = "quest", resets = "weekly",  name = "Trailing Xal'atath", questID = 98172, iconFileID = 7501330, category = "weekly"},
+  {id = 93744, currencyType = "quest", resets = "weekly",  name = "Unity Against the Void", questID = 93744, iconFileID = 133403, category = "weekly"},
+
+  -- Seasonal Chores (fixed display order: Azta'rec, Cracked Keystone)
+  {id = 97913, currencyType = "quest", resets = "character", name = "Azta'rec", questID = 97913, iconFileID = 8032873, category = "seasonalChore"},
+  {id = 97910, currencyType = "quest", resets = "character", name = "Cracked Keystone",  questID = 97910, iconFileID = 4352494, itemID = 279012, category = "seasonalChore"},
 }
