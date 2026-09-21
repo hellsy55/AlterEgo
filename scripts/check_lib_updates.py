@@ -240,6 +240,32 @@ def save_lockfile(data: dict) -> None:
 # Fluxo principal
 # --------------------------------------------------------------------------
 
+def find_orphan_lib_folders(externals: dict, libs_root: str = "Libs") -> list:
+    """
+    Lista subpastas dentro de Libs/ que existem no disco mas não têm
+    entrada correspondente em `externals:` no .pkgmeta. Essas pastas são
+    invisíveis para o resto deste script — não são checadas nem
+    atualizadas — então é bom sinalizar a existência delas separadamente.
+    """
+    if not os.path.isdir(libs_root):
+        return []
+
+    known = set()
+    for path in externals:
+        # externals usa paths tipo "Libs/AceAddon-3.0" -> pega só o
+        # primeiro nível abaixo de Libs/
+        parts = path.split("/")
+        if len(parts) >= 2 and parts[0] == libs_root:
+            known.add(parts[1])
+
+    on_disk = {
+        name for name in os.listdir(libs_root)
+        if os.path.isdir(os.path.join(libs_root, name))
+    }
+
+    return sorted(on_disk - known)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Checa updates das libs do .pkgmeta")
     parser.add_argument(
@@ -295,6 +321,15 @@ def main():
 
     if not pending:
         print("\nNenhuma atualização pendente.")
+
+    orphans = find_orphan_lib_folders(externals)
+    if orphans:
+        print("\n[ATENÇÃO] Pastas dentro de Libs/ que NÃO estão no .pkgmeta")
+        print("(não são checadas nem atualizadas por este script):")
+        for name in orphans:
+            print(f"  - Libs/{name}")
+
+    if not pending:
         return
 
     if not args.apply:
