@@ -14,13 +14,14 @@ local TableFind = addon.Libs.LiqUI.Utils.TableFind
 local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
 local TableGet = addon.Libs.LiqUI.Utils.TableGet
 
-Data.dbVersion = 38
+Data.dbVersion = 39
 
 Data.defaultDB = {
   ---@type AE_Global
   global = {
     weeklyReset = 0,
     characters = {},
+    accounts = {}, ---@type table<string, AE_Account> Groups of characters ("1", "2", ...) shown in the Characters menu
     minimap = {
       minimapPos = 195,
       hide = false,
@@ -101,13 +102,21 @@ Data.defaultDB = {
         Main = {},
         Affixes = {},
         Equipment = {},
+        VaultPreview = {},
       },
       tables = {
         Affixes = { hiddenColumns = {} },
         Equipment = { hiddenColumns = {} },
+        VaultPreview = { hiddenColumns = {} },
       },
     },
     useRIOScoreColor = false,
+    sync = {
+      enabled = false,
+      passphrase = "",
+      passphraseAccounts = {}, ---@type table<string, string> Which WoW Account each passphrase's synced characters land in
+      lastSentUpdate = {}, ---@type table<string, number> Per-character GUID -> the character.lastUpdate value we last actually broadcast, so unchanged characters aren't resent
+    },
   },
 }
 
@@ -118,6 +127,7 @@ Data.defaultCharacter = {
   currentSeason = 0,
   enabled = true,
   order = 0,
+  accountId = nil, ---@type string? Which WoW Account bucket (Data.db.global.accounts) this character belongs to
   info = {
     name = "",
     realm = "",
@@ -598,6 +608,7 @@ function Data:GetCharacter(playerGUID)
 
   if self.db.global.characters[playerGUID] == nil then
     self.db.global.characters[playerGUID] = TableCopy(Data.defaultCharacter)
+    self.db.global.characters[playerGUID].accountId = self:EnsureDefaultAccount()
   end
 
   self.db.global.characters[playerGUID].GUID = playerGUID
@@ -611,6 +622,227 @@ function Data:DeleteCharacter(characterOrGUID)
   local GUID = type(characterOrGUID) == "table" and characterOrGUID.GUID or characterOrGUID
   if not GUID or self.db.global.characters[GUID] == nil then return end
   self.db.global.characters[GUID] = nil
+end
+
+-- ===== WoW Accounts (manual grouping shown in the Characters menu) =======
+--
+-- These are NOT real Battle.net/WoW accounts detected automatically -- this
+-- addon only ever sees the characters that logged in under the current
+-- SavedVariables file. They're just user-managed folders (auto-named "1",
+-- "2", ...) to organize/toggle groups of characters in the Characters menu,
+-- same idea as a label. Every character always belongs to exactly one of these.
+
+---Return every WoW Account, ordered, creating a default one if none exist yet.
+---@return AE_Account[]
+function Data:GetAccounts()
+  self:EnsureDefaultAccount()
+  local accounts = {}
+  for id, account in pairs(self.db.global.accounts) do
+    account.id = id
+    table.insert(accounts, account)
+  end
+  table.sort(accounts, function(a, b) return (a.order or 0) < (b.order or 0) end)
+  return accounts
+end
+
+---Make sure at least one WoW Account exists.
+---@return string accountId The id of the first (lowest order) account.
+function Data:EnsureDefaultAccount()
+  if TableCount(self.db.global.accounts) == 0 then
+    return self:CreateAccount()
+  end
+  local firstId, firstOrder
+  for id, account in pairs(self.db.global.accounts) do
+    if firstOrder == nil or (account.order or 0) < firstOrder then
+      firstId, firstOrder = id, (account.order or 0)
+    end
+  end
+  return firstId
+end
+
+---Create a new WoW Account bucket.
+---@param name string? Defaults to the next free number ("1", "2", ...)
+---@return string accountId
+function Data:CreateAccount(name)
+  -- Find the smallest free numbered slot instead of an ever-growing
+  -- counter -- so deleting e.g. "10" and creating a new one reuses 10
+  -- instead of jumping to 11+. Checked against the actual accounts table
+  -- (not a stored counter), so this is correct even after deletions leave
+  -- gaps.
+  local number = 1
+  while self.db.global.accounts["account_" .. number] do
+    number = number + 1
+  end
+  local id = "account_" .. number
+
+  local maxOrder = 0
+  for _, account in pairs(self.db.global.accounts) do
+    if (account.order or 0) > maxOrder then
+      maxOrder = account.order
+    end
+  end
+
+  self.db.global.accounts[id] = {
+    name = name or tostring(number),
+    enabled = true,
+    order = maxOrder + 1,
+  }
+
+  return id
+end
+
+---Rename a WoW Account.
+---@param accountId string
+---@param newName string
+function Data:RenameAccount(accountId, newName)
+  local account = self.db.global.accounts[accountId]
+  if account and newName and newName ~= "" then
+    account.name = newName
+  end
+end
+
+---Enable/disable tracking for every character inside a WoW Account at once.
+---Doesn't touch each character's own `enabled` flag -- disabling the account
+---just hides them all until the account is re-enabled.
+---@param accountId string
+---@param enabled boolean
+function Data:SetAccountEnabled(accountId, enabled)
+  local account = self.db.global.accounts[accountId]
+  if account then
+    account.enabled = enabled
+  end
+end
+
+---Delete a WoW Account. Characters inside it are moved to whichever account
+---is left with the lowest order. Refuses to delete the only remaining account.
+---@param accountId string
+---@return boolean success
+---@return string? errorMessage
+function Data:DeleteAccount(accountId)
+  if self.db.global.accounts[accountId] == nil then
+    return false
+  end
+  if TableCount(self.db.global.accounts) <= 1 then
+    return false, "You can't remove your only WoW Account."
+  end
+
+  self.db.global.accounts[accountId] = nil
+
+  local fallbackId = self:EnsureDefaultAccount()
+  for _, character in pairs(self.db.global.characters) do
+    if character.accountId == accountId then
+      character.accountId = fallbackId
+    end
+  end
+
+  return true
+end
+
+---Get the characters assigned to a specific WoW Account.
+---@param accountId string
+---@param unfiltered boolean? Include disabled characters too
+---@return AE_Character[]
+function Data:GetCharactersByAccount(accountId, unfiltered)
+  local characters = self:GetCharacters(true) -- unfiltered: we apply our own enabled/account filtering below
+  local result = {}
+  for _, character in ipairs(characters) do
+    local characterAccountId = character.accountId or self:EnsureDefaultAccount()
+    if characterAccountId == accountId and (unfiltered or character.enabled) then
+      table.insert(result, character)
+    end
+  end
+  return result
+end
+
+---Get (or create, first time) the WoW Account that a given sync passphrase's
+---characters should land in. Calling this again with the SAME passphrase
+---always returns the SAME account -- it only creates a new one the first
+---time that passphrase is ever seen, so repeat syncs don't pile up
+---duplicate accounts.
+---@param passphrase string
+---@return string accountId
+function Data:GetOrCreateAccountForPassphrase(passphrase)
+  if not passphrase or passphrase == "" then
+    return self:EnsureDefaultAccount()
+  end
+
+  self.db.global.sync.passphraseAccounts = self.db.global.sync.passphraseAccounts or {}
+  local accountId = self.db.global.sync.passphraseAccounts[passphrase]
+  if accountId and self.db.global.accounts[accountId] then
+    return accountId
+  end
+
+  local newAccountId = self:CreateAccount()
+  self.db.global.sync.passphraseAccounts[passphrase] = newAccountId
+  return newAccountId
+end
+
+---Mark a WoW Account as "Main" -- the one that represents the characters
+---THIS installation actually plays (as opposed to accounts holding
+---characters synced in from someone else). Only one account can be Main at
+---a time; marking a new one unmarks the previous one. Pass nil to clear it.
+---@param accountId string?
+function Data:SetMainAccount(accountId)
+  for id, account in pairs(self.db.global.accounts) do
+    account.isMain = (accountId ~= nil and id == accountId) or nil
+  end
+end
+
+---@return string? accountId The account marked Main, or nil if none is.
+function Data:GetMainAccountId()
+  -- Walks every account rather than returning on first match, and picks
+  -- the one with the lowest `order` if, somehow, more than one ended up
+  -- flagged (shouldn't happen via SetMainAccount, which always clears the
+  -- others first -- this just makes the result deterministic instead of
+  -- depending on Lua's unstable pairs() iteration order, which is what
+  -- would make "Main" look like it randomly jumps between accounts as
+  -- more get added). Any extra flags found this way are cleared so the
+  -- table self-heals back to the single-Main invariant.
+  local mainId, mainOrder
+  for id, account in pairs(self.db.global.accounts) do
+    if account.isMain and (mainId == nil or (account.order or 0) < mainOrder) then
+      mainId, mainOrder = id, (account.order or 0)
+    end
+  end
+  if mainId then
+    for id, account in pairs(self.db.global.accounts) do
+      if account.isMain and id ~= mainId then
+        account.isMain = nil
+      end
+    end
+  end
+  return mainId
+end
+
+---Characters eligible to go out over Sync. If a Main account is set, this
+---is ONLY the characters filed under it (so characters that came IN from a
+---friend's sync never get re-broadcast back out). If no Main account is
+---set, every currently-tracked character is eligible, same as before this
+---feature existed.
+---@return AE_Character[]
+function Data:GetSyncEligibleCharacters()
+  local characters = self:GetCharacters() -- same visibility rules as the main window
+  local mainAccountId = self:GetMainAccountId()
+  if not mainAccountId then
+    return characters
+  end
+
+  local result = {}
+  for _, character in ipairs(characters) do
+    if character.accountId == mainAccountId then
+      table.insert(result, character)
+    end
+  end
+  return result
+end
+
+---Move a character to a different WoW Account.
+---@param GUID string
+---@param accountId string
+function Data:MoveCharacterToAccount(GUID, accountId)
+  local character = self.db.global.characters[GUID]
+  if not character or self.db.global.accounts[accountId] == nil then return end
+  character.accountId = accountId
 end
 
 ---Get prey difficulties for the current season
@@ -853,6 +1085,10 @@ function Data:GetCharacters(unfiltered)
     if not character.enabled then
       keep = false
     end
+    local account = character.accountId and self.db.global.accounts[character.accountId]
+    if account and account.enabled == false then
+      keep = false
+    end
     if self.db.global.showZeroRatedCharacters == false and (character.mythicplus.rating and character.mythicplus.rating <= 0) then
       keep = false
     end
@@ -875,6 +1111,7 @@ function Data:UpdateDB()
   self:UpdateRaidInstances()
   self:UpdateVault()
   self:UpdateMythicPlus()
+  addon.Core:RequestSyncBroadcast()
 end
 
 ---Run database migrations when dbVersion changes
@@ -999,6 +1236,19 @@ function Data:MigrateDB()
     end
     if self.db.global.dbVersion == 36 then
       self.db.global.currentCharacterMarker = "dot"
+    end
+    -- Introduces WoW Account grouping in the Characters menu. Every existing
+    -- character gets bucketed into one auto-created account ("1") so
+    -- nothing changes visually until the user renames/splits things.
+    if self.db.global.dbVersion == 38 then
+      if TableCount(self.db.global.accounts) == 0 then
+        local defaultAccountId = self:CreateAccount()
+        for _, character in pairs(self.db.global.characters) do
+          if character.accountId == nil then
+            character.accountId = defaultAccountId
+          end
+        end
+      end
     end
     self.db.global.dbVersion = self.db.global.dbVersion + 1
     self:MigrateDB()
@@ -1272,6 +1522,7 @@ function Data:UpdateRaidInstances()
     character.raids.savedInstances[savedInstanceIndex] = savedInstance
   end
   addon.Core:Render()
+  addon.Core:RequestSyncBroadcast()
 end
 
 function Data:UpdatePreyProgress()
@@ -1415,6 +1666,7 @@ function Data:UpdateCharacterInfo()
 
   character.lastUpdate = GetServerTime()
   addon.Core:Render()
+  addon.Core:RequestSyncBroadcast()
 end
 
 ---Refresh character money from the API
@@ -1759,6 +2011,7 @@ function Data:UpdateKeystoneItem()
   end
 
   addon.Core:Render()
+  addon.Core:RequestSyncBroadcast()
 end
 
 ---Refresh Great Vault progress/info
@@ -1811,6 +2064,7 @@ function Data:UpdateVault()
 
   character.vault.hasAvailableRewards = C_WeeklyRewards.HasAvailableRewards() == true
   addon.Core:Render()
+  addon.Core:RequestSyncBroadcast()
 end
 
 ---Refresh Mythic+ data from the API
@@ -1875,6 +2129,7 @@ function Data:UpdateMythicPlus()
     table.insert(character.mythicplus.dungeons, dungeon)
   end
   addon.Core:Render()
+  addon.Core:RequestSyncBroadcast()
 end
 
 -- function Data:GetClasses()

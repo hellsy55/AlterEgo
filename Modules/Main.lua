@@ -40,6 +40,118 @@ do
   }
 end
 
+do
+  local dialogName = "ALTEREGO_RENAME_ACCOUNT"
+  StaticPopupDialogs[dialogName] = {
+    text = "Rename \"%s\"",
+    button1 = ACCEPT,
+    button2 = CANCEL,
+    button3 = DELETE,
+    hasEditBox = true,
+    maxLetters = 40,
+    OnShow = function(self, account)
+      -- The edit box region got renamed from `editBox` to `EditBox` in newer
+      -- client builds (Blizzard_StaticPopup_Game/GameDialog.lua) -- check
+      -- both so this doesn't error out depending on which one is running.
+      local editBox = self.EditBox or self.editBox
+      if not editBox then return end
+      editBox:SetText((account and account.name) or "")
+      editBox:HighlightText()
+      editBox:SetFocus()
+    end,
+    OnAccept = function(self, account)
+      local editBox = self.EditBox or self.editBox
+      if not editBox or not account then return end
+      local newName = strtrim(editBox:GetText() or "")
+      if newName ~= "" then
+        Data:RenameAccount(account.id, newName)
+        Module:Render()
+      end
+    end,
+    -- button3 -- opens a confirmation popup instead of deleting outright.
+    -- Characters inside the account get moved to another WoW Account (see
+    -- Data:DeleteAccount) rather than deleted themselves.
+    OnAlt = function(_, account)
+      if not account then return end
+      local numCharacters = TableCount(Data:GetCharactersByAccount(account.id, true))
+      StaticPopup_Show("ALTEREGO_CONFIRM_DELETE_ACCOUNT", account.name, numCharacters, account)
+    end,
+    EditBoxOnEnterPressed = function(self)
+      -- Going through StaticPopup_OnClick (the same dispatcher Blizzard's
+      -- own popups use) instead of self:GetParent().button1:Click() --
+      -- the button fields got restructured alongside the edit box in
+      -- newer builds, so this is the version-safe way to trigger Accept.
+      StaticPopup_OnClick(self:GetParent(), 1)
+    end,
+    EditBoxOnEscapePressed = function(self)
+      self:GetParent():Hide()
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
+do
+  local dialogName = "ALTEREGO_CONFIRM_DELETE_ACCOUNT"
+  StaticPopupDialogs[dialogName] = {
+    text = "Remove \"%s\"?\n\n%d character(s) inside it will be moved to your other WoW Account.\nThis cannot be undone.",
+    button1 = YES,
+    button2 = CANCEL,
+    OnAccept = function(_, account)
+      if account then
+        local ok, err = Data:DeleteAccount(account.id)
+        if not ok and err then
+          addon.Core:Print(err)
+        end
+        Module:Render()
+      end
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
+do
+  local dialogName = "ALTEREGO_SYNC_PASSPHRASE"
+  StaticPopupDialogs[dialogName] = {
+    text = "Sync Passphrase\n\nMust match exactly on every account you want to sync characters with.",
+    button1 = ACCEPT,
+    button2 = CANCEL,
+    hasEditBox = true,
+    maxLetters = 40,
+    OnShow = function(self)
+      -- The edit box region got renamed from `editBox` to `EditBox` in newer
+      -- client builds (Blizzard_StaticPopup_Game/GameDialog.lua) -- check
+      -- both so this doesn't error out depending on which one is running.
+      local editBox = self.EditBox or self.editBox
+      if not editBox then return end
+      editBox:SetText(Data.db.global.sync.passphrase or "")
+      editBox:HighlightText()
+      editBox:SetFocus()
+    end,
+    OnAccept = function(self)
+      local editBox = self.EditBox or self.editBox
+      if not editBox then return end
+      Data.db.global.sync.passphrase = strtrim(editBox:GetText() or "")
+    end,
+    EditBoxOnEnterPressed = function(self)
+      -- Going through StaticPopup_OnClick (the same dispatcher Blizzard's
+      -- own popups use) instead of self:GetParent().button1:Click() --
+      -- the button fields got restructured alongside the edit box in
+      -- newer builds, so this is the version-safe way to trigger Accept.
+      StaticPopup_OnClick(self:GetParent(), 1)
+    end,
+    EditBoxOnEscapePressed = function(self)
+      self:GetParent():Hide()
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
 local CHARACTER_WIDTH = 130
 local RAIDS_ROW_HEIGHT = 48
 local dungeonPortalUnlockLevel = 10
@@ -107,6 +219,22 @@ local function getMythicPlusVaultItemLevel(keystoneLevel)
     return levels[vaultMaxLevelRewardMythic]
   end
   return nil
+end
+
+---Whether we actually have item preview data for at least one unlocked
+---vault slot (exampleRewardLink is only populated once C_WeeklyRewards has
+---something to report -- a character can have hasAvailableRewards == true
+---while this is still empty if the Great Vault hasn't been opened on them
+---yet this week).
+---@param character AE_Character
+---@return boolean
+local function characterHasVaultPreviewData(character)
+  for _, slot in ipairs(character.vault and character.vault.slots or {}) do
+    if slot.progress and slot.threshold and slot.progress >= slot.threshold and slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
+      return true
+    end
+  end
+  return false
 end
 
 ---Print vault progress to tooltip
@@ -462,6 +590,7 @@ function Module:GetCharacterInfo(unfiltered)
   local dungeons = Data:GetDungeons()
   local _, seasonDisplayID = Data:GetCurrentSeason()
   local equipmentModule = addon.Core:GetModule("Equipment", true)
+  local vaultPreviewModule = addon.Core:GetModule("VaultPreview", true)
 
   ---@type AE_CharacterRows[]
   local rows = {
@@ -846,11 +975,30 @@ function Module:GetCharacterInfo(unfiltered)
           GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
           GameTooltip:AddLine("It's payday!", WHITE_FONT_COLOR.r, WHITE_FONT_COLOR.g, WHITE_FONT_COLOR.b)
           GameTooltip:AddLine(GREAT_VAULT_REWARDS_WAITING, GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b, true)
+          if vaultPreviewModule then
+            GameTooltip:AddLine(" ")
+            if characterHasVaultPreviewData(character) then
+              GameTooltip:AddLine("<Click to Preview Rewards>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+            else
+              GameTooltip:AddLine("Open the Great Vault to check rewards", ORANGE_FONT_COLOR.r, ORANGE_FONT_COLOR.g, ORANGE_FONT_COLOR.b, true)
+            end
+          end
           GameTooltip:Show()
         end
       end,
       onLeave = function()
         GameTooltip:Hide()
+      end,
+      onClick = function(infoFrame, character)
+        if not vaultPreviewModule then return end
+        if character.vault.hasAvailableRewards ~= true then return end
+        if not characterHasVaultPreviewData(character) then
+          GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+          GameTooltip:AddLine("Open the Great Vault to check rewards", ORANGE_FONT_COLOR.r, ORANGE_FONT_COLOR.g, ORANGE_FONT_COLOR.b, true)
+          GameTooltip:Show()
+          return
+        end
+        vaultPreviewModule:OpenCharacter(character)
       end,
       backgroundColor = {r = 0, g = 0, b = 0, a = 0.3},
       enabled = Data.db.global.vault.raids or Data.db.global.vault.dungeons or Data.db.global.vault.world,
@@ -1235,6 +1383,11 @@ function Module:Render()
         Module:Render()
       end,
       onSettingsMenu = function(window, menu)
+            -- The list has grown into a lot of sections (Character, Vault,
+            -- Currencies/Weeklies/Seasonal Chores, Announcements, Interface,
+            -- Multi-Account Sync...) -- without a scroll cap it just grows
+            -- to fit everything and can run off the bottom of the screen.
+            menu:SetScrollMode(math.min(600, GetScreenHeight() - 100))
             menu:CreateTitle(CHARACTER)
             local currentCharacterMarkerSetting = menu:CreateButton("Current character")
             TableForEach(Constants.currentCharacterMarkers, function(marker)
@@ -1727,17 +1880,73 @@ function Module:Render()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("No more moving the button around accidentally!", nil, nil, nil, true)
             end)
+            menu:CreateDivider()
+            menu:CreateTitle("Multi-Account Sync")
+            menu:CreateCheckbox(
+              "Enable Sync",
+              function() return Data.db.global.sync.enabled end,
+              function()
+                Data.db.global.sync.enabled = not Data.db.global.sync.enabled
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Shares your characters between your own WoW accounts, as long as they're logged in on the same guild and set the same passphrase below.", nil, nil, nil, true)
+              tooltip:AddLine("Nobody else in the guild sees or receives anything unless they also know your passphrase.", nil, nil, nil, true)
+            end)
+            local setPassphraseButton = menu:CreateButton(
+              Data.db.global.sync.passphrase ~= "" and "Change Passphrase" or "Set Passphrase",
+              function()
+                StaticPopup_Show("ALTEREGO_SYNC_PASSPHRASE")
+              end
+            )
+            setPassphraseButton:SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Must be identical on every account you want to sync with.", nil, nil, nil, true)
+            end)
+            local syncNowButton = menu:CreateButton(
+              "Sync Now",
+              function()
+                addon.Core:ForceSyncBroadcast()
+              end
+            )
+            syncNowButton:SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Sends your character right now instead of waiting for something to change, and prints why if it can't.", nil, nil, nil, true)
+              tooltip:AddLine("Use this to test that Sync is working.", nil, nil, nil, true)
+            end)
+            local syncAllButton = menu:CreateButton(
+              "Sync All Characters",
+              function()
+                addon.Core:ForceSyncBroadcastAll()
+              end
+            )
+            syncAllButton:SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Sends every character that's currently showing up as tracked (enabled character, enabled WoW Account) -- not just the one you're playing.", nil, nil, nil, true)
+              tooltip:AddLine("Sends one at a time, a couple seconds apart -- watch the chat for progress.", nil, nil, nil, true)
+            end)
+            local stopSyncButton = menu:CreateButton(
+              "Stop Sync",
+              function()
+                addon.Core:StopSync()
+              end
+            )
+            stopSyncButton:SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Turns Sync off right away -- same as unchecking Enable Sync above, just one click if something's going wrong.", nil, nil, nil, true)
+            end)
           end,
       titlebarButtons = {
         {
           name = "Characters",
-          icon = Constants.media.IconCharacters,
+          icon = Constants.media.IconAccount,
           tooltipTitle = "Characters",
           tooltipDescription = "Toggle your characters.",
           onMenu = function(_, rootMenu)
-            local charactersUnfiltered = Data:GetCharacters(true)
             rootMenu:SetScrollMode(math.min(20 * 50, GetScreenHeight() - 20)) -- 20 pixels per row, 50 rows
-            TableForEach(charactersUnfiltered, function(char)
+
+            ---Build the checkbox row for one character (same row used before this feature existed).
+            local function addCharacterRow(parentMenu, char)
               local nameColor = WHITE_FONT_COLOR
               if char.info.class.file ~= nil then
                 local classColor = C_ClassColor.GetClassColor(char.info.class.file)
@@ -1746,7 +1955,7 @@ function Module:Render()
                 end
               end
               local characterName = format("%s (%s)", nameColor:WrapTextInColorCode(char.info.name), char.info.realm)
-              local characterButton = rootMenu:CreateCheckbox(
+              local characterButton = parentMenu:CreateCheckbox(
                 characterName,
                 function(value) return Data.db.global.characters[value].enabled end,
                 function(value)
@@ -1755,6 +1964,18 @@ function Module:Render()
                 end,
                 char.GUID
               )
+              local moveCharacterButton = characterButton:CreateButton("Move Character")
+              TableForEach(Data:GetAccounts(), function(targetAccount)
+                moveCharacterButton:CreateRadio(
+                  targetAccount.name,
+                  function() return (char.accountId or Data:EnsureDefaultAccount()) == targetAccount.id end,
+                  function()
+                    Data:MoveCharacterToAccount(char.GUID, targetAccount.id)
+                    self:Render()
+                    return MenuResponse.Refresh
+                  end
+                )
+              end)
               if char.GUID ~= UnitGUID("player") then
                 local removeButton = characterButton:CreateButton("Remove character", function()
                   StaticPopup_Show("ALTEREGO_DELETE_CHARACTER", characterName, nil, char)
@@ -1764,9 +1985,138 @@ function Module:Render()
                   tooltip:AddLine(format("Remove %s?", characterName), nil, nil, nil, true)
                 end)
               end
+            end
+
+            local accounts = Data:GetAccounts()
+            TableForEach(accounts, function(account)
+              -- The row itself IS the "track this whole account" checkbox.
+              local accountRow = rootMenu:CreateCheckbox(
+                account.name,
+                function() return account.enabled end,
+                function()
+                  Data:SetAccountEnabled(account.id, not account.enabled)
+                  self:Render()
+                end
+              )
+
+              if accountRow.SetIcon then
+                accountRow:SetIcon(Constants.media.IconAccount)
+              end
+
+              -- ---------------------------------------------------------------
+              -- Right-click the row to rename this WoW Account. Deliberately
+              -- NOT adding a separate overlapping child frame (like the old
+              -- pencil-icon button) for this -- that approach was unreliable.
+              -- Instead this just listens for OnMouseUp on the row's own
+              -- button via HookScript (chains onto Blizzard's existing
+              -- handler rather than replacing it), so left-click
+              -- enable/disable toggling is completely untouched.
+              -- `AddInitializer` is the (undocumented, but Blizzard-used-
+              -- internally) hook that gives us access to the row's actual
+              -- button frame. Guarded behind `accountRow.AddInitializer` so
+              -- a Blizzard API change just silently skips this instead of
+              -- breaking the whole Characters menu.
+              -- ---------------------------------------------------------------
+              if accountRow.AddInitializer then
+                accountRow:AddInitializer(function(button)
+                  button:HookScript("OnMouseUp", function(_, buttonPressed)
+                    if buttonPressed == "RightButton" then
+                      StaticPopup_Show("ALTEREGO_RENAME_ACCOUNT", account.name, nil, account)
+                    end
+                  end)
+
+                  -- "Main" toggle -- marks which WoW Account this
+                  -- installation actually plays. Once set: Sync only ever
+                  -- SENDS characters filed under it, and never lets
+                  -- incoming sync data overwrite characters already filed
+                  -- under it (see Comm.lua). Gold "M" = this is the Main
+                  -- account; dim gray = it isn't. Click to toggle -- only
+                  -- one account can be Main, setting a new one clears the
+                  -- previous.
+                  -- NOTE: the Menu API reuses (pools) row button frames
+                  -- between renders/rows, so `button` here isn't
+                  -- guaranteed to be a fresh frame -- it might be one this
+                  -- same code already attached a mainButton to for a
+                  -- DIFFERENT account, or (per a real bug report) one now
+                  -- representing "+ Add WoW Account" below. So: reuse the
+                  -- child frame if it already exists instead of stacking a
+                  -- new one on top, and always re-point its callbacks at
+                  -- THIS row's `account` before showing it.
+                  if Data.GetMainAccountId and Data.SetMainAccount then
+                    local mainButton = button.AE_MainButton
+                    if not mainButton then
+                      mainButton = CreateFrame("Button", nil, button)
+                      mainButton:SetSize(16, 16)
+                      mainButton.Text = mainButton:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                      mainButton.Text:SetPoint("CENTER")
+                      mainButton.Text:SetText("M")
+                      button.AE_MainButton = mainButton
+                    end
+                    mainButton:ClearAllPoints()
+                    mainButton:SetPoint("RIGHT", button, "RIGHT", -20, 0)
+                    mainButton:Show()
+
+                    local function RefreshMainButtonColor()
+                      if Data:GetMainAccountId() == account.id then
+                        mainButton.Text:SetTextColor(1, 0.82, 0)
+                      else
+                        mainButton.Text:SetTextColor(0.5, 0.5, 0.5)
+                      end
+                    end
+                    RefreshMainButtonColor()
+
+                    mainButton:SetScript("OnEnter", function()
+                      GameTooltip:SetOwner(mainButton, "ANCHOR_TOP")
+                      if Data:GetMainAccountId() == account.id then
+                        GameTooltip:SetText("This is your Main WoW Account", 1, 1, 1, 1, true)
+                        GameTooltip:AddLine("Sync only sends characters from here, and never lets incoming sync data overwrite them. Click to unset.", nil, nil, nil, true)
+                      else
+                        GameTooltip:SetText("Set as Main WoW Account", 1, 1, 1, 1, true)
+                        GameTooltip:AddLine("Marks this as the account this installation actually plays. Sync will only send characters filed here, and will protect them from being overwritten by incoming sync data.", nil, nil, nil, true)
+                      end
+                      GameTooltip:Show()
+                    end)
+                    mainButton:SetScript("OnLeave", function()
+                      GameTooltip:Hide()
+                    end)
+                    mainButton:SetScript("OnClick", function()
+                      if Data:GetMainAccountId() == account.id then
+                        Data:SetMainAccount(nil)
+                      else
+                        Data:SetMainAccount(account.id)
+                      end
+                      RefreshMainButtonColor()
+                    end)
+                  end
+                end)
+              end
+
+              -- Expanding the row (hover arrow, same mechanism "Remove character"
+              -- already uses today) opens this account's own character list.
+              local accountCharacters = Data:GetCharactersByAccount(account.id, true)
+              TableForEach(accountCharacters, function(char)
+                addCharacterRow(accountRow, char)
+              end)
             end)
+
+            rootMenu:CreateDivider()
+            local addAccountButton = rootMenu:CreateButton("+ Add WoW Account", function()
+              Data:CreateAccount()
+              self:Render()
+            end)
+            -- Same frame-pooling reason as above: if this button's
+            -- underlying frame previously belonged to an account row, hide
+            -- whatever we attached to it there so it doesn't visually leak
+            -- onto this button.
+            if addAccountButton.AddInitializer then
+              addAccountButton:AddInitializer(function(button)
+                if button.AE_MainButton then
+                  button.AE_MainButton:Hide()
+                end
+              end)
+            end
           end,
-          iconSize = 14,
+          iconSize = 18,
         },
         {
           name = "Sorting",

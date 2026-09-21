@@ -1,7 +1,7 @@
 ## Interface: 120100
 ## Title: AlterEgo
 ## Notes: Mythic Plus tracker for all of your characters
-## Version: @project-version@
+## Version: local-20260920
 ## IconTexture: Interface\AddOns\AlterEgo\Media\LogoTransparent.blp
 ## SavedVariables: AlterEgoDB
 ## X-Website: https://www.curseforge.com/wow/addons/alterego
@@ -25,6 +25,9 @@ Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
 Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
 Libs\LibDBIcon-1.0\lib.xml
+Libs\LibDeflate\LibDeflate.lua
+Libs\LibSerialize\LibSerialize.lua
+Libs\AceComm-3.0\AceComm-3.0.xml
 Libs\LiqUI\LiqUI.xml
 Libs\AceAddon-3.0\AceAddon-3.0.xml
 Libs\AceTimer-3.0\AceTimer-3.0.xml
@@ -45,16 +48,10 @@ Data\UpgradeTracks.lua
 Data\Vault.lua
 Helpers.lua
 AlterEgo.lua
+Comm.lua
 
 Modules\Main.lua
 Modules\WeeklyAffixes.lua
 Modules\Equipment.lua
+Modules\VaultPreview.lua
 
-#@debug@
-Debug\Types\Addon.lua
-Debug\Types\Character.lua
-Debug\Types\Constants.lua
-Debug\Types\Events.lua
-Debug\Types\GameData.lua
-Debug\Types\Data.lua
-#@end-debug@

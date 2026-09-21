@@ -19,6 +19,7 @@ Constants.media = {
   IconKeyhole = format("Interface/AddOns/%s/Media/Icon_Keyhole.blp", addon.name),
   IconKillSkull = format("Interface/AddOns/%s/Media/Icon_Skull.blp", addon.name),
   IconKillDiamond = format("Interface/AddOns/%s/Media/Icon_Diamond.blp", addon.name),
+  IconAccount = format("Interface/AddOns/%s/Media/Icon_Account.blp", addon.name),
 }
 
 Constants.currentCharacterNameMarker = "|TInterface\\FriendsFrame\\StatusIcon-Online:12:12:1:-2|t"
