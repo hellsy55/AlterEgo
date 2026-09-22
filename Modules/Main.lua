@@ -2077,7 +2077,7 @@ function Module:RenderNow()
                 accountRow:SetIcon(Constants.media.IconAccount)
               end
 
-              accountRow:CreateButton("Rename WoW Account...", function()
+              accountRow:CreateButton("Rename or Delete WoW Account", function()
                 StaticPopup_Show("ALTEREGO_RENAME_ACCOUNT", account.name, nil, account)
               end)
 
@@ -2091,7 +2091,7 @@ function Module:RenderNow()
                 -- saved data, so there's nothing extra to keep in sync here).
                 -- No MenuResponse.Refresh here on purpose -- closes the whole
                 -- Accounts & Characters menu on click (same default behavior
-                -- as "Rename WoW Account..."/"Remove character" above),
+                -- as "Rename or Delete WoW Account"/"Remove character" above),
                 -- instead of staying open needing a manual close afterward.
                 local mainToggleButton = accountRow:CreateButton(
                   isMainAccount and "Unset as Main WoW Account" or "Set as Main WoW Account",
