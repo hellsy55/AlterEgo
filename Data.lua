@@ -194,6 +194,8 @@ Data.defaultCharacter = {
     slots = {},
     activityEncounterInfo = {},
     worldActivityProgress = {},
+    lastSnapshot = nil, ---@type AE_VaultSnapshot?
+    lastUpdatedAt = 0, ---@type number Data:UpdateVault last ran, regardless of what it found
   },
 }
 
@@ -1031,7 +1033,14 @@ end
 function Data:GetCharacters(unfiltered)
   local characters = {}
   for _, character in pairs(self.db.global.characters) do
-    if character.info.level ~= nil and character.info.level >= 80 then -- Todo later: GetMaxLevelForPlayerExpansion()
+    -- The max-level gate is a display FILTER (like enabled/account-enabled/
+    -- zero-rated below), not an existence check -- it must respect
+    -- `unfiltered` too. Applying it unconditionally here made every caller
+    -- that asks for the unfiltered list (e.g. the Characters menu's account
+    -- list, used to view/move/re-enable/delete characters) silently drop
+    -- every character below max level, with no way to ever see or manage
+    -- them again -- looking exactly like their data had vanished.
+    if unfiltered or (character.info.level ~= nil and character.info.level >= 80) then -- Todo later: GetMaxLevelForPlayerExpansion()
       table.insert(characters, character)
     end
   end
@@ -1265,6 +1274,10 @@ function Data:TaskWeeklyReset()
           character.vault.hasAvailableRewards = true
         end
       end)
+      -- Last chance to remember what was in the vault THIS character never
+      -- claimed -- character.vault.slots is about to be wiped below for
+      -- good (that's what the whole history feature protects against).
+      self:ArchiveVaultSnapshot(character)
       -- Mark previous m+ runs as not this week
       TableForEach(character.mythicplus.runHistory, function(run)
         run.thisWeek = false
@@ -1641,15 +1654,25 @@ function Data:UpdateCharacterInfo()
   if playerName then character.info.name = playerName end
   if playerRealm then character.info.realm = playerRealm end
   if playerLevel then character.info.level = playerLevel end
-  if type(character.info.race) ~= "table" then character.info.race = self.defaultCharacter.info.race end
+  -- IMPORTANT: these fallbacks must DEEP COPY the template, never assign it
+  -- directly. `self.defaultCharacter` is the single shared table used to
+  -- seed EVERY character; pointing `character.info.race` (etc.) straight at
+  -- `self.defaultCharacter.info.race` makes every character whose info was
+  -- ever missing/corrupt share the SAME table object. The very next lines
+  -- below then mutate that table in place (`character.info.race.name = ...`),
+  -- which silently overwrites the same fields for every OTHER character that
+  -- also got aliased onto it -- exactly the "one character's data stomps
+  -- everyone else's" symptom, just triggered by this repair path instead of
+  -- normal creation (which already deep copies via TableCopy in GetCharacter).
+  if type(character.info.race) ~= "table" then character.info.race = TableCopy(self.defaultCharacter.info.race) end
   if playerRaceName then character.info.race.name = playerRaceName end
   if playerRaceFile then character.info.race.file = playerRaceFile end
   if playerRaceID then character.info.race.id = playerRaceID end
-  if type(character.info.class) ~= "table" then character.info.class = self.defaultCharacter.info.class end
+  if type(character.info.class) ~= "table" then character.info.class = TableCopy(self.defaultCharacter.info.class) end
   if playerClassName then character.info.class.name = playerClassName end
   if playerClassFile then character.info.class.file = playerClassFile end
   if playerClassID then character.info.class.id = playerClassID end
-  if type(character.info.factionGroup) ~= "table" then character.info.factionGroup = self.defaultCharacter.info.factionGroup end
+  if type(character.info.factionGroup) ~= "table" then character.info.factionGroup = TableCopy(self.defaultCharacter.info.factionGroup) end
   if playerFactionGroupEnglish then character.info.factionGroup.english = playerFactionGroupEnglish end
   if playerFactionGroupLocalized then character.info.factionGroup.localized = playerFactionGroupLocalized end
   if avgItemLevel then character.info.ilvl.level = avgItemLevel end
@@ -1657,7 +1680,7 @@ function Data:UpdateCharacterInfo()
   if avgItemLevelPvp then character.info.ilvl.pvp = avgItemLevelPvp end
   if avgItemLevelEquipped then character.info.ilvl.potential = avgItemLevelEquipped + bagUpgradeDelta end
   if itemLevelColorR and itemLevelColorG and itemLevelColorB then character.info.ilvl.color = CreateColor(itemLevelColorR, itemLevelColorG, itemLevelColorB):GenerateHexColor() end
-  if type(character.info.guild) ~= "table" then character.info.guild = self.defaultCharacter.info.guild end
+  if type(character.info.guild) ~= "table" then character.info.guild = TableCopy(self.defaultCharacter.info.guild) end
   character.info.guild.name = guildName
   character.info.guild.rankName = guildRankName
   character.info.guild.rankIndex = guildRankIndex
@@ -2014,10 +2037,142 @@ function Data:UpdateKeystoneItem()
   addon.Core:RequestSyncBroadcast()
 end
 
+---Refresh `character.vault.lastSnapshot` from whatever's CURRENTLY unlocked
+---in `character.vault.slots`. Unlike `vault.slots` itself (wiped every
+---weekly reset by TaskWeeklyReset), this survives the reset -- so a reward
+---the player never opened the in-game Great Vault to claim can still be
+---shown by the "Rewards" click on the main window after it's already reset
+---for real. Called every time the real Great Vault is actually opened/
+---refreshed (Data:UpdateVault), so it always reflects the MOST RECENTLY
+---seen state -- exactly like re-opening the in-game window would.
+---Additive on purpose: only OVERWRITES a slot when this pass actually
+---found something unlocked for it; if the current week hasn't unlocked
+---anything yet, whatever was captured last time is simply left alone
+---instead of being blanked out.
+---@param character AE_Character
+function Data:ArchiveVaultSnapshot(character)
+  if not character.vault or not character.vault.slots then return end
+  local snapshot = character.vault.lastSnapshot
+  local hasAnyUnlocked = false
+  TableForEach(character.vault.slots, function(slot)
+    -- Gated on exampleRewardLink existing, NOT on progress >= threshold --
+    -- that pair can stay stale even once a reward genuinely exists (see
+    -- VaultPreview.lua::buildSlotCell for the real bug report this came
+    -- from), which was silently skipping slots here that already had a
+    -- perfectly good resolved item.
+    if slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
+      hasAnyUnlocked = true
+      snapshot = snapshot or { slots = {}, claimed = {} }
+      snapshot.slots[tostring(slot.id)] = {
+        type = slot.type,
+        index = slot.index,
+        level = slot.level, -- raw Blizzard value, not an ilvl -- same caveat as the live slot
+        exampleRewardLink = slot.exampleRewardLink,
+      }
+    end
+  end)
+  if hasAnyUnlocked then
+    snapshot.capturedAt = time()
+    character.vault.lastSnapshot = snapshot
+  end
+end
+
+---Best-effort: mark a Great Vault slot as actually claimed, so the "Rewards"
+---click knows it's gone. Hooked onto C_WeeklyRewards.ClaimReward below
+---(AlterEgo.lua) -- if that isn't really the function the "Choose" button
+---calls, the hook just never fires and nothing else breaks.
+---@param activityId number
+function Data:MarkVaultRewardClaimed(activityId)
+  local character = self:GetCharacter()
+  if not character or not character.vault.lastSnapshot then return end
+  character.vault.lastSnapshot.claimed = character.vault.lastSnapshot.claimed or {}
+  character.vault.lastSnapshot.claimed[tostring(activityId)] = true
+end
+
+---True if this character has a remembered Great Vault snapshot with at
+---least one slot -- used so "click Rewards to preview it" can still lead
+---somewhere for a character whose LIVE `vault.slots` was already wiped by
+---the weekly reset, as long as the last-known snapshot remembers something.
+---@param character AE_Character
+---@return boolean
+function Data:HasVaultHistory(character)
+  return character.vault ~= nil
+    and character.vault.lastSnapshot ~= nil
+    and next(character.vault.lastSnapshot.slots or {}) ~= nil
+end
+
+---Choose which of an already-generated reward's items to show as "the
+---item" for a vault slot -- mirrors Blizzard's own native Great Vault
+---window (WeeklyRewardActivityItemMixin:SetDisplayedItem in
+---Blizzard_WeeklyRewards.lua): among Item-type rewards (never currency,
+---never a keystone), the highest quality and, on a tie, the highest ilvl --
+---there's normally one equippable and one non-equippable reward, and this
+---picks the equippable one. Asynchronous on purpose: C_Item.GetItemInfo can
+---return nil the first time an item that isn't cached client-side yet is
+---queried.
+---@param rewards table[]
+---@param callback fun(itemLink: string?)
+local function resolveBestVaultItemReward(rewards, callback)
+  local itemRewards = {}
+  for _, r in ipairs(rewards or {}) do
+    if r.type == Enum.CachedRewardType.Item and r.itemDBID and not C_Item.IsItemKeystoneByID(r.id) then
+      table.insert(itemRewards, r)
+    end
+  end
+  if #itemRewards == 0 then
+    callback(nil)
+    return
+  end
+
+  local container = ContinuableContainer:Create()
+  for _, r in ipairs(itemRewards) do
+    container:AddContinuable(Item:CreateFromItemID(r.id))
+  end
+  container:ContinueOnLoad(function()
+    local best, bestQuality, bestLevel = nil, -1, -1
+    for _, r in ipairs(itemRewards) do
+      local _, _, quality, ilvl = C_Item.GetItemInfo(r.id)
+      quality, ilvl = quality or 0, ilvl or 0
+      if quality > bestQuality or (quality == bestQuality and ilvl > bestLevel) then
+        best, bestQuality, bestLevel = r, quality, ilvl
+      end
+    end
+    callback(best and C_WeeklyRewards.GetItemHyperlink(best.itemDBID) or nil)
+  end)
+end
+
+---Best-effort M+/Great Vault "season week" number, purely for display.
+---WoW doesn't expose a season week number through any public API, so this
+---is calibrated once (see SetSeasonWeekAnchor) from a week number the
+---player confirms, and every other week is computed from there by simply
+---counting 7-day (604800s) increments away from that anchor's reset
+---timestamp -- exactly how often self.db.global.weeklyReset advances.
+---@return number? weekNumber nil if never calibrated
+function Data:GetSeasonWeekNumber()
+  local anchor = self.db.global.seasonWeekAnchor
+  if not anchor or type(self.db.global.weeklyReset) ~= "number" then return nil end
+  local weeksElapsed = Round((self.db.global.weeklyReset - anchor.weeklyReset) / 604800)
+  return anchor.week + weeksElapsed
+end
+
+---(Re-)calibrate: "the week ending at the CURRENT self.db.global.weeklyReset
+---is week `week`". Every other week's number (GetSeasonWeekNumber) is then
+---just counted in 7-day steps from this one point -- call this again
+---whenever the number drifts (a new season starting over at week 1, a
+---server-side calendar hiccup, etc.) to re-anchor from that point on.
+---@param week number
+function Data:SetSeasonWeekAnchor(week)
+  self.db.global.seasonWeekAnchor = {
+    weeklyReset = self.db.global.weeklyReset,
+    week = week,
+  }
+end
+
 ---Refresh Great Vault progress/info
 function Data:UpdateVault()
   local character = self:GetCharacter()
   if not character then return end
+  character.vault.lastUpdatedAt = time()
 
   character.vault.activityEncounterInfo = wipe(character.vault.activityEncounterInfo or {})
   character.vault.slots = wipe(character.vault.slots or {})
@@ -2047,7 +2202,30 @@ function Data:UpdateVault()
       activity.exampleRewardUpgradeLink = upgradeItemLink
     end
     table.insert(character.vault.slots, activity)
+
+    -- The "example" link above is only a representative sample and can
+    -- come back empty even though the slot is genuinely unlocked in-game
+    -- (a real bug report confirmed this: a slot the player could see and
+    -- claim in the native window showed nothing in the addon).
+    -- `activity.rewards` is only populated once Blizzard has ACTUALLY
+    -- generated the concrete reward -- the same source the native Great
+    -- Vault window itself reads from -- so once it's there, resolve and
+    -- use the real reward instead, overwriting the example. pcall'd: this
+    -- is new async code, and a failure here must never cost the rest of
+    -- Update() (which already happened, above).
+    if activity.rewards and #activity.rewards > 0 then
+      local ok, err = pcall(resolveBestVaultItemReward, activity.rewards, function(itemLink)
+        if not itemLink then return end
+        activity.exampleRewardLink = itemLink
+        self:ArchiveVaultSnapshot(character)
+        addon.Core:Render()
+      end)
+      if not ok then
+        geterrorhandler()(("AlterEgo: resolveBestVaultItemReward failed: %s"):format(tostring(err)))
+      end
+    end
   end)
+  self:ArchiveVaultSnapshot(character)
 
   local worldActivityProgress = C_WeeklyRewards.GetSortedProgressForActivity(Enum.WeeklyRewardChestThresholdType.World, true)
   if worldActivityProgress then
@@ -2063,6 +2241,14 @@ function Data:UpdateVault()
   end
 
   character.vault.hasAvailableRewards = C_WeeklyRewards.HasAvailableRewards() == true
+  if not character.vault.hasAvailableRewards then
+    -- Genuinely nothing left to claim right now (either it was claimed, or
+    -- there was truly nothing to begin with) -- the "Rewards" click on the
+    -- main window already hides itself the moment this is false, so the
+    -- remembered snapshot has no reader left; clear it instead of leaving
+    -- stale data sitting around forever.
+    character.vault.lastSnapshot = nil
+  end
   addon.Core:Render()
   addon.Core:RequestSyncBroadcast()
 end

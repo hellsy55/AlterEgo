@@ -24,7 +24,17 @@ function Core:OnInitialize()
   _G["ALTEREGO_TOGGLE_WINDOW"] = self.ToggleWindow
   _G["ALTEREGO_TOGGLE_VAULT"] = self.ToggleVault
   _G["ALTEREGO_TOGGLE_EQUIPMENT"] = self.ToggleEquipment
-  self:RegisterChatCommand(addon.name:lower(), function()
+  self:RegisterChatCommand(addon.name:lower(), function(input)
+    -- Manual recalibration for the Great Vault's displayed season week
+    -- number (see CheckGameData's one-time seed and Data.lua::
+    -- SetSeasonWeekAnchor) -- for the rare case it ever needs correcting.
+    local week = input and input:match("^setweek%s+(%d+)$")
+    if week then
+      Data:SetSeasonWeekAnchor(tonumber(week))
+      self:Print(format("Great Vault season week manually set to %d.", tonumber(week)))
+      self:Render()
+      return
+    end
     self:ToggleWindow()
   end)
   TableForEach(Constants.commands, function(command)
@@ -74,6 +84,16 @@ function Core:OnInitialize()
   hooksecurefunc("ResetInstances", function()
     self:OnInstanceReset()
   end)
+  -- Best-effort claim detection for Great Vault history (Data.lua::
+  -- MarkVaultRewardClaimed) -- same caveat GG's addon documents for the
+  -- identical hook: there's no verified confirmation this is really the
+  -- function the "Choose" button calls, so this is guarded so a wrong/
+  -- renamed API just silently doesn't hook anything instead of erroring.
+  if type(C_WeeklyRewards) == "table" and type(C_WeeklyRewards.ClaimReward) == "function" then
+    hooksecurefunc(C_WeeklyRewards, "ClaimReward", function(activityId)
+      Data:MarkVaultRewardClaimed(activityId)
+    end)
+  end
   self:Render()
 end
 
@@ -158,6 +178,23 @@ function Core:OnEnable()
       Data:UpdateVault()
     end
   )
+  -- WEEKLY_REWARDS_UPDATE alone isn't reliable for "the player just
+  -- reopened the Great Vault" -- a real bug report confirmed the addon's
+  -- window stayed empty/stale on a SECOND look at the vault this session,
+  -- even though the first open worked. Closing the Great Vault frame
+  -- (PLAYER_INTERACTION_MANAGER_FRAME_HIDE, filtered to the WeeklyRewards
+  -- interaction type) is the same "the player just looked at this" signal
+  -- already used elsewhere for the keystone announce flush -- rereading
+  -- twice, 1s and 3s after close, covers Blizzard's data settling with a
+  -- short server-side delay instead of gambling on one fixed number.
+  addon.Events:RegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", function(_, _, interactionType)
+    if interactionType ~= Enum.PlayerInteractionType.WeeklyRewards then return end
+    for _, delay in ipairs({1, 3}) do
+      C_Timer.After(delay, function()
+        Data:UpdateVault()
+      end)
+    end
+  end)
   addon.Events:RegisterEvent(
     {
       "LFG_UPDATE_RANDOM_INFO",
@@ -276,8 +313,30 @@ function Core:CheckGameData()
   Data:loadGameData()
   Data:TaskWeeklyReset()
   Data:TaskSeasonReset()
+  -- One-time calibration for the Great Vault's displayed season week
+  -- number (Data.lua::GetSeasonWeekNumber) -- WoW has no API for this, so
+  -- it's seeded once from a week number confirmed correct on the day this
+  -- was added (this week's reset == week 7), then every other week just
+  -- counts 7-day steps from that anchor. `/alterego setweek N` re-anchors
+  -- it manually later if it ever needs correcting (a new season starting
+  -- over, a mistaken seed on an install that first ran in a different
+  -- week, etc.).
+  if not Data.db.global.seasonWeekAnchor then
+    Data:SetSeasonWeekAnchor(7)
+  end
   Data:UpdateDB()
   self:Render()
+
+  -- There's no dedicated "the weekly reset just happened" event in the
+  -- game's API -- Data:TaskWeeklyReset only ever re-checks the boundary
+  -- when THIS function runs, which otherwise only happens at login/reload.
+  -- Self-reschedule this same check to fire again right when the next
+  -- boundary passes (C_DateAndTime.GetSecondsUntilWeeklyReset(), the same
+  -- function TaskWeeklyReset itself uses to set the next reset timestamp),
+  -- so the Great Vault season week (and everything else TaskWeeklyReset
+  -- handles) updates live for anyone still logged in through it, instead
+  -- of needing a relog/reload to notice.
+  self:ScheduleTimer("CheckGameData", C_DateAndTime.GetSecondsUntilWeeklyReset() + 5)
 end
 
 ---Handle instance reset

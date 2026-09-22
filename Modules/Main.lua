@@ -225,16 +225,23 @@ end
 ---vault slot (exampleRewardLink is only populated once C_WeeklyRewards has
 ---something to report -- a character can have hasAvailableRewards == true
 ---while this is still empty if the Great Vault hasn't been opened on them
----yet this week).
+---yet this week) -- OR, failing that, whether history remembers a past
+---week's contents (Data:HasVaultHistory), which covers a character whose
+---live `vault.slots` was already wiped by the weekly reset before this
+---was clicked. Deliberately does NOT also require
+---slot.progress >= slot.threshold -- that pair can stay stale even once a
+---reward genuinely exists (see VaultPreview.lua::buildSlotCell for the
+---real bug report this came from); exampleRewardLink being populated at
+---all is the reliable signal.
 ---@param character AE_Character
 ---@return boolean
 local function characterHasVaultPreviewData(character)
   for _, slot in ipairs(character.vault and character.vault.slots or {}) do
-    if slot.progress and slot.threshold and slot.progress >= slot.threshold and slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
+    if slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
       return true
     end
   end
-  return false
+  return Data:HasVaultHistory(character)
 end
 
 ---Print vault progress to tooltip
@@ -998,7 +1005,21 @@ function Module:GetCharacterInfo(unfiltered)
           GameTooltip:Show()
           return
         end
-        vaultPreviewModule:OpenCharacter(character)
+        -- Prefer the LIVE current data if it actually has something --
+        -- otherwise characterHasVaultPreviewData above only returned true
+        -- because of the snapshot fallback (e.g. this character's vault
+        -- already reset since they last logged in), so open straight into
+        -- that remembered snapshot instead of landing on an empty grid.
+        -- Same reasoning as characterHasVaultPreviewData above: only
+        -- exampleRewardLink decides this, not progress/threshold.
+        local hasLiveData = false
+        for _, slot in ipairs(character.vault.slots or {}) do
+          if slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
+            hasLiveData = true
+            break
+          end
+        end
+        vaultPreviewModule:OpenCharacter(character, not hasLiveData)
       end,
       backgroundColor = {r = 0, g = 0, b = 0, a = 0.3},
       enabled = Data.db.global.vault.raids or Data.db.global.vault.dungeons or Data.db.global.vault.world,
@@ -1341,7 +1362,32 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
 end
 
 ---Render the main window
+-- The entire Settings menu tree below (Characters, Sorting, Sync, etc.)
+-- runs its checkbox/button/radio callbacks synchronously as part of
+-- Blizzard's own Menu click-and-close sequence (Menu.lua Pick ->
+-- SendResponse -> ... -> CloseMenu). A real Lua error was reported from
+-- exactly that chain: closing one of these menus after a click triggered a
+-- ScrollBox recompute (for some other already-open piece of Blizzard UI)
+-- that hit a "secret number" value, and failed specifically because
+-- execution was "tainted by 'AlterEgo'" -- i.e. because OUR code was still
+-- on the call stack when Blizzard's own post-click/close logic ran.
+-- Deferring the actual heavy Render() work by one frame (C_Timer.After(0,
+-- ...)) gets it off that stack entirely: by the time it runs, Blizzard's
+-- menu has already fully closed and there's no addon taint left for it to
+-- collide with. `pendingRender` collapses any burst of Render() calls
+-- (several menu items, or several game events, firing in the same frame)
+-- into a single deferred pass instead of one per call.
+local pendingRender = false
 function Module:Render()
+  if pendingRender then return end
+  pendingRender = true
+  C_Timer.After(0, function()
+    pendingRender = false
+    Module:RenderNow()
+  end)
+end
+
+function Module:RenderNow()
   ResetRowHighlightFrames()
   local currentAffixes = Data:GetCurrentAffixes()
   local seasonID = Data:GetCurrentSeason()
@@ -1938,9 +1984,9 @@ function Module:Render()
           end,
       titlebarButtons = {
         {
-          name = "Characters",
+          name = "Accounts & Characters",
           icon = Constants.media.IconAccount,
-          tooltipTitle = "Characters",
+          tooltipTitle = "Accounts & Characters",
           tooltipDescription = "Toggle your characters.",
           onMenu = function(_, rootMenu)
             rootMenu:SetScrollMode(math.min(20 * 50, GetScreenHeight() - 20)) -- 20 pixels per row, 50 rows
@@ -1989,9 +2035,37 @@ function Module:Render()
 
             local accounts = Data:GetAccounts()
             TableForEach(accounts, function(account)
+              -- ---------------------------------------------------------------
+              -- REAL BUG FIXED HERE, for good this time: renaming and the
+              -- "Main WoW Account" toggle used to be a right-click hitbox and
+              -- a clickable "M" glyph, both implemented as a custom child
+              -- frame attached to this row's underlying Blizzard button.
+              -- Blizzard's Menu API pools that exact frame GLOBALLY, across
+              -- every dropdown in the game -- not just this addon's own
+              -- menus, but every OTHER window's own generic "Settings" gear
+              -- (LiqUI adds one to every window automatically), any other
+              -- addon's menus, and even native secure menus (a real bug
+              -- report: right-clicking a raid-frame unit's own context menu
+              -- broke a protected Blizzard function because our own code had
+              -- run on that same shared frame at some point). No registry of
+              -- "hide this on every OTHER menu we know about" can ever fully
+              -- close that off, since there's no way to enumerate every
+              -- dropdown that might ever reuse the frame. The only fully
+              -- robust fix is what's below: plain, native menu content (a
+              -- text badge, ordinary submenu buttons, exactly like "Remove
+              -- character"/"Move Character" already use safely elsewhere in
+              -- this same menu) that Blizzard's OWN menu framework owns and
+              -- rebuilds fresh every time -- there is nothing left behind on
+              -- the shared frame for a later, unrelated menu to inherit.
+              -- ---------------------------------------------------------------
+              local isMainAccount = Data.GetMainAccountId and Data:GetMainAccountId() == account.id
+
               -- The row itself IS the "track this whole account" checkbox.
+              -- The Main WoW Account badge is plain text baked into the
+              -- label -- computed fresh every time this menu is built,
+              -- exactly like character rows already color names by class.
               local accountRow = rootMenu:CreateCheckbox(
-                account.name,
+                isMainAccount and format("%s  |cffffd100[Main]|r", account.name) or account.name,
                 function() return account.enabled end,
                 function()
                   Data:SetAccountEnabled(account.id, not account.enabled)
@@ -2003,90 +2077,39 @@ function Module:Render()
                 accountRow:SetIcon(Constants.media.IconAccount)
               end
 
-              -- ---------------------------------------------------------------
-              -- Right-click the row to rename this WoW Account. Deliberately
-              -- NOT adding a separate overlapping child frame (like the old
-              -- pencil-icon button) for this -- that approach was unreliable.
-              -- Instead this just listens for OnMouseUp on the row's own
-              -- button via HookScript (chains onto Blizzard's existing
-              -- handler rather than replacing it), so left-click
-              -- enable/disable toggling is completely untouched.
-              -- `AddInitializer` is the (undocumented, but Blizzard-used-
-              -- internally) hook that gives us access to the row's actual
-              -- button frame. Guarded behind `accountRow.AddInitializer` so
-              -- a Blizzard API change just silently skips this instead of
-              -- breaking the whole Characters menu.
-              -- ---------------------------------------------------------------
-              if accountRow.AddInitializer then
-                accountRow:AddInitializer(function(button)
-                  button:HookScript("OnMouseUp", function(_, buttonPressed)
-                    if buttonPressed == "RightButton" then
-                      StaticPopup_Show("ALTEREGO_RENAME_ACCOUNT", account.name, nil, account)
-                    end
-                  end)
+              accountRow:CreateButton("Rename WoW Account...", function()
+                StaticPopup_Show("ALTEREGO_RENAME_ACCOUNT", account.name, nil, account)
+              end)
 
-                  -- "Main" toggle -- marks which WoW Account this
-                  -- installation actually plays. Once set: Sync only ever
-                  -- SENDS characters filed under it, and never lets
-                  -- incoming sync data overwrite characters already filed
-                  -- under it (see Comm.lua). Gold "M" = this is the Main
-                  -- account; dim gray = it isn't. Click to toggle -- only
-                  -- one account can be Main, setting a new one clears the
-                  -- previous.
-                  -- NOTE: the Menu API reuses (pools) row button frames
-                  -- between renders/rows, so `button` here isn't
-                  -- guaranteed to be a fresh frame -- it might be one this
-                  -- same code already attached a mainButton to for a
-                  -- DIFFERENT account, or (per a real bug report) one now
-                  -- representing "+ Add WoW Account" below. So: reuse the
-                  -- child frame if it already exists instead of stacking a
-                  -- new one on top, and always re-point its callbacks at
-                  -- THIS row's `account` before showing it.
-                  if Data.GetMainAccountId and Data.SetMainAccount then
-                    local mainButton = button.AE_MainButton
-                    if not mainButton then
-                      mainButton = CreateFrame("Button", nil, button)
-                      mainButton:SetSize(16, 16)
-                      mainButton.Text = mainButton:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                      mainButton.Text:SetPoint("CENTER")
-                      mainButton.Text:SetText("M")
-                      button.AE_MainButton = mainButton
+              if Data.GetMainAccountId and Data.SetMainAccount then
+                -- "Main" toggle -- marks which WoW Account this installation
+                -- actually plays. Once set: Sync only ever SENDS characters
+                -- filed under it, and never lets incoming sync data overwrite
+                -- characters already filed under it (see Comm.lua). Only one
+                -- account can be Main -- setting a new one clears the
+                -- previous (Data:SetMainAccount already enforces this in the
+                -- saved data, so there's nothing extra to keep in sync here).
+                -- No MenuResponse.Refresh here on purpose -- closes the whole
+                -- Accounts & Characters menu on click (same default behavior
+                -- as "Rename WoW Account..."/"Remove character" above),
+                -- instead of staying open needing a manual close afterward.
+                local mainToggleButton = accountRow:CreateButton(
+                  isMainAccount and "Unset as Main WoW Account" or "Set as Main WoW Account",
+                  function()
+                    if isMainAccount then
+                      Data:SetMainAccount(nil)
+                    else
+                      Data:SetMainAccount(account.id)
                     end
-                    mainButton:ClearAllPoints()
-                    mainButton:SetPoint("RIGHT", button, "RIGHT", -20, 0)
-                    mainButton:Show()
-
-                    local function RefreshMainButtonColor()
-                      if Data:GetMainAccountId() == account.id then
-                        mainButton.Text:SetTextColor(1, 0.82, 0)
-                      else
-                        mainButton.Text:SetTextColor(0.5, 0.5, 0.5)
-                      end
-                    end
-                    RefreshMainButtonColor()
-
-                    mainButton:SetScript("OnEnter", function()
-                      GameTooltip:SetOwner(mainButton, "ANCHOR_TOP")
-                      if Data:GetMainAccountId() == account.id then
-                        GameTooltip:SetText("This is your Main WoW Account", 1, 1, 1, 1, true)
-                        GameTooltip:AddLine("Sync only sends characters from here, and never lets incoming sync data overwrite them. Click to unset.", nil, nil, nil, true)
-                      else
-                        GameTooltip:SetText("Set as Main WoW Account", 1, 1, 1, 1, true)
-                        GameTooltip:AddLine("Marks this as the account this installation actually plays. Sync will only send characters filed here, and will protect them from being overwritten by incoming sync data.", nil, nil, nil, true)
-                      end
-                      GameTooltip:Show()
-                    end)
-                    mainButton:SetScript("OnLeave", function()
-                      GameTooltip:Hide()
-                    end)
-                    mainButton:SetScript("OnClick", function()
-                      if Data:GetMainAccountId() == account.id then
-                        Data:SetMainAccount(nil)
-                      else
-                        Data:SetMainAccount(account.id)
-                      end
-                      RefreshMainButtonColor()
-                    end)
+                    self:Render()
+                  end
+                )
+                mainToggleButton:SetTooltip(function(tooltip, elm)
+                  tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+                  if isMainAccount then
+                    tooltip:AddLine("Sync only sends characters from here, and never lets incoming sync data overwrite them.", nil, nil, nil, true)
+                  else
+                    tooltip:AddLine("Marks this as the account this installation actually plays. Sync will only send characters filed here, and will protect them from being overwritten by incoming sync data.", nil, nil, nil, true)
                   end
                 end)
               end
@@ -2100,21 +2123,10 @@ function Module:Render()
             end)
 
             rootMenu:CreateDivider()
-            local addAccountButton = rootMenu:CreateButton("+ Add WoW Account", function()
+            rootMenu:CreateButton("+ Add WoW Account", function()
               Data:CreateAccount()
               self:Render()
             end)
-            -- Same frame-pooling reason as above: if this button's
-            -- underlying frame previously belonged to an account row, hide
-            -- whatever we attached to it there so it doesn't visually leak
-            -- onto this button.
-            if addAccountButton.AddInitializer then
-              addAccountButton:AddInitializer(function(button)
-                if button.AE_MainButton then
-                  button.AE_MainButton:Hide()
-                end
-              end)
-            end
           end,
           iconSize = 18,
         },
