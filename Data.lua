@@ -114,6 +114,7 @@ Data.defaultDB = {
     sync = {
       enabled = false,
       passphrase = "",
+      channel = "GUILD", ---@type "BOTH"|"GUILD"|"PARTY" Which distribution(s) to send on when more than one is available. "GUILD" (default) restricts sends to the guild channel; "PARTY" restricts to party/raid; "BOTH" sends on every channel that applies (see Comm.lua's GetUsableChannels).
       passphraseAccounts = {}, ---@type table<string, string> Which WoW Account each passphrase's synced characters land in
       lastSentUpdate = {}, ---@type table<string, number> Per-character GUID -> the character.lastUpdate value we last actually broadcast, so unchanged characters aren't resent
     },
@@ -216,6 +217,20 @@ function Data:Initialize()
     self.defaultDB,
     true
   )
+
+  -- Sync needs a Main WoW Account to know which characters are "yours" to
+  -- send (see GetSyncEligibleCharacters). Rather than leave that unset
+  -- until the user notices and picks one manually, default it in the
+  -- moment none is marked -- the lowest-numbered account (normally "1",
+  -- and the only one that exists yet on a fresh install). The user can
+  -- always change this later from the Characters menu; this only fills in
+  -- a sane starting point instead of Sync silently doing nothing useful
+  -- (or, before this existed, treating "no Main set" as "everything is
+  -- eligible", which quietly re-broadcasts characters that came IN from
+  -- someone else's sync).
+  if not self:GetMainAccountId() then
+    self:SetMainAccount(self:EnsureDefaultAccount())
+  end
 end
 
 ---Get the current Season IDs
@@ -663,19 +678,54 @@ function Data:EnsureDefaultAccount()
 end
 
 ---Create a new WoW Account bucket.
----@param name string? Defaults to the next free number ("1", "2", ...)
+---@param name string? Explicit name; wins over everything else if given.
+---@param passphrase string? When name is nil, names the new account "<number> (<passphrase>)" instead of just "<number>" -- used by GetOrCreateAccountForPassphrase so it's obvious at a glance which sync passphrase's incoming characters live in this bucket.
 ---@return string accountId
-function Data:CreateAccount(name)
-  -- Find the smallest free numbered slot instead of an ever-growing
-  -- counter -- so deleting e.g. "10" and creating a new one reuses 10
-  -- instead of jumping to 11+. Checked against the actual accounts table
-  -- (not a stored counter), so this is correct even after deletions leave
-  -- gaps.
-  local number = 1
-  while self.db.global.accounts["account_" .. number] do
-    number = number + 1
+function Data:CreateAccount(name, passphrase)
+  -- The display NAME's number is picked by checking what's actually
+  -- already shown in the list -- not just which internal "account_N" id
+  -- slot happens to be free. Those two used to be the same number, which
+  -- meant a freed-up id slot (from a past deletion) could hand a brand
+  -- new account the same NUMBER as one still sitting right there in the
+  -- list, under a different id, producing two entries that looked
+  -- identically named. Starting from the current account COUNT and
+  -- nudging it up past anything already using that exact name (as
+  -- "<number>" or "<number> (<passphrase>)") guarantees a name that's
+  -- never a duplicate of what's currently visible, regardless of what
+  -- id-slot numbering history looks like underneath.
+  local function nameTaken(candidateName)
+    for _, account in pairs(self.db.global.accounts) do
+      if account.name == candidateName then
+        return true
+      end
+    end
+    return false
   end
-  local id = "account_" .. number
+
+  local number = TableCount(self.db.global.accounts) + 1
+  local function nameForNumber(n)
+    return name or (passphrase and format("%d (%s)", n, passphrase)) or tostring(n)
+  end
+  if not name then
+    -- Only the auto-numbered forms actually change as number increases --
+    -- an explicit name is fixed regardless of number, so looping on it
+    -- would either do nothing useful or spin forever if that exact name
+    -- happens to already be taken. An explicit name is trusted as-is.
+    while nameTaken(nameForNumber(number)) do
+      number = number + 1
+    end
+  end
+
+  -- The internal id, separately: smallest free "account_N" slot, so
+  -- deleting e.g. account "10" and creating a new one reuses that slot
+  -- instead of ids growing forever. This is bookkeeping only -- it's
+  -- never shown to the person, so it drifting out of step with the
+  -- display numbering above is harmless.
+  local idNumber = 1
+  while self.db.global.accounts["account_" .. idNumber] do
+    idNumber = idNumber + 1
+  end
+  local id = "account_" .. idNumber
 
   local maxOrder = 0
   for _, account in pairs(self.db.global.accounts) do
@@ -685,7 +735,7 @@ function Data:CreateAccount(name)
   end
 
   self.db.global.accounts[id] = {
-    name = name or tostring(number),
+    name = nameForNumber(number),
     enabled = true,
     order = maxOrder + 1,
   }
@@ -715,8 +765,8 @@ function Data:SetAccountEnabled(accountId, enabled)
   end
 end
 
----Delete a WoW Account. Characters inside it are moved to whichever account
----is left with the lowest order. Refuses to delete the only remaining account.
+---Delete a WoW Account, and every character filed inside it -- they're not
+---moved anywhere, they're gone. Refuses to delete the only remaining account.
 ---@param accountId string
 ---@return boolean success
 ---@return string? errorMessage
@@ -730,11 +780,20 @@ function Data:DeleteAccount(accountId)
 
   self.db.global.accounts[accountId] = nil
 
-  local fallbackId = self:EnsureDefaultAccount()
-  for _, character in pairs(self.db.global.characters) do
+  for GUID, character in pairs(self.db.global.characters) do
     if character.accountId == accountId then
-      character.accountId = fallbackId
+      self.db.global.characters[GUID] = nil
     end
+  end
+
+  local fallbackId = self:EnsureDefaultAccount()
+
+  -- If the account we just deleted was Main, it took the Main flag down
+  -- with it (the flag lived on that now-gone account entry) -- re-default
+  -- to the fallback account instead of silently leaving Sync with no Main
+  -- set until the next reload.
+  if not self:GetMainAccountId() then
+    self:SetMainAccount(fallbackId)
   end
 
   return true
@@ -756,11 +815,30 @@ function Data:GetCharactersByAccount(accountId, unfiltered)
   return result
 end
 
----Get (or create, first time) the WoW Account that a given sync passphrase's
----characters should land in. Calling this again with the SAME passphrase
----always returns the SAME account -- it only creates a new one the first
----time that passphrase is ever seen, so repeat syncs don't pile up
----duplicate accounts.
+---Get (or find/create, first time) the WoW Account that a given sync
+---passphrase's INCOMING characters should land in -- resolved by NAME, not
+---a hidden internal id: if any existing account's name already contains
+---the passphrase text, that account is reused as-is (no renaming) -- so
+---you can pre-create and name your own bucket (e.g. "Friends
+---(hunterparty2026)") and incoming characters synced with that passphrase
+---will land inside it instead of a separate new account being created
+---next to it. Otherwise a brand new account is created and named
+---"<number> (<passphrase>)" so it's obvious at a glance which passphrase's
+---characters live there.
+---Calling this again with the SAME passphrase keeps returning the SAME
+---account id, cached once resolved -- so repeat syncs don't create
+---duplicates, and it keeps working even if you later rename the account to
+---something that no longer contains the passphrase text.
+---HARD RULE, checked at every return point: this NEVER returns the Main
+---WoW Account's id, no matter what a stale cache or a name match says.
+---Main is reserved for YOUR OWN authoritative characters -- if incoming
+---sync data ever landed there, OnCommReceived's Main-account protection
+---would immediately (and silently, before that got a warning added) treat
+---every future update for that character as "already my own, ignore it",
+---which looks exactly like sync being broken. If the cache or a name
+---match ever points at Main (leftover from an old bug, or the account
+---getting flagged Main after the fact), that entry is treated as invalid
+---and a fresh, separate account is used/created instead.
 ---@param passphrase string
 ---@return string accountId
 function Data:GetOrCreateAccountForPassphrase(passphrase)
@@ -768,13 +846,27 @@ function Data:GetOrCreateAccountForPassphrase(passphrase)
     return self:EnsureDefaultAccount()
   end
 
+  local mainAccountId = self:GetMainAccountId()
+
   self.db.global.sync.passphraseAccounts = self.db.global.sync.passphraseAccounts or {}
-  local accountId = self.db.global.sync.passphraseAccounts[passphrase]
-  if accountId and self.db.global.accounts[accountId] then
-    return accountId
+  local cachedId = self.db.global.sync.passphraseAccounts[passphrase]
+  if cachedId and cachedId ~= mainAccountId and self.db.global.accounts[cachedId] then
+    return cachedId
   end
 
-  local newAccountId = self:CreateAccount()
+  -- No usable cached mapping (first time this passphrase is ever seen on
+  -- this client, its previously-mapped account got deleted, or the cache
+  -- pointed at Main and got rejected above) -- look for an existing,
+  -- non-Main account whose name already mentions this passphrase before
+  -- creating a new one.
+  for id, account in pairs(self.db.global.accounts) do
+    if id ~= mainAccountId and account.name and string.find(account.name, passphrase, 1, true) then
+      self.db.global.sync.passphraseAccounts[passphrase] = id
+      return id
+    end
+  end
+
+  local newAccountId = self:CreateAccount(nil, passphrase)
   self.db.global.sync.passphraseAccounts[passphrase] = newAccountId
   return newAccountId
 end

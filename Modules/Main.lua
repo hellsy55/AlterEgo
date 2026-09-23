@@ -69,8 +69,8 @@ do
       end
     end,
     -- button3 -- opens a confirmation popup instead of deleting outright.
-    -- Characters inside the account get moved to another WoW Account (see
-    -- Data:DeleteAccount) rather than deleted themselves.
+    -- Characters inside the account are deleted along with it (see
+    -- Data:DeleteAccount) -- not moved anywhere.
     OnAlt = function(_, account)
       if not account then return end
       local numCharacters = TableCount(Data:GetCharactersByAccount(account.id, true))
@@ -95,7 +95,7 @@ end
 do
   local dialogName = "ALTEREGO_CONFIRM_DELETE_ACCOUNT"
   StaticPopupDialogs[dialogName] = {
-    text = "Remove \"%s\"?\n\n%d character(s) inside it will be moved to your other WoW Account.\nThis cannot be undone.",
+    text = "Remove \"%s\"?\n\n%d character(s) inside it will be permanently deleted.\nThis cannot be undone.",
     button1 = YES,
     button2 = CANCEL,
     OnAccept = function(_, account)
@@ -145,6 +145,21 @@ do
     end,
     EditBoxOnEscapePressed = function(self)
       self:GetParent():Hide()
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
+do
+  local dialogName = "ALTEREGO_SYNC_SETTINGS"
+  StaticPopupDialogs[dialogName] = {
+    text = "Sync Addon Settings?\n\nThis shares your display and behavior settings (sorting, what's shown/hidden, colors, and similar) with your other WoW accounts over the same passphrase and channel as character sync.\n\nThis does NOT share your characters, and does NOT change the passphrase, Enable Sync, or Sync Channel on the other end.",
+    button1 = "Share Settings",
+    button2 = CANCEL,
+    OnAccept = function()
+      addon.Core:ShareSettings()
     end,
     timeout = 0,
     whileDead = 1,
@@ -1933,11 +1948,15 @@ function Module:RenderNow()
               function() return Data.db.global.sync.enabled end,
               function()
                 Data.db.global.sync.enabled = not Data.db.global.sync.enabled
+                if not Data.db.global.sync.enabled then
+                  addon.Core:ResetSyncBatchGuard()
+                  addon.Core:Print("Sync: stopped. Nothing will be sent or received until you turn Enable Sync back on.")
+                end
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Shares your characters between your own WoW accounts, as long as they're logged in on the same guild and set the same passphrase below.", nil, nil, nil, true)
-              tooltip:AddLine("Nobody else in the guild sees or receives anything unless they also know your passphrase.", nil, nil, nil, true)
+              tooltip:AddLine("Shares your Main WoW Account's characters with your other WoW accounts, as long as they're in the same guild, raid, or party, and set the same passphrase below.", nil, nil, nil, true)
+              tooltip:AddLine("Nobody else who can see that channel gets or receives anything unless they also know your passphrase.", nil, nil, nil, true)
             end)
             local setPassphraseButton = menu:CreateButton(
               Data.db.global.sync.passphrase ~= "" and "Change Passphrase" or "Set Passphrase",
@@ -1948,7 +1967,37 @@ function Module:RenderNow()
             setPassphraseButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Must be identical on every account you want to sync with.", nil, nil, nil, true)
+              tooltip:AddLine("Also used to name the WoW Account that characters synced in from this passphrase land under (e.g. \"2 (yourpassphrase)\") -- unless one already exists with a matching name, in which case that one's reused instead.", nil, nil, nil, true)
             end)
+            local syncChannelNames = { BOTH = "Both", GUILD = "Guild", PARTY = "Party/Raid" }
+            local syncChannelButton = menu:CreateButton(
+              format("Sync Channel: %s", syncChannelNames[Data.db.global.sync.channel] or "Guild"),
+              function() end
+            )
+            syncChannelButton:SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Which channel(s) Sync sends on, when more than one applies. \"Both\" is the safest default -- it doesn't need to know which channel the other account can actually see.", nil, nil, nil, true)
+              tooltip:AddLine("Restricting it to one channel is mainly useful for testing that one channel in isolation.", nil, nil, nil, true)
+            end)
+            for _, option in ipairs({
+              { value = "GUILD", text = "Guild only (default)" },
+              { value = "PARTY", text = "Party/Raid only" },
+              { value = "BOTH", text = "Both" },
+            }) do
+              syncChannelButton:CreateRadio(
+                option.text,
+                function(value) return (Data.db.global.sync.channel or "GUILD") == value end,
+                function(value)
+                  Data.db.global.sync.channel = value
+                  -- No MenuResponse.Refresh here on purpose -- closes the
+                  -- whole settings menu on click, so the change is only
+                  -- visible again once you reopen it -- confirming it
+                  -- actually took, rather than silently continuing to
+                  -- show the same open dropdown.
+                end,
+                option.value
+              )
+            end
             local syncNowButton = menu:CreateButton(
               "Sync Now",
               function()
@@ -1957,29 +2006,19 @@ function Module:RenderNow()
             )
             syncNowButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Sends your character right now instead of waiting for something to change, and prints why if it can't.", nil, nil, nil, true)
+              tooltip:AddLine("Sends every enabled character in your Main WoW Account right now, even if nothing changed, and prints why if it can't.", nil, nil, nil, true)
               tooltip:AddLine("Use this to test that Sync is working.", nil, nil, nil, true)
             end)
-            local syncAllButton = menu:CreateButton(
-              "Sync All Characters",
+            local syncSettingsButton = menu:CreateButton(
+              "Sync Addon Settings",
               function()
-                addon.Core:ForceSyncBroadcastAll()
+                StaticPopup_Show("ALTEREGO_SYNC_SETTINGS")
               end
             )
-            syncAllButton:SetTooltip(function(tooltip, elm)
+            syncSettingsButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Sends every character that's currently showing up as tracked (enabled character, enabled WoW Account) -- not just the one you're playing.", nil, nil, nil, true)
-              tooltip:AddLine("Sends one at a time, a couple seconds apart -- watch the chat for progress.", nil, nil, nil, true)
-            end)
-            local stopSyncButton = menu:CreateButton(
-              "Stop Sync",
-              function()
-                addon.Core:StopSync()
-              end
-            )
-            stopSyncButton:SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Turns Sync off right away -- same as unchecking Enable Sync above, just one click if something's going wrong.", nil, nil, nil, true)
+              tooltip:AddLine("Shares your display/behavior settings (not characters) with your other WoW accounts, over the same passphrase and channel as everything else here.", nil, nil, nil, true)
+              tooltip:AddLine("Only happens when you click this and confirm -- never automatically.", nil, nil, nil, true)
             end)
           end,
       titlebarButtons = {
