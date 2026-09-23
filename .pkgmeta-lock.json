@@ -1,0 +1,18 @@
+{
+  "Libs/LibStub": {
+    "kind": "svn-tag",
+    "value": "1.0.3-50001"
+  },
+  "Libs/LibDeflate": {
+    "kind": "git-tag",
+    "value": "1.0.2-release"
+  },
+  "Libs/LibSerialize": {
+    "kind": "git-tag",
+    "value": "v1.2.2"
+  },
+  "Libs/LibDBIcon-1.0": {
+    "kind": "svn-tag",
+    "value": "v12.0.3"
+  }
+}

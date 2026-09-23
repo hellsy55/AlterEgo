@@ -15,7 +15,7 @@ externals:
     commit: a4f3eda90db124df9fad439e594c3baa20ea9ca2
   Libs/LibStub:
     url: https://repos.wowace.com/wow/libstub/trunk
-    tag: "1.0"
+    tag: "1.0.3-50001"
   Libs/CallbackHandler-1.0:
     url: https://repos.wowace.com/wow/callbackhandler/trunk/CallbackHandler-1.0
     tag: "1.0.9"
@@ -24,7 +24,7 @@ externals:
     commit: 1a63ede0248c11aa1ee415187c1f9c9489ce3e02
   Libs/LibDBIcon-1.0:
     url: https://repos.wowace.com/wow/libdbicon-1-0/trunk/LibDBIcon-1.0
-    tag: "v12.0.1"
+    tag: "v12.0.3"
   Libs/LiqUI:
     url: https://github.com/DennisRas/LiqUI.git
     tag: "v1.3.0"
@@ -45,7 +45,7 @@ externals:
     tag: "Release-r1377"
   Libs/LibDeflate:
     url: https://github.com/SafeteeWoW/LibDeflate.git
-    tag: "1.0.1-release"
+    tag: "1.0.2-release"
   Libs/LibSerialize:
     url: https://github.com/rossnichols/LibSerialize.git
-    tag: "v1.0.0"
+    tag: "v1.2.2"
