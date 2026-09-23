@@ -30,15 +30,15 @@ Data.currencies = {
   {seasonID = 18, seasonDisplayID = 2, id = 3356, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Untainted Mana-Crystals
 
   -- Weeklies (fixed display order: Dundun, Gilded Stash, Trovehunter's Bounty, Purging the Vaults, Trailing Xal'atath, Unity Against the Void)
-  {id = 97064, currencyType = "quest", resets = "weekly",  name = "Dundun",  questID = 97064, iconFileID = 647701, category = "weekly"},
+  {id = 97064, currencyType = "quest", resets = "weekly",  name = "Dundun",  questID = 97064, iconFileID = 647701, category = "weekly", description = "Weekly delve event."},
   {id = "gildedStash", currencyType = "gildedStash", name = "Gilded Stash", spellID = 7591, iconFileID = 5872049, category = "weekly"},
   {seasonID = 17, seasonDisplayID = 1, id = 265714, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1254631, category = "weekly"},
   {seasonID = 18, seasonDisplayID = 2, id = 274374, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1293799, category = "weekly"},
   {id = 95520, currencyType = "quest", resets = "weekly",  name = "Purging the Vaults",  questID = 95520, iconFileID = 7966624, category = "weekly"},
-  {id = 98172, currencyType = "quest", resets = "weekly",  name = "Trailing Xal'atath", questID = 98172, iconFileID = 7501330, category = "weekly"},
-  {id = 93744, currencyType = "quest", resets = "weekly",  name = "Unity Against the Void", questID = 93744, iconFileID = 133403, category = "weekly"},
+  {id = 98172, currencyType = "quest", resets = "weekly",  name = "Trailing Xal'atath", questID = 98172, iconFileID = 7501330, category = "weekly", description = "Weekly quest."},
+  {id = 93744, currencyType = "quest", resets = "weekly",  name = "Unity Against the Void", questID = 93744, iconFileID = 133403, category = "weekly", description = "Weekly quest."},
 
   -- Seasonal Chores (fixed display order: Azta'rec, Cracked Keystone)
-  {id = 97913, currencyType = "quest", resets = "character", name = "Azta'rec", questID = 97913, iconFileID = 8032873, category = "seasonalChore"},
-  {id = 97910, currencyType = "quest", resets = "character", name = "Cracked Keystone",  questID = 97910, iconFileID = 4352494, itemID = 279012, category = "seasonalChore"},
+  {id = 97913, currencyType = "quest", resets = "character", name = "Azta'rec", questID = 97913, iconFileID = 8032873, category = "seasonalChore", description = "One-time event. Can only be completed once per character."},
+  {id = 97910, currencyType = "quest", resets = "character", name = "Cracked Keystone",  questID = 97910, iconFileID = 4352494, itemID = 279012, category = "seasonalChore", description = "One-time quest. Can only be completed once per character."},
 }
