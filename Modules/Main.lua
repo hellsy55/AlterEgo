@@ -134,7 +134,18 @@ do
     OnAccept = function(self)
       local editBox = self.EditBox or self.editBox
       if not editBox then return end
-      Data.db.global.sync.passphrase = strtrim(editBox:GetText() or "")
+      local newPassphrase = strtrim(editBox:GetText() or "")
+      Data.db.global.sync.passphrase = newPassphrase
+      -- Clearing the passphrase leaves Sync enabled but permanently unable
+      -- to send/receive anything (GetUsablePassphrase would just keep
+      -- refusing it) -- so treat it the same as flipping Enable Sync off
+      -- by hand: stop immediately, including freeing up any in-progress
+      -- batch guard, and say so.
+      if newPassphrase == "" and Data.db.global.sync.enabled then
+        Data.db.global.sync.enabled = false
+        addon.Core:ResetSyncBatchGuard()
+        addon.Core:Print("Sync: passphrase cleared -- Enable Sync turned off and Sync stopped immediately.")
+      end
     end,
     EditBoxOnEnterPressed = function(self)
       -- Going through StaticPopup_OnClick (the same dispatcher Blizzard's
@@ -151,6 +162,41 @@ do
     hideOnEscape = 1,
   }
 end
+
+-- Set when the Sync Passphrase popup should open automatically (Enable
+-- Sync just got turned on, or Sync Now got clicked) but can't right this
+-- second because the player is in combat -- everything else Sync-related
+-- already refuses to touch the UI mid-combat (see Comm.lua's
+-- InCombatLockdown checks), so this popup follows the same rule instead
+-- of just popping up over whatever's happening in a pull. Consumed the
+-- moment PLAYER_REGEN_ENABLED fires, below.
+local pendingPassphrasePopup = false
+
+---Warns in chat and opens the Sync Passphrase popup for the player to
+---fill in, if (and only if) Sync doesn't have one set yet. Shared by the
+---Enable Sync checkbox and the Sync Now button below -- both are places
+---where turning Sync on without a passphrase would otherwise silently do
+---nothing. Never pops the dialog up during combat -- the request is
+---remembered instead, and honored as soon as combat actually ends.
+local function PromptForPassphraseIfMissing()
+  local passphrase = Data.db.global.sync.passphrase
+  if passphrase and passphrase ~= "" then return end
+  addon.Core:Print("Sync: no passphrase set -- Sync won't send or receive anything until you set one.")
+  if InCombatLockdown() then
+    pendingPassphrasePopup = true
+  else
+    StaticPopup_Show("ALTEREGO_SYNC_PASSPHRASE")
+  end
+end
+
+addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+  if not pendingPassphrasePopup then return end
+  pendingPassphrasePopup = false
+  local passphrase = Data.db.global.sync.passphrase
+  if not passphrase or passphrase == "" then
+    StaticPopup_Show("ALTEREGO_SYNC_PASSPHRASE")
+  end
+end, true)
 
 do
   local dialogName = "ALTEREGO_SYNC_SETTINGS"
@@ -1951,6 +1997,8 @@ function Module:RenderNow()
                 if not Data.db.global.sync.enabled then
                   addon.Core:ResetSyncBatchGuard()
                   addon.Core:Print("Sync: stopped. Nothing will be sent or received until you turn Enable Sync back on.")
+                else
+                  PromptForPassphraseIfMissing()
                 end
               end
             ):SetTooltip(function(tooltip, elm)
@@ -2001,7 +2049,18 @@ function Module:RenderNow()
             local syncNowButton = menu:CreateButton(
               "Sync Now",
               function()
-                addon.Core:ForceSyncBroadcast()
+                -- Clicking Sync Now is a clear enough intent to sync that
+                -- it turns Enable Sync on by itself, rather than silently
+                -- refusing (GetUsablePassphrase's "Sync is disabled")
+                -- when it's the one thing standing in the way.
+                if not Data.db.global.sync.enabled then
+                  Data.db.global.sync.enabled = true
+                end
+                if Data.db.global.sync.passphrase == "" then
+                  PromptForPassphraseIfMissing()
+                else
+                  addon.Core:ForceSyncBroadcast()
+                end
               end
             )
             syncNowButton:SetTooltip(function(tooltip, elm)
