@@ -923,7 +923,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   if not decoded then
     if not warnedCorrupted[sender] then
       warnedCorrupted[sender] = true
-      addon.Core:Print(format("Sync: got an unreadable message from %s -- ignored.", tostring(sender)))
+      addon.Core:Print(format("Sync: %s from %s -- ignored. (couldn't decode the addon-channel data -- likely corrupted in transit, or an unrelated addon reusing the \"%s\" prefix)", DIM_RED_FONT_COLOR:WrapTextInColorCode("got an unreadable message"), tostring(sender), COMM_PREFIX))
     end
     return
   end
@@ -931,7 +931,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   if not decompressed then
     if not warnedCorrupted[sender] then
       warnedCorrupted[sender] = true
-      addon.Core:Print(format("Sync: got an unreadable message from %s -- ignored.", tostring(sender)))
+      addon.Core:Print(format("Sync: %s from %s -- ignored. (decoded fine, but failed to decompress -- the message is likely truncated or corrupted)", DIM_RED_FONT_COLOR:WrapTextInColorCode("got an unreadable message"), tostring(sender)))
     end
     return
   end
@@ -939,7 +939,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   if not success or type(payload) ~= "table" then
     if not warnedCorrupted[sender] then
       warnedCorrupted[sender] = true
-      addon.Core:Print(format("Sync: got an unreadable message from %s -- ignored.", tostring(sender)))
+      addon.Core:Print(format("Sync: %s from %s -- ignored. (decompressed fine, but failed to deserialize -- likely a different/incompatible AlterEgo version, or corrupted data)", DIM_RED_FONT_COLOR:WrapTextInColorCode("got an unreadable message"), tostring(sender)))
     end
     return
   end
