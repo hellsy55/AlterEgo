@@ -27,7 +27,7 @@ local Slots = {
   [14] = {id = 14, side = "RIGHT", name = "Trinket1", canEnchant = false, canSocket = false},
   [15] = {id = 15, side = "LEFT", name = "Back", canEnchant = false, canSocket = false},
   [16] = {id = 16, side = "RIGHT", name = "MainHand", canEnchant = true, canSocket = false},
-  [17] = {id = 17, side = "LEFT", name = "SecondaryHand", canEnchant = true, canSocket = false},
+  [17] = {id = 17, side = "LEFT", name = "SecondaryHand", canEnchant = false, canSocket = false},
   --    [18] = {id = 18, side = "LEFT", name = "Ranged", canEnchant = false},
   --    [19] = {id = 19, side = "LEFT", name = "Tabard", canEnchant = false}
 }
@@ -365,6 +365,7 @@ function Module:Render()
     local socketTexts = {}
     ---@type string[]
     local socketTooltipLines = {}
+    local hasEmptySocket = false
 
     local tooltipData = C_TooltipInfo.GetHyperlink(item.itemLink)
     if tooltipData ~= nil then
@@ -398,8 +399,8 @@ function Module:Render()
             table.insert(socketTexts, gemTexture)
             table.insert(socketTooltipLines, gemTexture .. " " .. line.leftText)
           elseif line.socketType then
+            hasEmptySocket = true
             local socketTexture = CreateSimpleTextureMarkup(string.format("Interface\\ItemSocketingFrame\\UI-EmptySocket-%s", line.socketType), 14, 14)
-            table.insert(socketTexts, socketTexture)
             table.insert(socketTooltipLines, socketTexture .. " " .. line.leftText)
           end
         end
@@ -411,8 +412,16 @@ function Module:Render()
       enchantColor = DIM_RED_FONT_COLOR
     end
 
-    if TableCount(socketTexts) == 0 and Slots[item.itemSlotID] and Slots[item.itemSlotID].canSocket then
-      table.insert(socketTexts, DIM_RED_FONT_COLOR:WrapTextInColorCode("Missing"))
+    local socketSlot = Slots[item.itemSlotID]
+    local gemsCellText = strjoin(" ", unpack(socketTexts))
+    if socketSlot and socketSlot.canSocket then
+      if hasEmptySocket then
+        -- Socket has been activated (via the slot's socket-adding item) but has no gem in it yet.
+        gemsCellText = DIM_RED_FONT_COLOR:WrapTextInColorCode("Missing")
+      elseif TableCount(socketTexts) == 0 then
+        -- No socket present yet; the slot's socket-adding item can still be used to add one.
+        gemsCellText = RARE_BLUE_COLOR:WrapTextInColorCode("Available")
+      end
     end
 
     local enchantSort = enchantTooltip ~= "" and enchantTooltip or enchantText
@@ -463,7 +472,7 @@ function Module:Render()
           end,
         },
         {
-          data = strjoin(" ", unpack(socketTexts)),
+          data = gemsCellText,
           onEnter = function(cellFrame)
             if TableCount(socketTooltipLines) > 0 then
               GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
