@@ -113,10 +113,20 @@ do
   }
 end
 
+-- What RequestPasswordThen should do once a non-empty password is
+-- actually confirmed via the popup below -- "enable" just turns Sync on,
+-- "syncNow" turns it on AND immediately force-syncs. This is also what
+-- guarantees Enable Sync and Sync Now never flip Sync on by themselves:
+-- they only ever request a password, and it's the popup's OnAccept
+-- (below) that does the enabling, and only when given a real one.
+-- Cleared as soon as it's acted on, or the popup is cancelled/dismissed
+-- without a password.
+local pendingSyncAction = nil
+
 do
-  local dialogName = "ALTEREGO_SYNC_PASSPHRASE"
+  local dialogName = "ALTEREGO_SYNC_PASSWORD"
   StaticPopupDialogs[dialogName] = {
-    text = "Sync Passphrase\n\nMust match exactly on every account you want to sync characters with.",
+    text = "Shared with your other WoW accounts to sync characters, and optionally addon settings, between them. It's not tied to your Battle.net login. It's a word/phrase you set the same way on every account you want to sync with.\n\nMust match exactly on every account you want to sync with.",
     button1 = ACCEPT,
     button2 = CANCEL,
     hasEditBox = true,
@@ -127,25 +137,46 @@ do
       -- both so this doesn't error out depending on which one is running.
       local editBox = self.EditBox or self.editBox
       if not editBox then return end
-      editBox:SetText(Data.db.global.sync.passphrase or "")
+      editBox:SetText(Data.db.global.sync.password or "")
       editBox:HighlightText()
       editBox:SetFocus()
     end,
     OnAccept = function(self)
       local editBox = self.EditBox or self.editBox
       if not editBox then return end
-      local newPassphrase = strtrim(editBox:GetText() or "")
-      Data.db.global.sync.passphrase = newPassphrase
-      -- Clearing the passphrase leaves Sync enabled but permanently unable
-      -- to send/receive anything (GetUsablePassphrase would just keep
-      -- refusing it) -- so treat it the same as flipping Enable Sync off
-      -- by hand: stop immediately, including freeing up any in-progress
-      -- batch guard, and say so.
-      if newPassphrase == "" and Data.db.global.sync.enabled then
-        Data.db.global.sync.enabled = false
-        addon.Core:ResetSyncBatchGuard()
-        addon.Core:Print("Sync: passphrase cleared -- Enable Sync turned off and Sync stopped immediately.")
+      local newPassword = strtrim(editBox:GetText() or "")
+      Data.db.global.sync.password = newPassword
+      if newPassword == "" then
+        -- Clearing the password leaves Sync enabled but permanently
+        -- unable to send/receive anything (GetUsablePassword would
+        -- just keep refusing it) -- so treat it the same as flipping
+        -- Enable Sync off by hand: stop immediately, including freeing
+        -- up any in-progress batch guard, and say so.
+        if Data.db.global.sync.enabled then
+          Data.db.global.sync.enabled = false
+          addon.Core:ResetSyncBatchGuard()
+          addon.Core:Print("Sync: password cleared -- Enable Sync turned off and Sync stopped immediately.")
+        end
+        pendingSyncAction = nil
+        return
       end
+      -- A real password just got confirmed -- act on whatever Enable
+      -- Sync or Sync Now was waiting on it, if anything. Neither of them
+      -- ever flips Sync on by itself (see pendingSyncAction above), so
+      -- this is the only place Sync actually turns on.
+      local action = pendingSyncAction
+      pendingSyncAction = nil
+      if action == "enable" or action == "syncNow" then
+        Data.db.global.sync.enabled = true
+      end
+      if action == "syncNow" then
+        addon.Core:ForceSyncBroadcast()
+      end
+    end,
+    OnCancel = function()
+      -- Dismissed without confirming a password -- whatever Enable
+      -- Sync/Sync Now was waiting on doesn't happen.
+      pendingSyncAction = nil
     end,
     EditBoxOnEnterPressed = function(self)
       -- Going through StaticPopup_OnClick (the same dispatcher Blizzard's
@@ -163,45 +194,53 @@ do
   }
 end
 
--- Set when the Sync Passphrase popup should open automatically (Enable
+-- Set when the Sync Password popup should open automatically (Enable
 -- Sync just got turned on, or Sync Now got clicked) but can't right this
 -- second because the player is in combat -- everything else Sync-related
 -- already refuses to touch the UI mid-combat (see Comm.lua's
 -- InCombatLockdown checks), so this popup follows the same rule instead
 -- of just popping up over whatever's happening in a pull. Consumed the
 -- moment PLAYER_REGEN_ENABLED fires, below.
-local pendingPassphrasePopup = false
+local pendingPasswordPopup = false
 
----Warns in chat and opens the Sync Passphrase popup for the player to
----fill in, if (and only if) Sync doesn't have one set yet. Shared by the
----Enable Sync checkbox and the Sync Now button below -- both are places
----where turning Sync on without a passphrase would otherwise silently do
----nothing. Never pops the dialog up during combat -- the request is
----remembered instead, and honored as soon as combat actually ends.
-local function PromptForPassphraseIfMissing()
-  local passphrase = Data.db.global.sync.passphrase
-  if passphrase and passphrase ~= "" then return end
-  addon.Core:Print("Sync: no passphrase set -- Sync won't send or receive anything until you set one.")
+---Opens the Sync Password popup if (and only if) Sync doesn't have one
+---set yet, remembering what to do once a real password is confirmed
+---(see pendingSyncAction/OnAccept above). Shared by the Enable Sync
+---checkbox and the Sync Now button below -- both are places where
+---turning Sync on without a password would otherwise either do nothing
+---or, worse, turn Sync on with no way to actually send/receive anything.
+---Never pops the dialog up during combat -- the request is remembered
+---instead, and honored as soon as combat actually ends.
+---@param action "enable"|"syncNow"|nil What Enable Sync/Sync Now was
+---trying to do -- carried out once a password is confirmed.
+---@return boolean hadPassword True if a password was already set (no
+---popup was needed) -- the caller can go ahead and do `action` itself.
+local function RequestPasswordThen(action)
+  local password = Data.db.global.sync.password
+  if password and password ~= "" then return true end
+  pendingSyncAction = action
+  addon.Core:Print("Sync: no password set -- set one to turn Sync on.")
   if InCombatLockdown() then
-    pendingPassphrasePopup = true
+    pendingPasswordPopup = true
   else
-    StaticPopup_Show("ALTEREGO_SYNC_PASSPHRASE")
+    StaticPopup_Show("ALTEREGO_SYNC_PASSWORD")
   end
+  return false
 end
 
 addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
-  if not pendingPassphrasePopup then return end
-  pendingPassphrasePopup = false
-  local passphrase = Data.db.global.sync.passphrase
-  if not passphrase or passphrase == "" then
-    StaticPopup_Show("ALTEREGO_SYNC_PASSPHRASE")
+  if not pendingPasswordPopup then return end
+  pendingPasswordPopup = false
+  local password = Data.db.global.sync.password
+  if not password or password == "" then
+    StaticPopup_Show("ALTEREGO_SYNC_PASSWORD")
   end
 end, true)
 
 do
   local dialogName = "ALTEREGO_SYNC_SETTINGS"
   StaticPopupDialogs[dialogName] = {
-    text = "Sync Addon Settings?\n\nThis shares your display and behavior settings (sorting, what's shown/hidden, colors, and similar) with your other WoW accounts over the same passphrase and channel as character sync.\n\nThis does NOT share your characters, and does NOT change the passphrase, Enable Sync, or Sync Channel on the other end.",
+    text = "Sync Addon Settings?\n\nThis shares your display and behavior settings (sorting, what's shown/hidden, colors, and similar) with your other WoW accounts over the same password and channel as character sync.\n\nThis does NOT share your characters, and does NOT change the password, Enable Sync, or Sync Channel on the other end.",
     button1 = "Share Settings",
     button2 = CANCEL,
     OnAccept = function()
@@ -1993,29 +2032,44 @@ function Module:RenderNow()
               "Enable Sync",
               function() return Data.db.global.sync.enabled end,
               function()
-                Data.db.global.sync.enabled = not Data.db.global.sync.enabled
-                if not Data.db.global.sync.enabled then
+                if Data.db.global.sync.enabled then
+                  Data.db.global.sync.enabled = false
                   addon.Core:ResetSyncBatchGuard()
                   addon.Core:Print("Sync: stopped. Nothing will be sent or received until you turn Enable Sync back on.")
-                else
-                  PromptForPassphraseIfMissing()
+                  return
                 end
+                -- Only actually turns on once a password is confirmed --
+                -- RequestPasswordThen enables it itself once that
+                -- happens (see its OnAccept) when one isn't set yet, and
+                -- immediately here when one already is.
+                if RequestPasswordThen("enable") then
+                  Data.db.global.sync.enabled = true
+                end
+                -- Always force-close: either the popup just opened and
+                -- should be the only thing on screen, or Sync just
+                -- turned on and closing confirms it actually took.
+                return MenuResponse.CloseAll
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Shares your Main WoW Account's characters with your other WoW accounts, as long as they're in the same guild, raid, or party, and set the same passphrase below.", nil, nil, nil, true)
-              tooltip:AddLine("Nobody else who can see that channel gets or receives anything unless they also know your passphrase.", nil, nil, nil, true)
+              tooltip:AddLine("Shares your Main WoW Account's characters with your other WoW accounts, as long as they're in the same guild, raid, or party, and set the same password below.", nil, nil, nil, true)
+              tooltip:AddLine("Nobody else who can see messages on that channel receives anything unless they also know your password.", nil, nil, nil, true)
             end)
-            local setPassphraseButton = menu:CreateButton(
-              Data.db.global.sync.passphrase ~= "" and "Change Passphrase" or "Set Passphrase",
+            local setPasswordButton = menu:CreateButton(
+              Data.db.global.sync.password ~= "" and "Change Password" or "Set Password",
               function()
-                StaticPopup_Show("ALTEREGO_SYNC_PASSPHRASE")
+                StaticPopup_Show("ALTEREGO_SYNC_PASSWORD")
+                -- Force the whole settings menu closed here instead of
+                -- relying on the default post-click behavior -- the
+                -- popup should be the only thing left on screen, not
+                -- layered on top of (or behind) the still-open menu.
+                return MenuResponse.CloseAll
               end
             )
-            setPassphraseButton:SetTooltip(function(tooltip, elm)
+            setPasswordButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Must be identical on every account you want to sync with.", nil, nil, nil, true)
-              tooltip:AddLine("Also used to name the WoW Account that characters synced in from this passphrase land under (e.g. \"2 (yourpassphrase)\") -- unless one already exists with a matching name, in which case that one's reused instead.", nil, nil, nil, true)
+              tooltip:AddLine("Also used to name the WoW Account that characters synced in from this password land under (e.g. \"2 (yourpassword)\") -- unless one already exists with a matching name, in which case that one's reused instead.", nil, nil, nil, true)
             end)
             local syncChannelNames = { BOTH = "Both", GUILD = "Guild", PARTY = "Party/Raid" }
             local syncChannelButton = menu:CreateButton(
@@ -2024,8 +2078,7 @@ function Module:RenderNow()
             )
             syncChannelButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Which channel(s) Sync sends on, when more than one applies. \"Both\" is the safest default -- it doesn't need to know which channel the other account can actually see.", nil, nil, nil, true)
-              tooltip:AddLine("Restricting it to one channel is mainly useful for testing that one channel in isolation.", nil, nil, nil, true)
+              tooltip:AddLine("Guild only is the safest default -- it doesn't need to know which channel the other account can actually see.", nil, nil, nil, true)
             end)
             for _, option in ipairs({
               { value = "GUILD", text = "Guild only (default)" },
@@ -2050,33 +2103,31 @@ function Module:RenderNow()
               "Sync Now",
               function()
                 -- Clicking Sync Now is a clear enough intent to sync that
-                -- it turns Enable Sync on by itself, rather than silently
-                -- refusing (GetUsablePassphrase's "Sync is disabled")
-                -- when it's the one thing standing in the way.
-                if not Data.db.global.sync.enabled then
+                -- it turns Enable Sync on by itself -- but never without a
+                -- confirmed password: RequestPasswordThen only enables
+                -- and force-syncs once one is actually set (see its
+                -- OnAccept), immediately here when one already is.
+                if RequestPasswordThen("syncNow") then
                   Data.db.global.sync.enabled = true
-                end
-                if Data.db.global.sync.passphrase == "" then
-                  PromptForPassphraseIfMissing()
-                else
                   addon.Core:ForceSyncBroadcast()
                 end
+                return MenuResponse.CloseAll
               end
             )
             syncNowButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Sends every enabled character in your Main WoW Account right now, even if nothing changed, and prints why if it can't.", nil, nil, nil, true)
-              tooltip:AddLine("Use this to test that Sync is working.", nil, nil, nil, true)
             end)
             local syncSettingsButton = menu:CreateButton(
               "Sync Addon Settings",
               function()
                 StaticPopup_Show("ALTEREGO_SYNC_SETTINGS")
+                return MenuResponse.CloseAll
               end
             )
             syncSettingsButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Shares your display/behavior settings (not characters) with your other WoW accounts, over the same passphrase and channel as everything else here.", nil, nil, nil, true)
+              tooltip:AddLine("Shares your display and behavior settings, not characters, with your other WoW accounts, over the same password and channel as everything else here.", nil, nil, nil, true)
               tooltip:AddLine("Only happens when you click this and confirm -- never automatically.", nil, nil, nil, true)
             end)
           end,

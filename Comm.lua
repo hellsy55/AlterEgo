@@ -3,24 +3,24 @@ local addon = select(2, ...)
 
 -- Broadcasts the logged-in character's full record over the GUILD addon
 -- channel so your OTHER WoW accounts (same guild, same addon, same
--- passphrase) can pick it up and show it alongside your other characters --
+-- password) can pick it up and show it alongside your other characters --
 -- same idea as GG's Comm.lua, simplified: AlterEgo characters are usually
 -- only a handful of accounts, not a 30-person guild roster, so this sends
 -- the whole record instead of GG's dirty-section partial payloads.
 --
 -- Trust boundary: NOTHING is sent or accepted unless Sync is enabled AND a
--- non-empty passphrase is set, AND the passphrase in the payload matches
--- this client's own passphrase exactly. A normal guildmate running an
+-- non-empty password is set, AND the password in the payload matches
+-- this client's own password exactly. A normal guildmate running an
 -- unmodified (or differently-configured) AlterEgo never receives your data
 -- and never has their own characters show up on your end -- the guild
--- channel is just the transport, the passphrase is the actual gate.
+-- channel is just the transport, the password is the actual gate.
 --
 -- Chat noise: the automatic, per-change background sync (RequestSyncBroadcast
 -- and everything it triggers) is silent on the SENDING side by design -- it
 -- can fire many times an hour from routine gameplay (loot, currency ticks,
 -- vault progress...), and printing every one of those would just be spam.
--- A passphrase mismatch is deliberately silent too, on either side -- using
--- the right passphrase for who you're sharing with is on each person running
+-- A password mismatch is deliberately silent too, on either side -- using
+-- the right password for who you're sharing with is on each person running
 -- this, not something worth a warning every time someone else's guildmate
 -- happens to run Sync with a different one.
 
@@ -208,16 +208,16 @@ end
 ---Serialize+compress+send one character record. Shared by the automatic
 ---per-change broadcast and the manual "Sync Now".
 ---@param character AE_Character
----@param passphrase string
+---@param password string
 ---@param channels string[] AceComm distributions to send on ("GUILD"/"PARTY"/"RAID"), one message per entry.
 ---@param forced boolean? True for a manual "Sync Now" push -- tells the receiver to apply this even if it's not strictly newer than what it already has (see OnCommReceived).
 ---@param batchId string? Shared by every character in the same manual "Sync Now" click -- lets the receiver group them and print its own "received" summary once they've all arrived. Nil for the automatic path.
 ---@param batchTotal number? How many characters are in this batchId's push -- how the receiver knows when it has them all.
 ---@param priority string? AceComm priority ("BULK"/"NORMAL"/"ALERT"). Defaults to "BULK".
 ---@param onDone function? Called once every channel's LAST chunk has been dequeued by ChatThrottleLib -- i.e. once this character's transmission is truly finished going out on every channel, not just "some time has probably passed". Receives one argument: a list of channels where at least one chunk did NOT actually go out (empty if everything succeeded) -- see the comment below on why "reached the last chunk" and "actually delivered" aren't the same thing. PerformBroadcast's SendNext waits for this before starting the next character, instead of guessing a fixed delay -- see the comment on batchInProgress for why that matters: everyone's outgoing messages share the same AceComm sender identity (whichever character you're actually logged in on), so their multi-part reassembly streams share the exact same spool slot on the receiving end, and starting the next one before the last one's LAST chunk has gone out destroys it.
-local function SendCharacterRecord(character, passphrase, channels, forced, batchId, batchTotal, priority, onDone)
+local function SendCharacterRecord(character, password, channels, forced, batchId, batchTotal, priority, onDone)
   local payload = {
-    passphrase = passphrase,
+    password = password,
     character = character,
     forced = forced or nil,
     batchId = batchId,
@@ -339,27 +339,27 @@ local function MarkCharacterSynced(character)
   Data.db.global.sync.lastSentUpdate[character.GUID] = character.lastUpdate
 end
 
----Checks Sync is actually usable right now (enabled, passphrase set, and at
+---Checks Sync is actually usable right now (enabled, password set, and at
 ---least one channel to send it on), optionally printing why not. Shared by
 ---every send path below.
 ---@param verbose boolean?
----@return string? passphrase nil if sync can't run right now
+---@return string? password nil if sync can't run right now
 ---@return string[]? channels nil if sync can't run right now
-local function GetUsablePassphrase(verbose)
+local function GetUsablePassword(verbose)
   if not Data.db.global.sync.enabled then
     if verbose then addon.Core:Print("Sync: not sending, Sync is disabled.") end
     return nil, nil
   end
-  local passphrase = Data.db.global.sync.passphrase
-  if not passphrase or passphrase == "" then
-    if verbose then addon.Core:Print("Sync: not sending, no passphrase set.") end
+  local password = Data.db.global.sync.password
+  if not password or password == "" then
+    if verbose then addon.Core:Print("Sync: not sending, no password set.") end
     return nil, nil
   end
   local channels = GetUsableChannels(verbose)
   if #channels == 0 then
     return nil, nil
   end
-  return passphrase, channels
+  return password, channels
 end
 
 ---True if this character is allowed to go out over Sync right now: if a
@@ -461,8 +461,8 @@ local function PerformBroadcast(verbose)
     return
   end
 
-  local passphrase, channels = GetUsablePassphrase(verbose)
-  if not passphrase then return end
+  local password, channels = GetUsablePassword(verbose)
+  if not password then return end
 
   local now = time()
   if not verbose and now - lastBroadcastAt < BROADCAST_MIN_INTERVAL_SECONDS then
@@ -585,7 +585,7 @@ local function PerformBroadcast(verbose)
     if verbose then
       addon.Core:Print(format("Sync: sending %d/%d -- %s...", index, #toSend, name))
     end
-    SendCharacterRecord(character, passphrase, channels, verbose, batchId, #toSend, verbose and "NORMAL" or "BULK", function(failedChannels)
+    SendCharacterRecord(character, password, channels, verbose, batchId, #toSend, verbose and "NORMAL" or "BULK", function(failedChannels)
       -- A chunk permanently failing mid-transmission (not the throttle
       -- ChatThrottleLib retries on its own) means this character's data
       -- almost certainly did not arrive intact -- WoW: Midnight's
@@ -641,8 +641,8 @@ end
 -- Which top-level Data.db.global keys are display/behavior PREFERENCES --
 -- the kind of thing "Sync Addon Settings" shares -- as opposed to actual
 -- game data (characters, accounts) or Sync's own configuration
--- (passphrase, enabled, channel, and Sync's internal bookkeeping), which
--- this deliberately never touches: sending your passphrase over the very
+-- (password, enabled, channel, and Sync's internal bookkeeping), which
+-- this deliberately never touches: sending your password over the very
 -- channel it's meant to gate would defeat the whole point of it, and
 -- remotely flipping someone's Enable Sync or Sync Channel on their other
 -- account is exactly the kind of surprise this feature should never
@@ -699,8 +699,8 @@ end
 
 ---Manually shares this client's addon settings (see
 ---SHAREABLE_SETTINGS_KEYS -- NEVER character data, NEVER Sync's own
----passphrase/enabled/channel) with whoever else has AlterEgo, Sync
----enabled, and the same passphrase, over whichever channel(s) Sync
+---password/enabled/channel) with whoever else has AlterEgo, Sync
+---enabled, and the same password, over whichever channel(s) Sync
 ---Channel currently applies. Deliberately only reachable from the "Sync
 ---Addon Settings" button's confirmation popup -- there is no automatic
 ---path to this, ever, unlike character sync's per-change background
@@ -711,11 +711,11 @@ function addon.Core:ShareSettings()
     return
   end
 
-  local passphrase, channels = GetUsablePassphrase(true)
-  if not passphrase then return end
+  local password, channels = GetUsablePassword(true)
+  if not password then return end
 
   local payload = {
-    passphrase = passphrase,
+    password = password,
     settingsShare = true,
     settings = BuildSettingsPayload(),
   }
@@ -854,7 +854,7 @@ end, true)
 ---(or blocking) anything. Sent as a WHISPER regardless of which channel
 ---the original data came in on, since it only needs to reach that one
 ---specific character, not a whole guild/group. Fires right after the
----passphrase and character shape check pass -- i.e. "I received and could
+---password and character shape check pass -- i.e. "I received and could
 ---read this", independent of whatever OnCommReceived does with the data
 ---next (applied, skipped as unchanged, or protected by Main): the sender
 ---mainly wants to know the message didn't vanish in transit, which this
@@ -863,11 +863,11 @@ end, true)
 ---this confirms (see activeBatchConfirmedBy).
 ---@param remote AE_Character
 ---@param sender string
----@param passphrase string
+---@param password string
 ---@param batchId string?
-local function SendAck(remote, sender, passphrase, batchId)
+local function SendAck(remote, sender, password, batchId)
   local payload = {
-    passphrase = passphrase,
+    password = password,
     ack = true,
     name = remote.info and remote.info.name,
     realm = remote.info and remote.info.realm,
@@ -884,10 +884,10 @@ end
 ---has actually applied them, so the sender's chat shows the other side
 ---really got it.
 ---@param sender string
----@param passphrase string
-local function SendSettingsAck(sender, passphrase)
+---@param password string
+local function SendSettingsAck(sender, password)
   local payload = {
-    passphrase = passphrase,
+    password = password,
     settingsAck = true,
   }
   local serialized = LibSerialize:Serialize(payload)
@@ -912,8 +912,8 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   -- nothing to tell your own client that it doesn't already know.
   if sender == Ambiguate(UnitName("player"), "none") then return end
 
-  local passphrase = Data.db.global.sync.passphrase
-  if not passphrase or passphrase == "" then return end
+  local password = Data.db.global.sync.password
+  if not password or password == "" then return end
 
   -- Corrupted/incomplete data (or a genuine prefix collision with some
   -- unrelated addon that happens to also use "AEv1") -- warn once per
@@ -944,11 +944,11 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     return
   end
 
-  -- Wrong/blank passphrase on either end -- silently ignore the data.
-  -- Using the right passphrase for who you're sharing with is on each
+  -- Wrong/blank password on either end -- silently ignore the data.
+  -- Using the right password for who you're sharing with is on each
   -- person running this addon, not something worth flagging every time
   -- someone else's guildmate happens to run Sync with a different one.
-  if payload.passphrase ~= passphrase then
+  if payload.password ~= password then
     return
   end
 
@@ -972,12 +972,12 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
 
   -- Shared addon settings from "Sync Addon Settings" -- see
   -- ApplySettingsPayload for exactly what this does and doesn't touch
-  -- (never characters, never Sync's own passphrase/enabled/channel).
+  -- (never characters, never Sync's own password/enabled/channel).
   if payload.settingsShare then
     if type(payload.settings) == "table" then
       ApplySettingsPayload(payload.settings)
       addon.Core:Print(format("Sync: |cff33ff99applied addon settings|r shared by %s.", tostring(sender)))
-      SendSettingsAck(sender, passphrase)
+      SendSettingsAck(sender, password)
     end
     return
   end
@@ -999,7 +999,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   -- Confirm delivery back to a manual "Sync Now" push -- see SendAck for
   -- why this fires here regardless of what happens to the data below.
   if payload.forced then
-    SendAck(remote, sender, passphrase, payload.batchId)
+    SendAck(remote, sender, password, payload.batchId)
     TrackBatchArrival(sender, distribution, payload, remote)
   end
 
@@ -1036,8 +1036,8 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     remote.order = existing.order
   else
     -- Brand new character we've never seen before -- file it under the WoW
-    -- Account tied to THIS passphrase, creating one the first time this
-    -- passphrase brings anyone in. A different passphrase (a different
+    -- Account tied to THIS password, creating one the first time this
+    -- password brings anyone in. A different password (a different
     -- friend/account) gets its own separate account instead of everything
     -- piling into one bucket. Characters we already know about keep
     -- whatever account you filed them under (see above) -- this only
@@ -1047,10 +1047,10 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     -- crashing the whole receive handler (which would silently drop the
     -- character with no explanation, exactly what happened before this
     -- guard existed).
-    if Data.GetOrCreateAccountForPassphrase then
-      remote.accountId = Data:GetOrCreateAccountForPassphrase(passphrase)
+    if Data.GetOrCreateAccountForPassword then
+      remote.accountId = Data:GetOrCreateAccountForPassword(password)
     else
-      addon.Core:Print("Sync: Data.lua looks out of date (missing GetOrCreateAccountForPassphrase) -- filed under a fallback WoW Account instead. Reinstall the full addon package to fix this.")
+      addon.Core:Print("Sync: Data.lua looks out of date (missing GetOrCreateAccountForPassword) -- filed under a fallback WoW Account instead. Reinstall the full addon package to fix this.")
       -- EnsureDefaultAccount() returns the lowest-order account, which is
       -- normally Main -- never file an incoming character there even in
       -- this fallback path, or it'll immediately look "stuck" the same

@@ -14,7 +14,7 @@ local TableFind = addon.Libs.LiqUI.Utils.TableFind
 local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
 local TableGet = addon.Libs.LiqUI.Utils.TableGet
 
-Data.dbVersion = 39
+Data.dbVersion = 40
 
 Data.defaultDB = {
   ---@type AE_Global
@@ -113,9 +113,9 @@ Data.defaultDB = {
     useRIOScoreColor = false,
     sync = {
       enabled = false,
-      passphrase = "",
+      password = "",
       channel = "GUILD", ---@type "BOTH"|"GUILD"|"PARTY" Which distribution(s) to send on when more than one is available. "GUILD" (default) restricts sends to the guild channel; "PARTY" restricts to party/raid; "BOTH" sends on every channel that applies (see Comm.lua's GetUsableChannels).
-      passphraseAccounts = {}, ---@type table<string, string> Which WoW Account each passphrase's synced characters land in
+      passwordAccounts = {}, ---@type table<string, string> Which WoW Account each password's synced characters land in
       lastSentUpdate = {}, ---@type table<string, number> Per-character GUID -> the character.lastUpdate value we last actually broadcast, so unchanged characters aren't resent
     },
   },
@@ -679,9 +679,9 @@ end
 
 ---Create a new WoW Account bucket.
 ---@param name string? Explicit name; wins over everything else if given.
----@param passphrase string? When name is nil, names the new account "<number> (<passphrase>)" instead of just "<number>" -- used by GetOrCreateAccountForPassphrase so it's obvious at a glance which sync passphrase's incoming characters live in this bucket.
+---@param password string? When name is nil, names the new account "<number> (<password>)" instead of just "<number>" -- used by GetOrCreateAccountForPassword so it's obvious at a glance which sync password's incoming characters live in this bucket.
 ---@return string accountId
-function Data:CreateAccount(name, passphrase)
+function Data:CreateAccount(name, password)
   -- The display NAME's number is picked by checking what's actually
   -- already shown in the list -- not just which internal "account_N" id
   -- slot happens to be free. Those two used to be the same number, which
@@ -690,7 +690,7 @@ function Data:CreateAccount(name, passphrase)
   -- list, under a different id, producing two entries that looked
   -- identically named. Starting from the current account COUNT and
   -- nudging it up past anything already using that exact name (as
-  -- "<number>" or "<number> (<passphrase>)") guarantees a name that's
+  -- "<number>" or "<number> (<password>)") guarantees a name that's
   -- never a duplicate of what's currently visible, regardless of what
   -- id-slot numbering history looks like underneath.
   local function nameTaken(candidateName)
@@ -704,7 +704,7 @@ function Data:CreateAccount(name, passphrase)
 
   local number = TableCount(self.db.global.accounts) + 1
   local function nameForNumber(n)
-    return name or (passphrase and format("%d (%s)", n, passphrase)) or tostring(n)
+    return name or (password and format("%d (%s)", n, password)) or tostring(n)
   end
   if not name then
     -- Only the auto-numbered forms actually change as number increases --
@@ -816,19 +816,19 @@ function Data:GetCharactersByAccount(accountId, unfiltered)
 end
 
 ---Get (or find/create, first time) the WoW Account that a given sync
----passphrase's INCOMING characters should land in -- resolved by NAME, not
+---password's INCOMING characters should land in -- resolved by NAME, not
 ---a hidden internal id: if any existing account's name already contains
----the passphrase text, that account is reused as-is (no renaming) -- so
+---the password text, that account is reused as-is (no renaming) -- so
 ---you can pre-create and name your own bucket (e.g. "Friends
----(hunterparty2026)") and incoming characters synced with that passphrase
+---(hunterparty2026)") and incoming characters synced with that password
 ---will land inside it instead of a separate new account being created
 ---next to it. Otherwise a brand new account is created and named
----"<number> (<passphrase>)" so it's obvious at a glance which passphrase's
+---"<number> (<password>)" so it's obvious at a glance which password's
 ---characters live there.
----Calling this again with the SAME passphrase keeps returning the SAME
+---Calling this again with the SAME password keeps returning the SAME
 ---account id, cached once resolved -- so repeat syncs don't create
 ---duplicates, and it keeps working even if you later rename the account to
----something that no longer contains the passphrase text.
+---something that no longer contains the password text.
 ---HARD RULE, checked at every return point: this NEVER returns the Main
 ---WoW Account's id, no matter what a stale cache or a name match says.
 ---Main is reserved for YOUR OWN authoritative characters -- if incoming
@@ -839,35 +839,35 @@ end
 ---match ever points at Main (leftover from an old bug, or the account
 ---getting flagged Main after the fact), that entry is treated as invalid
 ---and a fresh, separate account is used/created instead.
----@param passphrase string
+---@param password string
 ---@return string accountId
-function Data:GetOrCreateAccountForPassphrase(passphrase)
-  if not passphrase or passphrase == "" then
+function Data:GetOrCreateAccountForPassword(password)
+  if not password or password == "" then
     return self:EnsureDefaultAccount()
   end
 
   local mainAccountId = self:GetMainAccountId()
 
-  self.db.global.sync.passphraseAccounts = self.db.global.sync.passphraseAccounts or {}
-  local cachedId = self.db.global.sync.passphraseAccounts[passphrase]
+  self.db.global.sync.passwordAccounts = self.db.global.sync.passwordAccounts or {}
+  local cachedId = self.db.global.sync.passwordAccounts[password]
   if cachedId and cachedId ~= mainAccountId and self.db.global.accounts[cachedId] then
     return cachedId
   end
 
-  -- No usable cached mapping (first time this passphrase is ever seen on
+  -- No usable cached mapping (first time this password is ever seen on
   -- this client, its previously-mapped account got deleted, or the cache
   -- pointed at Main and got rejected above) -- look for an existing,
-  -- non-Main account whose name already mentions this passphrase before
+  -- non-Main account whose name already mentions this password before
   -- creating a new one.
   for id, account in pairs(self.db.global.accounts) do
-    if id ~= mainAccountId and account.name and string.find(account.name, passphrase, 1, true) then
-      self.db.global.sync.passphraseAccounts[passphrase] = id
+    if id ~= mainAccountId and account.name and string.find(account.name, password, 1, true) then
+      self.db.global.sync.passwordAccounts[password] = id
       return id
     end
   end
 
-  local newAccountId = self:CreateAccount(nil, passphrase)
-  self.db.global.sync.passphraseAccounts[passphrase] = newAccountId
+  local newAccountId = self:CreateAccount(nil, password)
+  self.db.global.sync.passwordAccounts[password] = newAccountId
   return newAccountId
 end
 
@@ -1348,6 +1348,23 @@ function Data:MigrateDB()
           if character.accountId == nil then
             character.accountId = defaultAccountId
           end
+        end
+      end
+    end
+    -- Renamed Sync's "passphrase" to "password" -- purely a terminology
+    -- change (it's just a shared word/phrase between your own accounts,
+    -- not a security credential), so this only carries existing values
+    -- across to the renamed fields.
+    if self.db.global.dbVersion == 39 then
+      local sync = self.db.global.sync
+      if sync then
+        if sync.passphrase ~= nil then
+          sync.password = sync.passphrase
+          sync.passphrase = nil
+        end
+        if sync.passphraseAccounts ~= nil then
+          sync.passwordAccounts = sync.passphraseAccounts
+          sync.passphraseAccounts = nil
         end
       end
     end
