@@ -285,7 +285,7 @@ function Data:GetCurrencies()
       local currencyInfo = {
         id = currency.id,
         name = currency.name or "Trovehunter's Bounty",
-        description = "Weekly Trovehunter's Bounty map status.",
+        description = "Weekly Trovehunter's Bounty map status from delves.",
         iconFileID = C_Item.GetItemIconByID(currency.id) or 0,
         quality = Enum.ItemQuality.Rare,
         currencyType = currency.currencyType,
@@ -306,7 +306,7 @@ function Data:GetCurrencies()
       local gildedStashInfo = {
         id = currency.id,
         name = currency.name or "Gilded Stash",
-        description = "Weekly Gilded Stash progress from Delves.",
+        description = "Weekly Gilded Stash progress from delves.",
         iconFileID = currency.iconFileID,
         quality = Enum.ItemQuality.Rare,
         currencyType = currency.currencyType,
