@@ -181,10 +181,113 @@ local function formatResetTime()
   return format("Daily reset in %dh %02dm", hours, minutes)
 end
 
-local function setupCheckButton(button, label)
+local function getDailyResetStamp()
+  if not C_DateAndTime or not C_DateAndTime.GetSecondsUntilDailyReset then return 0 end
+  local seconds = C_DateAndTime.GetSecondsUntilDailyReset()
+  if type(seconds) ~= "number" or seconds < 0 then return 0 end
+  -- time() + secondsUntilReset is stable for the whole daily cycle. Round to
+  -- the nearest minute so tiny API timing differences never create a new key.
+  return math.floor((time() + seconds + 30) / 60) * 60
+end
+
+local function prepareBountifulTracking(settings, character, resetAt)
+  if type(settings.bountifulRotation) ~= "table" then settings.bountifulRotation = {} end
+  if type(settings.variantCache) ~= "table" then settings.variantCache = {} end
+  if settings.bountifulResetAt ~= resetAt then
+    settings.bountifulResetAt = resetAt
+    wipe(settings.bountifulRotation)
+    wipe(settings.variantCache)
+  end
+
+  if not character then return end
+  if type(character.dailyDelves) ~= "table" then character.dailyDelves = {} end
+  local state = character.dailyDelves
+  if type(state.bountifulSeen) ~= "table" then state.bountifulSeen = {} end
+  if type(state.bountifulDone) ~= "table" then state.bountifulDone = {} end
+  if state.bountifulResetAt ~= resetAt then
+    state.bountifulResetAt = resetAt
+    wipe(state.bountifulSeen)
+    wipe(state.bountifulDone)
+  end
+end
+
+local function buildAllDelves(liveDelves, settings, character)
+  local resetAt = getDailyResetStamp()
+  prepareBountifulTracking(settings, character, resetAt)
+
+  local liveByDelve = {}
+  local liveBountiful = {}
+  for _, entry in ipairs(liveDelves) do
+    liveByDelve[entry.delveName] = entry
+    settings.variantCache[entry.delveName] = {
+      variantName = entry.variantName,
+      difficulty = entry.difficulty,
+    }
+    if entry.isBountiful then
+      liveBountiful[entry.delveName] = true
+      settings.bountifulRotation[entry.delveName] = true
+    end
+  end
+
+  local tracking = settings.checkBountifulDone == true and character ~= nil
+  if tracking then
+    local state = character.dailyDelves
+    for delveName in pairs(liveBountiful) do
+      state.bountifulSeen[delveName] = true
+      state.bountifulDone[delveName] = nil
+    end
+    -- Blizzard stops returning a Bountiful Delve from GetDelvesForMap() for
+    -- this character after it is completed. Only infer completion for a Delve
+    -- this same character previously saw as Bountiful during this daily cycle.
+    for delveName in pairs(state.bountifulSeen) do
+      if settings.bountifulRotation[delveName] and not liveBountiful[delveName] then
+        state.bountifulDone[delveName] = true
+      end
+    end
+  end
+
+  local all = {}
+  for delveName, delveInfo in pairs(delves) do
+    local live = liveByDelve[delveName]
+    local cached = settings.variantCache[delveName]
+    local difficulty = live and live.difficulty or (cached and cached.difficulty)
+    local variantName = live and live.variantName or (cached and cached.variantName)
+    local isBountiful = (live and live.isBountiful) or settings.bountifulRotation[delveName] or false
+    local isDone = tracking and character.dailyDelves.bountifulDone[delveName] == true or false
+    table.insert(all, {
+      delveName = delveName,
+      mapId = delveInfo.mapId,
+      variantName = variantName,
+      difficulty = difficulty,
+      priority = difficulty and difficultyConfig[difficulty].priority or 999,
+      isBountiful = isBountiful,
+      isBountifulDone = isDone,
+    })
+  end
+
+  table.sort(all, function(a, b)
+    if a.priority == b.priority then return a.delveName < b.delveName end
+    return a.priority < b.priority
+  end)
+  return all
+end
+
+local function setupCheckButton(button, label, tooltipDescription)
   button:SetSize(24, 24)
   button.Text:SetText(label)
   button.Text:SetFontObject("GameFontHighlightSmall")
+
+  if tooltipDescription then
+    button:SetScript("OnEnter", function()
+      GameTooltip:SetOwner(button, "ANCHOR_TOP")
+      GameTooltip:SetText(label, 1, 1, 1, 1, true)
+      GameTooltip:AddLine(tooltipDescription, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, true)
+      GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", function()
+      GameTooltip:Hide()
+    end)
+  end
 end
 
 local function increaseFontSize(fontString, amount)
@@ -243,7 +346,7 @@ function Module:CreateWindow()
   self.controls:SetHeight(32)
 
   self.highTier = CreateFrame("CheckButton", "$parentHighTier", self.controls, "UICheckButtonTemplate")
-  setupCheckButton(self.highTier, "Show only High Tier")
+  setupCheckButton(self.highTier, "Show only High Tier", "Only show Delves rated Fast or Good.")
   self.highTier:SetPoint("LEFT", self.controls, "LEFT", 0, 0)
   self.highTier:SetScript("OnClick", function(button)
     Data.db.global.dailyDelves.showOnlyHighTier = button:GetChecked() and true or false
@@ -251,10 +354,18 @@ function Module:CreateWindow()
   end)
 
   self.listAll = CreateFrame("CheckButton", "$parentListAll", self.controls, "UICheckButtonTemplate")
-  setupCheckButton(self.listAll, "List all stories")
+  setupCheckButton(self.listAll, "List all stories", "Show every story variant for each Delve.")
   self.listAll:SetPoint("LEFT", self.highTier.Text, "RIGHT", 26, 0)
   self.listAll:SetScript("OnClick", function(button)
     Data.db.global.dailyDelves.listAllStories = button:GetChecked() and true or false
+    Module:Render()
+  end)
+
+  self.bountifulDone = CreateFrame("CheckButton", "$parentBountifulDone", self.controls, "UICheckButtonTemplate")
+  setupCheckButton(self.bountifulDone, "Check Bountiful Delves done", "Track Bountiful Delves per character and mark completed ones with a check.")
+  self.bountifulDone:SetPoint("LEFT", self.listAll.Text, "RIGHT", 26, 0)
+  self.bountifulDone:SetScript("OnClick", function(button)
+    Data.db.global.dailyDelves.checkBountifulDone = button:GetChecked() and true or false
     Module:Render()
   end)
 
@@ -336,13 +447,16 @@ function Module:Render()
   if not self.window:IsVisible() then return end
 
   local settings = Data.db.global.dailyDelves
+  local character = Data:GetCharacter()
   self.highTier:SetChecked(settings.showOnlyHighTier)
   self.listAll:SetChecked(settings.listAllStories)
+  self.bountifulDone:SetChecked(settings.checkBountifulDone == true)
   self.resetText:SetText(formatResetTime() or "Resets daily")
 
   for _, row in ipairs(self.rows) do row:Hide() end
 
-  local activeDelves = getActiveDelves()
+  local liveDelves = getActiveDelves()
+  local activeDelves = buildAllDelves(liveDelves, settings, character)
   local activeByDelve = {}
   for _, entry in ipairs(activeDelves) do activeByDelve[entry.delveName] = entry end
 
@@ -406,12 +520,13 @@ function Module:Render()
           variantName = story.storyName, difficulty = story.difficulty,
           isToday = story.isToday,
           isBountiful = activeByDelve[delveName] and activeByDelve[delveName].isBountiful,
+          isBountifulDone = story.isToday and activeByDelve[delveName] and activeByDelve[delveName].isBountifulDone or false,
         })
       end
     end
   else
     for _, entry in ipairs(activeDelves) do
-      if not settings.showOnlyHighTier or HIGH_TIER[entry.difficulty] then
+      if not settings.showOnlyHighTier or (entry.difficulty and HIGH_TIER[entry.difficulty]) then
         table.insert(display, entry)
       end
     end
@@ -445,12 +560,14 @@ function Module:Render()
       if entry.kind == "header" then
         row.text:SetText(format("|A:%s:16:16:0:0|a |cffCBD5E1%s|r", icon, shortDelveName(entry.delveName)))
       else
-        local config = difficultyConfig[entry.difficulty]
+        local config = entry.difficulty and difficultyConfig[entry.difficulty] or {name = "Unknown", color = "|cff6B7280"}
         local prefix = entry.kind == "story" and "   " or ""
         local bountiful = entry.isBountiful and " |A:delves-bountiful:16:16:0:0|a" or ""
         local today = entry.isToday and " |cff7DD3FC(Today)|r" or ""
-        local name = entry.kind == "story" and entry.variantName or (shortDelveName(entry.delveName) .. " |cff5C5C5C- " .. entry.variantName .. "|r")
-        row.text:SetText(format("%s|A:%s:16:16:0:0|a %s%s%s |cff6B7280—|r %s%s|r", prefix, icon, name, bountiful, today, config.color, config.name))
+        local done = entry.isBountifulDone and (" " .. CreateAtlasMarkup("common-icon-checkmark", 16, 16)) or ""
+        local variantName = entry.variantName or "Story unavailable"
+        local name = entry.kind == "story" and variantName or (shortDelveName(entry.delveName) .. " |cff5C5C5C- " .. variantName .. "|r")
+        row.text:SetText(format("%s|A:%s:16:16:0:0|a %s%s%s |cff6B7280—|r %s%s|r%s", prefix, icon, name, bountiful, today, config.color, config.name, done))
       end
       row:Show()
       y = y + ROW_HEIGHT
