@@ -5,5 +5,8 @@
 CLAUDE.md
 CLAUDE_PATTERNS.md
 
+# Codex workspace files
+AGENTS.md
+
 # Developer scripts
 *.ps1
