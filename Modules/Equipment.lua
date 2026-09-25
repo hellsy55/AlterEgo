@@ -106,6 +106,35 @@ local function colorUpgradeLevelText(text, complete, muted)
   return text
 end
 
+-- Match BetterUpgradeTooltip's Midnight upgrade-track colors while keeping
+-- the numeric rank separate: 1/6-5/6 stays white and 6/6 stays green.
+local UPGRADE_TRACK_COLORS = {
+  Adventurer = WHITE_FONT_COLOR,
+  Veteran = UNCOMMON_GREEN_COLOR,
+  Champion = RARE_BLUE_COLOR,
+  Hero = ITEM_EPIC_COLOR,
+  Myth = ITEM_LEGENDARY_COLOR,
+}
+
+---@param trackName string
+---@param level number
+---@param maxLevel number
+---@param muted boolean
+---@return string
+local function formatUpgradeTrackLabel(trackName, level, maxLevel, muted)
+  local rankText = format("%d/%d", level, maxLevel)
+
+  if muted then
+    return DISABLED_FONT_COLOR:WrapTextInColorCode(format("%s %s", trackName, rankText))
+  end
+
+  local trackColor = UPGRADE_TRACK_COLORS[trackName]
+  local coloredTrack = trackColor and trackColor:WrapTextInColorCode(trackName) or trackName
+  local coloredRank = level == maxLevel and GREEN_FONT_COLOR:WrapTextInColorCode(rankText) or rankText
+
+  return format("%s %s", coloredTrack, coloredRank)
+end
+
 ---@param seasonID number?
 ---@return boolean
 local function isUpgradeFromPreviousSeason(seasonID)
@@ -120,12 +149,13 @@ local function isUpgradeFromPreviousSeason(seasonID)
 end
 
 ---@param item AE_Equipment
----@return string, string
+---@return string, string, boolean
 local function resolveEquipmentUpgradeLevel(item)
   ---@type string[]
   local displayParts = {}
   ---@type string[]
   local sortParts = {}
+  local hasUpgradeTrack = false
 
   local function appendLabel(text, complete, muted)
     table.insert(sortParts, text)
@@ -135,8 +165,10 @@ local function resolveEquipmentUpgradeLevel(item)
   local upgradeLevel = item.itemUpgradeLevel or 0
   local upgradeMax = item.itemUpgradeMax or 0
   if item.itemUpgradeTrack and item.itemUpgradeTrack ~= "" and upgradeLevel > 0 and upgradeMax > 0 then
+    hasUpgradeTrack = true
     local muted = item.itemUpgradeColor ~= nil and item.itemUpgradeColor == DISABLED_FONT_COLOR:GenerateHexColor()
-    appendLabel(format("%s %d/%d", item.itemUpgradeTrack, upgradeLevel, upgradeMax), upgradeLevel == upgradeMax, muted)
+    table.insert(sortParts, format("%s %d/%d", item.itemUpgradeTrack, upgradeLevel, upgradeMax))
+    table.insert(displayParts, formatUpgradeTrackLabel(item.itemUpgradeTrack, upgradeLevel, upgradeMax, muted))
   end
 
   local bonusIDs = getItemLinkBonusIDs(item.itemLink)
@@ -159,7 +191,9 @@ local function resolveEquipmentUpgradeLevel(item)
       end)
     end)
     if fallbackTrack then
-      appendLabel(format("%s %d/%d", fallbackTrack, fallbackLevel, fallbackMax), fallbackLevel == fallbackMax, true)
+      hasUpgradeTrack = true
+      table.insert(sortParts, format("%s %d/%d", fallbackTrack, fallbackLevel, fallbackMax))
+      table.insert(displayParts, formatUpgradeTrackLabel(fallbackTrack, fallbackLevel, fallbackMax, true))
     end
   end
 
@@ -190,7 +224,7 @@ local function resolveEquipmentUpgradeLevel(item)
     appendLabel(format("Crafted %d/%d", craftedQuality, CRAFTED_QUALITY_MAX), craftedQuality == CRAFTED_QUALITY_MAX, isUpgradeFromPreviousSeason(craftedSeason))
   end
 
-  return table.concat(displayParts, " / "), table.concat(sortParts, " / ")
+  return table.concat(displayParts, " / "), table.concat(sortParts, " / "), hasUpgradeTrack
 end
 
 ---@param item AE_Equipment
@@ -432,7 +466,7 @@ function Module:Render()
   TableForEach(character.equipment, function(item)
     local itemID = C_Item.GetItemIDForItemInfo(item.itemLink)
 
-    local upgradeLevel, upgradeSort = resolveEquipmentUpgradeLevel(item)
+    local upgradeLevel, upgradeSort, hasUpgradeTrack = resolveEquipmentUpgradeLevel(item)
 
     local enchantText, enchantTooltip, enchantColor = "", "", GREEN_FONT_COLOR
     ---@type string[]

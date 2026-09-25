@@ -10,6 +10,48 @@ local TableFilter = LiqUI.Utils.TableFilter
 local TableFind = LiqUI.Utils.TableFind
 local TableMergeOptions = LiqUI.Utils.TableMergeOptions
 
+-- Apply LiqUI's slim scrollbar styling to scrollable Blizzard_Menu dropdowns.
+-- The menu framework owns/recycles these frames, so discover the scrollbar
+-- after the Settings dropdown opens instead of replacing Blizzard's menu.
+local function StyleOpenSettingsMenuScrollBars()
+  if not Menu or not Menu.GetManager then
+    return
+  end
+
+  local manager = Menu.GetManager()
+  if not manager or not manager.GetOpenMenu then
+    return
+  end
+
+  local ok, menuFrame = pcall(manager.GetOpenMenu, manager)
+  if not ok or not menuFrame then
+    return
+  end
+
+  local seen = {}
+  local function Visit(frame)
+    if not frame or seen[frame] then
+      return
+    end
+    seen[frame] = true
+
+    -- MinimalScrollBar-compatible frames expose these accessors. Keep this
+    -- feature-detected so future Blizzard menu changes fail harmlessly.
+    if frame.GetThumb and frame.GetTrack and frame.GetBackStepper and frame.GetForwardStepper then
+      pcall(LiqUI.Utils.StyleVerticalScrollBar, frame)
+    end
+
+    if frame.GetChildren then
+      local children = { frame:GetChildren() }
+      for _, child in ipairs(children) do
+        Visit(child)
+      end
+    end
+  end
+
+  Visit(menuFrame)
+end
+
 ---@param window LiqUI_WindowInstance
 local function updateWindowClampInsets(window)
   local width = window:GetWidth()
@@ -629,6 +671,13 @@ local function createWindow(options)
       window.titlebar.SettingsButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
       SetBackgroundColor(window.titlebar.SettingsButton, 1, 1, 1, 0)
       GameTooltip:Hide()
+    end)
+    window.titlebar.SettingsButton:HookScript("OnClick", function()
+      -- Blizzard builds the dropdown after the click handler. Style it on the
+      -- next frame, then once more shortly after in case scroll mode creates
+      -- its scrollbar during deferred menu layout.
+      C_Timer.After(0, StyleOpenSettingsMenuScrollBars)
+      C_Timer.After(0.05, StyleOpenSettingsMenuScrollBars)
     end)
     window.titlebar.SettingsButton:Show()
   end

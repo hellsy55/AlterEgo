@@ -32,6 +32,10 @@ Data.defaultDB = {
     showScores = true,
     showAffixColors = true,
     showAffixHeader = true,
+    dailyDelves = {
+      showOnlyHighTier = false,
+      listAllStories = false,
+    },
     showZeroRatedCharacters = true,
     showEquippedItemLevel = false,
     showItemLevelDecimals = false,
@@ -101,6 +105,7 @@ Data.defaultDB = {
       windows = {
         Main = {},
         Affixes = {},
+        DailyDelves = {},
         Equipment = {},
         VaultPreview = {},
       },

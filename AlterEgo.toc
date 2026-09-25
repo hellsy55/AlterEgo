@@ -52,6 +52,7 @@ Comm.lua
 
 Modules\Main.lua
 Modules\WeeklyAffixes.lua
+Modules\DailyDelves.lua
 Modules\Equipment.lua
 Modules\VaultPreview.lua
 

@@ -1515,6 +1515,7 @@ function Module:RenderNow()
   local windowWidthMax = LibLiqUI.Utils.GetMaxWindowWidth()
   local windowWidth, windowHeight = numCharacters == 0 and 500 or 0, 0
   local weeklyAffixesModule = addon.Core:GetModule("WeeklyAffixes", true)
+  local dailyDelvesModule = addon.Core:GetModule("DailyDelves", true)
 
   if not self.window then
     local windows = Data.db.global.liqui.windows
@@ -2440,6 +2441,25 @@ function Module:RenderNow()
     self.window.body.content.scrollArea:SetAllPoints()
     self.window.affixes = CreateFrame("Frame", "$parentAffixes", self.window.titlebar)
     self.window.affixes.buttons = {}
+    self.window.dailyDelvesSeparator = self.window.titlebar:CreateFontString("$parentDailyDelvesSeparator", "OVERLAY", "GameFontDisable")
+    self.window.dailyDelvesSeparator:SetText("|")
+    self.window.dailyDelvesButton = CreateFrame("Button", "$parentDailyDelves", self.window.titlebar)
+    self.window.dailyDelvesButton:SetSize(20, 20)
+    self.window.dailyDelvesButton:SetNormalAtlas("delves-bountiful")
+    self.window.dailyDelvesButton:SetHighlightAtlas("delves-bountiful")
+    self.window.dailyDelvesButton:GetHighlightTexture():SetAlpha(0.25)
+    self.window.dailyDelvesButton:SetScript("OnEnter", function(button)
+      GameTooltip:SetOwner(button, "ANCHOR_TOP")
+      GameTooltip:SetText("Daily Delves", 1, 1, 1)
+      GameTooltip:AddLine("View today's Delve stories and their difficulty tier.", nil, nil, nil, true)
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine("<Click to View Daily Delves>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+      GameTooltip:Show()
+    end)
+    self.window.dailyDelvesButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.window.dailyDelvesButton:SetScript("OnClick", function()
+      if dailyDelvesModule then dailyDelvesModule:Toggle() end
+    end)
   end
 
   if not self.window:IsVisible() then
@@ -2515,6 +2535,22 @@ function Module:RenderNow()
         end
         affixAnchor = affixFrame
       end)
+
+      self.window.dailyDelvesSeparator:ClearAllPoints()
+      self.window.dailyDelvesSeparator:SetPoint("LEFT", affixAnchor, "RIGHT", 8, 0)
+      self.window.dailyDelvesSeparator:Show()
+      self.window.dailyDelvesButton:ClearAllPoints()
+      self.window.dailyDelvesButton:SetPoint("LEFT", self.window.dailyDelvesSeparator, "RIGHT", 8, 0)
+      self.window.dailyDelvesButton:Show()
+    else
+      self.window.dailyDelvesSeparator:Hide()
+      self.window.dailyDelvesButton:ClearAllPoints()
+      if numCharacters < 3 then
+        self.window.dailyDelvesButton:SetPoint("LEFT", self.window.titlebar.icon, "RIGHT", 6, 0)
+      else
+        self.window.dailyDelvesButton:SetPoint("CENTER", self.window.titlebar, "CENTER", 0, 0)
+      end
+      self.window.dailyDelvesButton:Show()
     end
   end
 
