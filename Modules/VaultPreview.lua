@@ -143,6 +143,7 @@ function Module:OpenCharacter(character, useSnapshot)
   self.usingSnapshot = useSnapshot and true or false
   self:Render()
   self.window:Show()
+  self.window:Raise()
 end
 
 function Module:Render()

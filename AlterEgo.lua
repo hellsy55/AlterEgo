@@ -102,6 +102,9 @@ function Core:ToggleWindow()
   local window = LibLiqUI:GetElement("Window", addon.name .. "Main")
   if not window then return end
   window:Toggle()
+  if window:IsVisible() then
+    window:Raise()
+  end
 end
 
 ---Toggle the vault window

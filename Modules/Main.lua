@@ -2497,6 +2497,9 @@ function Module:RenderNow()
           local affixesWindow = LibLiqUI:GetElement("Window", addon.name .. "Affixes")
           if affixesWindow then
             affixesWindow:Toggle()
+            if affixesWindow:IsVisible() then
+              affixesWindow:Raise()
+            end
           end
         end)
 

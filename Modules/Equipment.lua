@@ -301,6 +301,7 @@ function Module:OpenCharacter(character)
   self.equipmentCharacter = character
   self:Render()
   self.window:Show()
+  self.window:Raise()
 end
 
 function Module:Render()
@@ -500,7 +501,19 @@ function Module:Render()
     end
   end
 
-  self.window:SetTitle(format("%s (%s)", nameColor:WrapTextInColorCode(character.info.name), character.info.realm))
+  local ilvlText = ""
+  if character.info.ilvl ~= nil and character.info.ilvl.equipped ~= nil then
+    local ilvlColor = character.info.ilvl.color or WHITE_FONT_COLOR:GenerateHexColor()
+    local ilvlValue
+    if Data.db.global.showItemLevelDecimals then
+      ilvlValue = format("%.2f", character.info.ilvl.equipped)
+    else
+      ilvlValue = tostring(floor(character.info.ilvl.equipped))
+    end
+    ilvlText = " - " .. WrapTextInColorCode(ilvlValue, ilvlColor)
+  end
+
+  self.window:SetTitle(format("%s (%s)%s", nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText))
   self.dataTable:SetData(rows)
   local bodyWidth, bodyHeight = self.dataTable:GetSize()
   self.window:SetBodySize(bodyWidth > 0 and bodyWidth or tableWidth, bodyHeight)
