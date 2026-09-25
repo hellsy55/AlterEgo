@@ -35,6 +35,40 @@ local Slots = {
 local EQUIPMENT_HEADER_HEIGHT = 30
 local CRAFTED_QUALITY_MAX = 5
 
+---@param itemLink string?
+---@return number
+local function getItemLinkEnchantID(itemLink)
+  if not itemLink then return 0 end
+  local itemPayload = string.match(itemLink, "item:([%-?%d:]+)")
+  if not itemPayload then return 0 end
+  local itemPayloadSplit = {strsplit(":", itemPayload)}
+  return tonumber(itemPayloadSplit[2]) or 0
+end
+
+---@param lineText string
+---@return string, string
+local function formatEnchantLine(lineText)
+  local enchantText = lineText
+  local enchantTooltip = lineText
+
+  local enchantValue = string.match(lineText, ENCHANTED_TOOLTIP_LINE:gsub("%%s", "(.*)"))
+  if enchantValue ~= nil then
+    enchantTooltip = enchantValue
+    enchantText = enchantValue
+
+    local enchantName, enchantAtlas = string.match(enchantValue, "(.*)|A:(.*):20:20|a")
+    if enchantName ~= nil then
+      enchantText = "|A:" .. enchantAtlas .. ":20:20|a" .. enchantName
+      local enchantNameSplit = {strsplit("-", enchantName)}
+      if enchantNameSplit[2] ~= nil then
+        enchantText = "|A:" .. enchantAtlas .. ":20:20|a" .. strtrim(enchantNameSplit[2])
+      end
+    end
+  end
+
+  return enchantText, enchantTooltip
+end
+
 ---@param itemLink string
 ---@return number[]
 local function getItemLinkBonusIDs(itemLink)
@@ -277,17 +311,56 @@ function Module:OnInitialize()
   self:Render()
 end
 
+local EQUIPMENT_REFRESH_RETRY_DELAYS = {0.10, 0.35, 1.00}
+
+function Module:RefreshEquipment()
+  Data:UpdateEquipment()
+  self:Render()
+end
+
+function Module:QueueEquipmentRefresh()
+  -- Equipment/inventory events can fire before Blizzard has refreshed the item
+  -- tooltip data that contains permanent enchant information. Refresh once
+  -- immediately, then retry quickly so an already-active enchant does not sit
+  -- on "Missing" until another inventory event happens several seconds later.
+  self:RefreshEquipment()
+
+  if self.equipmentRefreshTimers then
+    for _, timer in ipairs(self.equipmentRefreshTimers) do
+      self:CancelTimer(timer, true)
+    end
+  end
+
+  self.equipmentRefreshTimers = {}
+  for _, delay in ipairs(EQUIPMENT_REFRESH_RETRY_DELAYS) do
+    local timer = self:ScheduleTimer(function()
+      self:RefreshEquipment()
+    end, delay)
+    table.insert(self.equipmentRefreshTimers, timer)
+  end
+end
+
 function Module:OnEnable()
   addon.Events:RegisterEvent(
     {
       "PLAYER_EQUIPMENT_CHANGED",
       "UNIT_INVENTORY_CHANGED",
-    }, function()
-      -- addon.Data:UpdateCharacterInfo()
-      Data:UpdateEquipment()
-      self:Render()
+    }, function(unitOrSlot)
+      -- UNIT_INVENTORY_CHANGED passes a unit token, while
+      -- PLAYER_EQUIPMENT_CHANGED passes the numeric equipment slot first.
+      if type(unitOrSlot) == "string" and unitOrSlot ~= "player" then return end
+      self:QueueEquipmentRefresh()
     end
   )
+
+  -- Hyperlink tooltips for offline characters may become available shortly
+  -- after item data finishes loading. Re-render the open equipment window as
+  -- soon as that happens instead of waiting for another unrelated UI update.
+  addon.Events:RegisterEvent("ITEM_DATA_LOAD_RESULT", function()
+    if self.window and self.window:IsVisible() then
+      self:Render()
+    end
+  end)
 end
 
 ---Opens a new equipment window
@@ -368,30 +441,24 @@ function Module:Render()
     local socketTooltipLines = {}
     local hasEmptySocket = false
 
-    local tooltipData = C_TooltipInfo.GetHyperlink(item.itemLink)
+    local tooltipData
+    local isCurrentCharacter = character.GUID == UnitGUID("player")
+    if isCurrentCharacter then
+      -- Prefer the live inventory tooltip for the logged-in character. This is
+      -- the freshest source after applying an enchant; the stored hyperlink can
+      -- briefly lag behind the actual equipped item state.
+      tooltipData = C_TooltipInfo.GetInventoryItem("player", item.itemSlotID)
+    end
+    if tooltipData == nil then
+      tooltipData = C_TooltipInfo.GetHyperlink(item.itemLink)
+    end
+
+    local tooltipEnchantFound = false
     if tooltipData ~= nil then
-      for _, line in pairs(tooltipData.lines) do
-        if line.type == Enum.TooltipDataLineType.ItemEnchantmentPermanent then
-          enchantText = line.leftText
-          enchantTooltip = line.leftText
-          -- Extract the enchant value from the enchant line
-          local enchantValue = string.match(line.leftText, ENCHANTED_TOOLTIP_LINE:gsub("%%s", "(.*)"))
-          if enchantValue ~= nil then
-            enchantTooltip = enchantValue
-            enchantText = enchantValue
-
-            -- Extract the enchant name and atlas from the enchant line
-            local enchantName, enchantAtlas = string.match(enchantValue, "(.*)|A:(.*):20:20|a")
-            if enchantName ~= nil then
-              enchantText = "|A:" .. enchantAtlas .. ":20:20|a" .. enchantName
-
-              -- Remove the enchant prefix from the name
-              local enchantNameSplit = {strsplit("-", enchantName)}
-              if enchantNameSplit[2] ~= nil then
-                enchantText = "|A:" .. enchantAtlas .. ":20:20|a" .. strtrim(enchantNameSplit[2])
-              end
-            end
-          end
+      for _, line in pairs(tooltipData.lines or {}) do
+        if line.type == Enum.TooltipDataLineType.ItemEnchantmentPermanent and line.leftText then
+          enchantText, enchantTooltip = formatEnchantLine(line.leftText)
+          tooltipEnchantFound = true
         end
 
         if line.type == Enum.TooltipDataLineType.GemSocket then
@@ -409,8 +476,34 @@ function Module:Render()
     end
 
     if enchantText == "" and Slots[item.itemSlotID] and Slots[item.itemSlotID].canEnchant then
-      enchantText = "Missing"
-      enchantColor = DIM_RED_FONT_COLOR
+      -- For offline characters, prefer the enchant line saved while that
+      -- character was online. This avoids depending on hyperlink tooltip cache.
+      if not isCurrentCharacter and item.enchantTooltipLine then
+        enchantText, enchantTooltip = formatEnchantLine(item.enchantTooltipLine)
+      else
+        -- Even when the localized tooltip text is not cached yet, the item link
+        -- itself contains the permanent enchant ID. A non-zero ID means the
+        -- item is definitely enchanted, so never show a false red "Missing".
+        local enchantID = item.enchantID
+        if enchantID == nil then
+          enchantID = getItemLinkEnchantID(item.itemLink)
+        end
+
+        if enchantID and enchantID > 0 then
+          enchantText = "Enchanted"
+          enchantTooltip = "Enchant ID: " .. tostring(enchantID)
+
+          -- Ask Blizzard to load the underlying item data. ITEM_DATA_LOAD_RESULT
+          -- above will re-render and replace this fallback with the real
+          -- localized enchant name as soon as the tooltip becomes available.
+          if not tooltipEnchantFound and itemID then
+            C_Item.RequestLoadItemDataByID(itemID)
+          end
+        else
+          enchantText = "Missing"
+          enchantColor = DIM_RED_FONT_COLOR
+        end
+      end
     end
 
     local socketSlot = Slots[item.itemSlotID]

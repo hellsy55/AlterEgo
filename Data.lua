@@ -1949,9 +1949,25 @@ function Data:UpdateEquipment()
       itemUpgradeMax = upgradeInfo.maxLevel
     end
 
+    -- The enchant ID is embedded directly in the item string (the field
+    -- immediately after the item ID). Persist it with the equipment record so
+    -- enchant presence can be checked for offline characters without waiting
+    -- for Blizzard's tooltip cache.
+    local itemPayload = string.match(itemLink or inventoryItemLink, "item:([%-?%d:]+)")
+    local itemPayloadSplit = itemPayload and {strsplit(":", itemPayload)} or {}
+    local enchantID = tonumber(itemPayloadSplit[2]) or 0
+    local enchantTooltipLine = nil
+
     local tooltipData = C_TooltipInfo.GetInventoryItem("player", slot.id)
     if tooltipData and tooltipData.lines then
       TableForEach(tooltipData.lines, function(line)
+        if line.type == Enum.TooltipDataLineType.ItemEnchantmentPermanent and line.leftText then
+          -- Save the localized enchant line while this character is online.
+          -- That lets the equipment window show the enchant immediately when
+          -- viewing this character later from another alt.
+          enchantTooltipLine = line.leftText
+        end
+
         if not line.leftText then return end
         local match, _, uTrack, uLevel, uMax = line.leftText:find(upgradePattern)
         if not match then return end
@@ -1995,6 +2011,8 @@ function Data:UpdateEquipment()
       itemUpgradeLevel = itemUpgradeLevel,
       itemUpgradeMax = itemUpgradeMax,
       itemUpgradeColor = itemUpgradeColor,
+      enchantID = enchantID,
+      enchantTooltipLine = enchantTooltipLine,
       itemSlotID = slot.id,
       itemSlotName = slot.name,
     }
