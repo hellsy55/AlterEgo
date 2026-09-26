@@ -640,7 +640,17 @@ function Module:Render()
     ilvlText = " - " .. WrapTextInColorCode(ilvlValue, ilvlColor)
   end
 
-  self.window:SetTitle(format("%s (%s)%s", nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText))
+  local positionPrefix = ""
+  if Data.db.global.showCharacterPosition then
+    for characterIndex, listedCharacter in ipairs(Data:GetCharacters()) do
+      if listedCharacter.GUID == character.GUID then
+        positionPrefix = WHITE_FONT_COLOR:WrapTextInColorCode(format("%d - ", characterIndex))
+        break
+      end
+    end
+  end
+
+  self.window:SetTitle(format("%s%s (%s)%s", positionPrefix, nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText))
   self.dataTable:SetData(rows)
   local bodyWidth, bodyHeight = self.dataTable:GetSize()
   self.window:SetBodySize(bodyWidth > 0 and bodyWidth or tableWidth, bodyHeight)
