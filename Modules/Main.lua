@@ -1082,6 +1082,9 @@ function Module:GetCharacterInfo(unfiltered)
       label = DELVES_GREAT_VAULT_LABEL,
       value = function(character)
         if character.vault.hasAvailableRewards == true then
+          if characterHasVaultPreviewData(character) then
+            return RARE_BLUE_COLOR:WrapTextInColorCode("Rewards Pending")
+          end
           return GREEN_FONT_COLOR:WrapTextInColorCode(QUEST_REWARDS)
         end
         return ""
@@ -2070,35 +2073,6 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("No more moving the button around accidentally!", nil, nil, nil, true)
             end)
-            local minimapRightClickNames = {
-              vault = "Great Vault",
-              dailyDelves = "Daily Delves",
-            }
-            local minimapRightClickButton = menu:CreateButton(
-              format("Minimap Icon Right Click: %s", minimapRightClickNames[Data.db.global.interface.minimapRightClickAction or "vault"] or "Great Vault")
-            )
-            minimapRightClickButton:SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Choose what right-clicking the AlterEgo minimap button opens.", nil, nil, nil, true)
-            end)
-            for _, option in ipairs({
-              { value = "vault", text = "Open Great Vault" },
-              { value = "dailyDelves", text = "Open Daily Delves" },
-            }) do
-              minimapRightClickButton:CreateRadio(
-                option.text,
-                function(value) return (Data.db.global.interface.minimapRightClickAction or "vault") == value end,
-                function(value)
-                  local currentValue = Data.db.global.interface.minimapRightClickAction or "vault"
-                  if currentValue == value then
-                    return MenuResponse.Refresh
-                  end
-                  Data.db.global.interface.minimapRightClickAction = value
-                  return MenuResponse.CloseAll
-                end,
-                option.value
-              )
-            end
             menu:CreateDivider()
             menu:CreateTitle("Multi-Account Sync")
             menu:CreateCheckbox(
@@ -2501,6 +2475,16 @@ function Module:RenderNow()
           tooltipDescription = WEEKLY_REWARDS_ADD_ITEMS .. "\n\n" .. GREEN_FONT_COLOR:WrapTextInColorCode(format("<%s>", WEEKLY_REWARDS_CLICK_TO_PREVIEW_INSTRUCTIONS)),
           onClick = function()
             addon.Core:ToggleVault()
+          end,
+          iconSize = 13,
+        },
+        {
+          name = "RaidGroupLockouts",
+          icon = Constants.media.IconCharacters,
+          tooltipTitle = "Raid Group Lockouts",
+          tooltipDescription = "Check Normal, Heroic, and Mythic lockouts shared by your current raid group." .. "\n\n" .. GREEN_FONT_COLOR:WrapTextInColorCode("<Click to Open>"),
+          onClick = function()
+            addon.Core:ToggleRaidLockouts()
           end,
           iconSize = 13,
         },

@@ -105,7 +105,6 @@ Data.defaultDB = {
       -- fontSize = 12,
       windowScale = 100,
       windowColor = {r = 0.11372549019, g = 0.14117647058, b = 0.16470588235, a = 1},
-      minimapRightClickAction = "vault", ---@type "vault"|"dailyDelves" What the minimap button opens on right click
     },
     liqui = {
       windows = {
@@ -114,6 +113,7 @@ Data.defaultDB = {
         DailyDelves = {},
         Equipment = {},
         VaultPreview = {},
+        RaidLockouts = {},
       },
       tables = {
         Affixes = { hiddenColumns = {} },

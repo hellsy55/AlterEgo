@@ -45,19 +45,11 @@ function Core:OnInitialize()
   Data:Initialize()
   Data:MigrateDB()
 
-  local function getMinimapRightClickAction()
-    return Data.db.global.interface.minimapRightClickAction or "vault"
-  end
-
-  local function toggleMinimapRightClickTarget()
-    if getMinimapRightClickAction() == "dailyDelves" then
-      local module = addon.Core:GetModule("DailyDelves", true)
-      if module then
-        module:Toggle()
-      end
-      return
+  local function toggleDailyDelves()
+    local module = addon.Core:GetModule("DailyDelves", true)
+    if module then
+      module:Toggle()
     end
-    self:ToggleVault()
   end
 
   local libDataObject = {
@@ -70,8 +62,12 @@ function Core:OnInitialize()
       if mouseButton then
         if mouseButton == "LeftButton" and isShiftKeyDown then
           self:ToggleEquipment()
+        elseif mouseButton == "RightButton" and isShiftKeyDown then
+          self:ToggleVault()
+        elseif mouseButton == "MiddleButton" then
+          self:ToggleRaidLockouts()
         elseif mouseButton == "RightButton" then
-          toggleMinimapRightClickTarget()
+          toggleDailyDelves()
         else
           self:ToggleWindow()
         end
@@ -82,9 +78,10 @@ function Core:OnInitialize()
     OnTooltipShow = function(tooltip)
       tooltip:SetText(addon.title, 1, 1, 1)
       tooltip:AddLine("|cff00ff00Left click|r to open AlterEgo.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-      local rightClickTarget = getMinimapRightClickAction() == "dailyDelves" and "Daily Delves" or "the Great Vault"
-      tooltip:AddLine(format("|cff00ff00Right click|r to open %s.", rightClickTarget), NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+      tooltip:AddLine("|cff00ff00Right click|r to open Daily Delves.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+      tooltip:AddLine("|cff00ff00Middle click|r to open Raid Group Lockouts.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
       tooltip:AddLine("|cff00ff00Shift+Left click|r to open your character equipment.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+      tooltip:AddLine("|cff00ff00Shift+Right click|r to open the Great Vault.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
       local dragText = "|cff00ff00Drag|r to move this icon"
       if Data.db.global.minimap.lock then
         dragText = dragText .. " |cffff0000(locked)|r"
@@ -130,6 +127,13 @@ function Core:ToggleVault()
   else
     WeeklyRewards_ShowUI()
   end
+end
+
+---Toggle the raid group lockouts window
+function Core:ToggleRaidLockouts()
+  local module = self:GetModule("RaidLockouts", true)
+  if not module then return end
+  module:Toggle()
 end
 
 ---Toggle the equipment window
