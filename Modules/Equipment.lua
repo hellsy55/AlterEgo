@@ -107,7 +107,7 @@ local function colorUpgradeLevelText(text, complete, muted)
 end
 
 -- Match BetterUpgradeTooltip's Midnight upgrade-track colors while keeping
--- the numeric rank separate: 1/6-5/6 stays white and 6/6 stays green.
+-- the numeric rank separate: incomplete ranks stay white and the max rank is green.
 local UPGRADE_TRACK_COLORS = {
   Adventurer = WHITE_FONT_COLOR,
   Veteran = UNCOMMON_GREEN_COLOR,
@@ -116,21 +116,71 @@ local UPGRADE_TRACK_COLORS = {
   Myth = ITEM_LEGENDARY_COLOR,
 }
 
+-- Midnight Season 2 crafted gear uses five crafted-quality ranks per upgrade
+-- track. Boundary item levels overlap between tracks, so crafted quality is
+-- used together with item level to distinguish cases such as Hero 5/5 (318)
+-- from Myth 1/5 (also 318).
+local CRAFTED_UPGRADE_TRACKS = {
+  {name = "Adventurer", itemLevels = {266, 269, 272, 275, 279}},
+  {name = "Veteran",    itemLevels = {279, 282, 285, 288, 292}},
+  {name = "Champion",   itemLevels = {292, 295, 298, 302, 305}},
+  {name = "Hero",       itemLevels = {305, 308, 311, 315, 318}},
+  {name = "Myth",       itemLevels = {318, 321, 324, 328, 331}},
+}
+
+---@param itemLevel number?
+---@param craftedQuality number?
+---@return string?
+local function resolveCraftedUpgradeTrack(itemLevel, craftedQuality)
+  if not itemLevel or not craftedQuality or craftedQuality < 1 or craftedQuality > CRAFTED_QUALITY_MAX then
+    return nil
+  end
+
+  local roundedItemLevel = floor(itemLevel + 0.5)
+
+  -- Prefer the exact quality + item-level pair so overlapping boundary levels
+  -- are assigned to the correct track.
+  for _, track in ipairs(CRAFTED_UPGRADE_TRACKS) do
+    if track.itemLevels[craftedQuality] == roundedItemLevel then
+      return track.name
+    end
+  end
+
+  -- Keep a range fallback for crafted links whose item level is valid for the
+  -- track but does not exactly match one of the expected five rank values.
+  if roundedItemLevel >= 318 and roundedItemLevel <= 331 then
+    return "Myth"
+  elseif roundedItemLevel >= 305 and roundedItemLevel < 318 then
+    return "Hero"
+  elseif roundedItemLevel >= 292 and roundedItemLevel < 305 then
+    return "Champion"
+  elseif roundedItemLevel >= 279 and roundedItemLevel < 292 then
+    return "Veteran"
+  elseif roundedItemLevel >= 266 and roundedItemLevel < 279 then
+    return "Adventurer"
+  end
+
+  return nil
+end
+
 ---@param trackName string
 ---@param level number
 ---@param maxLevel number
 ---@param muted boolean
+---@param crafted boolean?
 ---@return string
-local function formatUpgradeTrackLabel(trackName, level, maxLevel, muted)
-  local rankText = format("%d/%d", level, maxLevel)
+local function formatUpgradeTrackLabel(trackName, level, maxLevel, muted, crafted)
+  local displayTrackName = crafted and format("%s Crafted", trackName) or trackName
+  local isMythBonusRank = not crafted and trackName == "Myth" and level == 9 and maxLevel == 6
+  local rankText = format("%d/%d%s", level, maxLevel, isMythBonusRank and "*" or "")
 
   if muted then
-    return DISABLED_FONT_COLOR:WrapTextInColorCode(format("%s %s", trackName, rankText))
+    return DISABLED_FONT_COLOR:WrapTextInColorCode(format("%s %s", displayTrackName, rankText))
   end
 
   local trackColor = UPGRADE_TRACK_COLORS[trackName]
-  local coloredTrack = trackColor and trackColor:WrapTextInColorCode(trackName) or trackName
-  local coloredRank = level == maxLevel and GREEN_FONT_COLOR:WrapTextInColorCode(rankText) or rankText
+  local coloredTrack = trackColor and trackColor:WrapTextInColorCode(displayTrackName) or displayTrackName
+  local coloredRank = (level == maxLevel or isMythBonusRank) and GREEN_FONT_COLOR:WrapTextInColorCode(rankText) or rankText
 
   return format("%s %s", coloredTrack, coloredRank)
 end
@@ -162,47 +212,7 @@ local function resolveEquipmentUpgradeLevel(item)
     table.insert(displayParts, colorUpgradeLevelText(text, complete, muted))
   end
 
-  local upgradeLevel = item.itemUpgradeLevel or 0
-  local upgradeMax = item.itemUpgradeMax or 0
-  if item.itemUpgradeTrack and item.itemUpgradeTrack ~= "" and upgradeLevel > 0 and upgradeMax > 0 then
-    hasUpgradeTrack = true
-    local muted = item.itemUpgradeColor ~= nil and item.itemUpgradeColor == DISABLED_FONT_COLOR:GenerateHexColor()
-    table.insert(sortParts, format("%s %d/%d", item.itemUpgradeTrack, upgradeLevel, upgradeMax))
-    table.insert(displayParts, formatUpgradeTrackLabel(item.itemUpgradeTrack, upgradeLevel, upgradeMax, muted))
-  end
-
   local bonusIDs = getItemLinkBonusIDs(item.itemLink)
-
-  if #displayParts == 0 then
-    local fallbackTrack
-    local fallbackLevel = 0
-    local fallbackMax = 0
-    TableForEach(bonusIDs, function(bonusId)
-      TableForEach(Data.upgradeTracks, function(season)
-        TableForEach(season.tracks, function(track)
-          TableForEach(track.bonusIDs, function(id, trackLevel)
-            if id == bonusId then
-              fallbackTrack = track.name
-              fallbackLevel = trackLevel
-              fallbackMax = #track.bonusIDs
-            end
-          end)
-        end)
-      end)
-    end)
-    if fallbackTrack then
-      hasUpgradeTrack = true
-      table.insert(sortParts, format("%s %d/%d", fallbackTrack, fallbackLevel, fallbackMax))
-      table.insert(displayParts, formatUpgradeTrackLabel(fallbackTrack, fallbackLevel, fallbackMax, true))
-    end
-  end
-
-  TableForEach(bonusIDs, function(bonusId)
-    local label = Data.upgradeBonusLabels[bonusId]
-    if label then
-      appendLabel(label.name, true, isUpgradeFromPreviousSeason(label.seasonID))
-    end
-  end)
 
   local craftedQuality = C_TradeSkillUI.GetItemCraftedQualityByItemInfo(item.itemLink)
   if not craftedQuality then
@@ -213,14 +223,68 @@ local function resolveEquipmentUpgradeLevel(item)
       end
     end)
   end
+
+  local craftedSeason
   if craftedQuality then
-    local craftedSeason
     TableForEach(bonusIDs, function(bonusId)
       local seasonID = Data.craftedSeasonBonusIDs[bonusId]
       if seasonID and (not craftedSeason or seasonID > craftedSeason) then
         craftedSeason = seasonID
       end
     end)
+  end
+
+  local craftedTrack = resolveCraftedUpgradeTrack(item.itemLevel, craftedQuality)
+  if craftedTrack then
+    hasUpgradeTrack = true
+    local muted = isUpgradeFromPreviousSeason(craftedSeason)
+    table.insert(sortParts, format("%s Crafted %d/%d", craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX))
+    table.insert(displayParts, formatUpgradeTrackLabel(craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX, muted, true))
+  elseif not craftedQuality then
+    local upgradeLevel = item.itemUpgradeLevel or 0
+    local upgradeMax = item.itemUpgradeMax or 0
+    if item.itemUpgradeTrack and item.itemUpgradeTrack ~= "" and upgradeLevel > 0 and upgradeMax > 0 then
+      hasUpgradeTrack = true
+      local muted = item.itemUpgradeColor ~= nil and item.itemUpgradeColor == DISABLED_FONT_COLOR:GenerateHexColor()
+      table.insert(sortParts, format("%s %d/%d", item.itemUpgradeTrack, upgradeLevel, upgradeMax))
+      table.insert(displayParts, formatUpgradeTrackLabel(item.itemUpgradeTrack, upgradeLevel, upgradeMax, muted))
+    end
+
+    if #displayParts == 0 then
+      local fallbackTrack
+      local fallbackLevel = 0
+      local fallbackMax = 0
+      TableForEach(bonusIDs, function(bonusId)
+        TableForEach(Data.upgradeTracks, function(season)
+          TableForEach(season.tracks, function(track)
+            TableForEach(track.bonusIDs, function(id, trackLevel)
+              if id == bonusId then
+                fallbackTrack = track.name
+                fallbackLevel = trackLevel
+                fallbackMax = #track.bonusIDs
+              end
+            end)
+          end)
+        end)
+      end)
+      if fallbackTrack then
+        hasUpgradeTrack = true
+        table.insert(sortParts, format("%s %d/%d", fallbackTrack, fallbackLevel, fallbackMax))
+        table.insert(displayParts, formatUpgradeTrackLabel(fallbackTrack, fallbackLevel, fallbackMax, true))
+      end
+    end
+  end
+
+  TableForEach(bonusIDs, function(bonusId)
+    local label = Data.upgradeBonusLabels[bonusId]
+    if label then
+      appendLabel(label.name, true, isUpgradeFromPreviousSeason(label.seasonID))
+    end
+  end)
+
+  -- Preserve the legacy crafted label for crafted items outside the Midnight
+  -- Season 2 item-level table instead of assigning an incorrect track.
+  if craftedQuality and not craftedTrack then
     appendLabel(format("Crafted %d/%d", craftedQuality, CRAFTED_QUALITY_MAX), craftedQuality == CRAFTED_QUALITY_MAX, isUpgradeFromPreviousSeason(craftedSeason))
   end
 
