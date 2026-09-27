@@ -761,6 +761,9 @@ function Module:GetCharacterInfo(unfiltered)
         if character.info.factionGroup ~= nil and character.info.factionGroup.localized ~= nil then
           GameTooltip:AddLine(character.info.factionGroup.localized, 1, 1, 1)
         end
+        if character.info.lastLocation ~= nil and character.info.lastLocation ~= "" then
+          GameTooltip:AddLine(format("Last location: %s", character.info.lastLocation), 1, 1, 1)
+        end
         if character.money ~= nil then
           GameTooltip:AddLine(" ")
           GameTooltip:AddLine(GetMoneyString(character.money, true), 1, 1, 1)

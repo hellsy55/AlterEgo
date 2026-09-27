@@ -275,6 +275,25 @@ function Core:OnEnable()
     end
   )
   addon.Events:RegisterEvent(
+    {
+      "PLAYER_ENTERING_WORLD",
+      "ZONE_CHANGED",
+      "ZONE_CHANGED_INDOORS",
+      "ZONE_CHANGED_NEW_AREA",
+    },
+    function()
+      Data:UpdateCharacterLocation()
+    end,
+    true
+  )
+  addon.Events:RegisterEvent(
+    "PLAYER_LOGOUT",
+    function()
+      Data:UpdateCharacterLocation()
+    end,
+    true
+  )
+  addon.Events:RegisterEvent(
     "MYTHIC_PLUS_CURRENT_AFFIX_UPDATE",
     function()
       self:Render()

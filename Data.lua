@@ -163,6 +163,7 @@ Data.defaultCharacter = {
       english = "",
       localized = "",
     },
+    lastLocation = "",
     ilvl = {
       level = 0,
       equipped = 0,
@@ -1858,6 +1859,21 @@ function Data:UpdateCharacterInfo()
   character.lastUpdate = GetServerTime()
   addon.Core:Render()
   addon.Core:RequestSyncBroadcast()
+end
+
+---Store the current zone so the character tooltip can show where this
+---character was last seen. Zone events keep this current; logout is a fallback.
+function Data:UpdateCharacterLocation()
+  local character = self:GetCharacter()
+  if not character then return end
+
+  local zoneName = GetZoneText()
+  if not zoneName or zoneName == "" then
+    zoneName = GetRealZoneText()
+  end
+  if not zoneName or zoneName == "" then return end
+
+  character.info.lastLocation = zoneName
 end
 
 ---Refresh character money from the API
