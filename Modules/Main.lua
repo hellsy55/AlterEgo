@@ -2126,7 +2126,7 @@ function Module:RenderNow()
               tooltip:AddLine("Nobody else who can see messages on that channel receives anything unless they also know your password.", nil, nil, nil, true)
             end)
             local setPasswordButton = menu:CreateButton(
-              Data.db.global.sync.password ~= "" and "Change Password" or "Set Password",
+              Data.db.global.sync.password ~= "" and ("Change Password: " .. Data.db.global.sync.password) or "Set Password",
               function()
                 StaticPopup_Show("ALTEREGO_SYNC_PASSWORD")
                 -- Force the whole settings menu closed here instead of
