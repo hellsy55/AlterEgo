@@ -166,11 +166,13 @@ do
       -- this is the only place Sync actually turns on.
       local action = pendingSyncAction
       pendingSyncAction = nil
-      if action == "enable" or action == "syncNow" then
+      if action == "enable" or action == "syncNow" or action == "syncSettings" then
         Data.db.global.sync.enabled = true
       end
       if action == "syncNow" then
         addon.Core:ForceSyncBroadcast()
+      elseif action == "syncSettings" then
+        StaticPopup_Show("ALTEREGO_SYNC_SETTINGS")
       end
     end,
     OnCancel = function()
@@ -211,8 +213,8 @@ local pendingPasswordPopup = false
 ---or, worse, turn Sync on with no way to actually send/receive anything.
 ---Never pops the dialog up during combat -- the request is remembered
 ---instead, and honored as soon as combat actually ends.
----@param action "enable"|"syncNow"|nil What Enable Sync/Sync Now was
----trying to do -- carried out once a password is confirmed.
+---@param action "enable"|"syncNow"|"syncSettings"|nil What Enable Sync, Sync Now,
+---or Sync Addon Settings was trying to do -- carried out once a password is confirmed.
 ---@return boolean hadPassword True if a password was already set (no
 ---popup was needed) -- the caller can go ahead and do `action` itself.
 local function RequestPasswordThen(action)
@@ -703,11 +705,15 @@ function Module:GetCharacterInfo(unfiltered)
   local rows = {
     {
       label = CHARACTER,
-      value = function(character)
+      value = function(character, characterIndex)
         local name = "-"
         local nameColor = "ffffffff"
         if character.info.name ~= nil then
           name = character.info.name
+        end
+        local positionSuffix = ""
+        if Data.db.global.showCharacterPosition and characterIndex then
+          positionSuffix = WHITE_FONT_COLOR:WrapTextInColorCode(format(" - %d", characterIndex))
         end
         if character.info.class.file ~= nil then
           local classColor = C_ClassColor.GetClassColor(character.info.class.file)
@@ -715,7 +721,7 @@ function Module:GetCharacterInfo(unfiltered)
             nameColor = classColor.GenerateHexColor(classColor)
           end
         end
-        local coloredName = "|c" .. nameColor .. name .. "|r"
+        local coloredName = "|c" .. nameColor .. name .. "|r" .. positionSuffix
         if character.GUID ~= UnitGUID("player") then
           return coloredName
         end
@@ -1535,6 +1541,29 @@ function Module:RenderNow()
             -- Multi-Account Sync...) -- without a scroll cap it just grows
             -- to fit everything and can run off the bottom of the screen.
             menu:SetScrollMode(math.min(600, GetScreenHeight() - 100))
+
+            -- Keep the Settings menu at the same scroll position while the
+            -- main AlterEgo window remains open. Blizzard menus are pooled,
+            -- so keep this state on the module instead of on the menu frame
+            -- itself, and restore it after the menu has finished laying out.
+            menu:AddMenuAcquiredCallback(function(settingsMenu)
+              local scrollPercentage = Module.settingsMenuScrollPercentage
+              if scrollPercentage == nil then return end
+
+              C_Timer.After(0, function()
+                if not self.window or not self.window:IsShown() then return end
+                if not settingsMenu:IsShown() or not settingsMenu.ScrollBox or not settingsMenu.ScrollBox:IsShown() then return end
+                settingsMenu.ScrollBox:SetScrollPercentage(scrollPercentage, ScrollBoxConstants.NoScrollInterpolation)
+              end)
+            end)
+            menu:AddMenuReleasedCallback(function(settingsMenu)
+              if self.window and self.window:IsShown() and settingsMenu.ScrollBox and settingsMenu.ScrollBox:IsShown() then
+                Module.settingsMenuScrollPercentage = settingsMenu.ScrollBox:GetScrollPercentage()
+              else
+                Module.settingsMenuScrollPercentage = nil
+              end
+            end)
+
             menu:CreateTitle(CHARACTER)
             local currentCharacterMarkerSetting = menu:CreateButton("Current character")
             TableForEach(Constants.currentCharacterMarkers, function(marker)
@@ -1592,6 +1621,17 @@ function Module:RenderNow()
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Too many alts?", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Show character position",
+              function() return Data.db.global.showCharacterPosition end,
+              function()
+                Data.db.global.showCharacterPosition = not Data.db.global.showCharacterPosition
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show each character's current position after their name (for example: Name - 1).", nil, nil, nil, true)
             end)
             menu:CreateCheckbox(
               "Show Equipped Item Level",
@@ -2027,6 +2067,35 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("No more moving the button around accidentally!", nil, nil, nil, true)
             end)
+            local minimapRightClickNames = {
+              vault = "Great Vault",
+              dailyDelves = "Daily Delves",
+            }
+            local minimapRightClickButton = menu:CreateButton(
+              format("Minimap Icon Right Click: %s", minimapRightClickNames[Data.db.global.interface.minimapRightClickAction or "vault"] or "Great Vault")
+            )
+            minimapRightClickButton:SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Choose what right-clicking the AlterEgo minimap button opens.", nil, nil, nil, true)
+            end)
+            for _, option in ipairs({
+              { value = "vault", text = "Open Great Vault" },
+              { value = "dailyDelves", text = "Open Daily Delves" },
+            }) do
+              minimapRightClickButton:CreateRadio(
+                option.text,
+                function(value) return (Data.db.global.interface.minimapRightClickAction or "vault") == value end,
+                function(value)
+                  local currentValue = Data.db.global.interface.minimapRightClickAction or "vault"
+                  if currentValue == value then
+                    return MenuResponse.Refresh
+                  end
+                  Data.db.global.interface.minimapRightClickAction = value
+                  return MenuResponse.CloseAll
+                end,
+                option.value
+              )
+            end
             menu:CreateDivider()
             menu:CreateTitle("Multi-Account Sync")
             menu:CreateCheckbox(
@@ -2122,7 +2191,16 @@ function Module:RenderNow()
             local syncSettingsButton = menu:CreateButton(
               "Sync Addon Settings",
               function()
-                StaticPopup_Show("ALTEREGO_SYNC_SETTINGS")
+                -- Sharing addon settings uses Sync's transport too, so a
+                -- click here carries the same intent as Sync Now: make
+                -- sure a password exists and turn Enable Sync on before
+                -- offering the final Share Settings confirmation. When
+                -- no password exists yet, RequestPasswordThen resumes
+                -- this flow after the password popup is accepted.
+                if RequestPasswordThen("syncSettings") then
+                  Data.db.global.sync.enabled = true
+                  StaticPopup_Show("ALTEREGO_SYNC_SETTINGS")
+                end
                 return MenuResponse.CloseAll
               end
             )
@@ -2439,6 +2517,13 @@ function Module:RenderNow()
       name = "$parentCharacterScroll",
     })
     self.window.body.content.scrollArea:SetAllPoints()
+
+    -- Closing the main window starts a fresh Settings session next time.
+    -- Merely closing the Settings dropdown itself keeps the saved position.
+    self.window:HookScript("OnHide", function()
+      Module.settingsMenuScrollPercentage = nil
+    end)
+
     self.window.affixes = CreateFrame("Frame", "$parentAffixes", self.window.titlebar)
     self.window.affixes.buttons = {}
     self.window.dailyDelvesSeparator = self.window.titlebar:CreateFontString("$parentDailyDelvesSeparator", "OVERLAY", "GameFontDisable")
@@ -3423,7 +3508,7 @@ function Module:RenderNow()
           end
 
           if info.value then
-            infoFrame.text:SetText(info.value(character))
+            infoFrame.text:SetText(info.value(character, characterIndex))
           end
 
           if info.backgroundColor then

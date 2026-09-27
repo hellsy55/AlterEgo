@@ -298,6 +298,11 @@ local function increaseFontSize(fontString, amount)
 end
 
 local function setDelveWaypoint(delveName)
+  if InCombatLockdown and InCombatLockdown() then
+    addon.Core:Print("Daily Delves: waypoints cannot be created during combat. Try again after combat ends.")
+    return
+  end
+
   local delveInfo = delves[delveName]
   local waypoint = delveInfo and delveInfo.waypoint
   if not waypoint or not C_Map or not C_Map.SetUserWaypoint or not UiMapPoint then return end

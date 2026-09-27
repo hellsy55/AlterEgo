@@ -45,6 +45,21 @@ function Core:OnInitialize()
   Data:Initialize()
   Data:MigrateDB()
 
+  local function getMinimapRightClickAction()
+    return Data.db.global.interface.minimapRightClickAction or "vault"
+  end
+
+  local function toggleMinimapRightClickTarget()
+    if getMinimapRightClickAction() == "dailyDelves" then
+      local module = addon.Core:GetModule("DailyDelves", true)
+      if module then
+        module:Toggle()
+      end
+      return
+    end
+    self:ToggleVault()
+  end
+
   local libDataObject = {
     label = addon.title,
     type = "launcher",
@@ -56,7 +71,7 @@ function Core:OnInitialize()
         if mouseButton == "LeftButton" and isShiftKeyDown then
           self:ToggleEquipment()
         elseif mouseButton == "RightButton" then
-          self:ToggleVault()
+          toggleMinimapRightClickTarget()
         else
           self:ToggleWindow()
         end
@@ -67,7 +82,8 @@ function Core:OnInitialize()
     OnTooltipShow = function(tooltip)
       tooltip:SetText(addon.title, 1, 1, 1)
       tooltip:AddLine("|cff00ff00Left click|r to open AlterEgo.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-      tooltip:AddLine("|cff00ff00Right click|r to open the Great Vault.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+      local rightClickTarget = getMinimapRightClickAction() == "dailyDelves" and "Daily Delves" or "the Great Vault"
+      tooltip:AddLine(format("|cff00ff00Right click|r to open %s.", rightClickTarget), NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
       tooltip:AddLine("|cff00ff00Shift+Left click|r to open your character equipment.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
       local dragText = "|cff00ff00Drag|r to move this icon"
       if Data.db.global.minimap.lock then

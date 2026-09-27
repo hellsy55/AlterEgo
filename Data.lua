@@ -14,7 +14,7 @@ local TableFind = addon.Libs.LiqUI.Utils.TableFind
 local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
 local TableGet = addon.Libs.LiqUI.Utils.TableGet
 
-Data.dbVersion = 40
+Data.dbVersion = 43
 
 Data.defaultDB = {
   ---@type AE_Global
@@ -35,8 +35,13 @@ Data.defaultDB = {
     dailyDelves = {
       showOnlyHighTier = false,
       listAllStories = false,
+      checkBountifulDone = false,
+      bountifulResetAt = 0,
+      bountifulRotation = {},
+      variantCache = {},
     },
     showZeroRatedCharacters = true,
+    showCharacterPosition = false,
     showEquippedItemLevel = false,
     showItemLevelDecimals = false,
     showRealms = true,
@@ -100,6 +105,7 @@ Data.defaultDB = {
       -- fontSize = 12,
       windowScale = 100,
       windowColor = {r = 0.11372549019, g = 0.14117647058, b = 0.16470588235, a = 1},
+      minimapRightClickAction = "vault", ---@type "vault"|"dailyDelves" What the minimap button opens on right click
     },
     liqui = {
       windows = {
@@ -134,6 +140,11 @@ Data.defaultCharacter = {
   enabled = true,
   order = 0,
   accountId = nil, ---@type string? Which WoW Account bucket (Data.db.global.accounts) this character belongs to
+  dailyDelves = {
+    bountifulResetAt = 0,
+    bountifulSeen = {},
+    bountifulDone = {},
+  },
   info = {
     name = "",
     realm = "",
@@ -1372,6 +1383,49 @@ function Data:MigrateDB()
           sync.passphraseAccounts = nil
         end
       end
+    end
+    -- Add the first per-character Daily Delves state.
+    if self.db.global.dbVersion == 40 then
+      for _, character in pairs(self.db.global.characters) do
+        if type(character.dailyDelves) ~= "table" then
+          character.dailyDelves = {}
+        end
+        if character.dailyDelves.bountifulDone == nil then
+          character.dailyDelves.bountifulDone = false
+        end
+      end
+    end
+    -- Replace the old manual all-done flag with automatic per-Delve tracking.
+    if self.db.global.dbVersion == 41 then
+      local settings = self.db.global.dailyDelves
+      settings.bountifulResetAt = 0
+      settings.bountifulRotation = {}
+      settings.variantCache = {}
+      for _, character in pairs(self.db.global.characters) do
+        if type(character.dailyDelves) ~= "table" then
+          character.dailyDelves = {}
+        end
+        character.dailyDelves.checkBountifulDone = false
+        character.dailyDelves.bountifulResetAt = 0
+        character.dailyDelves.bountifulSeen = {}
+        character.dailyDelves.bountifulDone = {}
+      end
+    end
+    -- Make the Bountiful completion-check preference global while keeping
+    -- seen/done tracking per character. Preserve an enabled preference if
+    -- any character had it enabled before this migration.
+    if self.db.global.dbVersion == 42 then
+      local settings = self.db.global.dailyDelves
+      local enabled = settings.checkBountifulDone == true
+      for _, character in pairs(self.db.global.characters) do
+        if type(character.dailyDelves) == "table" then
+          if character.dailyDelves.checkBountifulDone == true then
+            enabled = true
+          end
+          character.dailyDelves.checkBountifulDone = nil
+        end
+      end
+      settings.checkBountifulDone = enabled
     end
     self.db.global.dbVersion = self.db.global.dbVersion + 1
     self:MigrateDB()
