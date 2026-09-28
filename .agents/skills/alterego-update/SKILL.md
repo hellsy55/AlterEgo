@@ -1,12 +1,12 @@
 ---
 name: alterego-update
-description: Run the AlterEgo update or atualizar workflow, including independent upstream sync of new-features and main, library check, and install choice.
+description: Sync AlterEgo branches independently, check libraries only on a real trigger, and offer installation.
 ---
 
 # Update AlterEgo
 
 1. Read [initial setup](references/initial-setup.md) only if the remotes, `new-features`, or required branch tooling are missing.
-2. Follow [branch sync](references/branch-sync.md) in order. Stop at a conflict and read [merge conflicts](references/merge-conflicts.md) before presenting a decision. Never decide the conflict for the user. Push each clean branch after its sync and return to `new-features` after `main`.
-3. Read and run [the library skill](../alterego-libs/SKILL.md) on `new-features`. Finish its approval or skip checkpoint before continuing.
-4. Present the install menu in Portuguese: (a) run the addon update now, or (b) do nothing more and stop. The user's choice of (a) authorizes immediate execution. Read [the install skill](../alterego-install/SKILL.md) only if the installation stage is reached. Do not run the installer before that choice.
+2. Follow [branch sync](references/branch-sync.md) in order. Use compact Git facts; do not show routine command output. Stop at a conflict and read [merge conflicts](references/merge-conflicts.md) before presenting a decision. Never decide the conflict for the user. Push only after every locally created commit or merge in the branch has passed its required staged-review and approval checkpoint. Do not publish pre-existing local-ahead history automatically. Return to `new-features` after `main`.
+3. At the gate in branch sync, classify only the exact upstream commits pending on `new-features` before the upstream merge, using `scripts/classify_lib_changes.ps1 -Base <merge-base> -Target upstream/main`. Run the classifier only when that range has commits. Treat a nonzero classifier exit as an error, never as no changes. After sync, if no library or metadata changes were reported and the user did not explicitly request a library check, skip the entire library workflow and omit libraries from the report. If changes were reported, summarize each affected library once and any metadata change, then ask whether to check the remaining libraries unless the user already requested that check. Read and run [the library skill](../alterego-libs/SKILL.md) only on explicit request or if the user chooses yes. If no, continue without claiming that other libraries are current; mention that they were not checked only when this distinction matters.
+4. Present the install menu in Portuguese only after the approved `new-features` result is available at `origin/new-features`; the installer uses that remote ZIP. If publication is pending a commit checkpoint or review of pre-existing local-ahead history, stop and report the update as pending without offering installation. Otherwise offer (a) run the addon update now, or (b) do nothing more and stop. The user's choice of (a) authorizes immediate execution. Read [the install skill](../alterego-install/SKILL.md) only if installation is chosen.
 5. Report the result in Portuguese using the summary fields in the root `AGENTS.md`. If a conflict or another decision remains, report the overall update as pending.

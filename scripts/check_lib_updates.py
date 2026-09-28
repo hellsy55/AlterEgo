@@ -286,15 +286,15 @@ def main():
     externals = parse_externals(pkgmeta_text)
     lock = load_lockfile()
 
-    print(f"{len(externals)} externals encontradas em {PKGMETA_PATH}\n")
-
     pending = {}
+    unknown = 0
 
     for path, entry in externals.items():
         name = short_name(path)
         resolved = resolve_upstream_version(entry)
 
         if resolved is None:
+            unknown += 1
             print(f"[?] {name} ({path}) — não consegui resolver a versão upstream (url: {entry.get('url')})")
             continue
 
@@ -303,7 +303,6 @@ def main():
         locked_version = locked.get("value")
 
         if locked_version == upstream_version:
-            print(f"[=] {name}: já na última versão ({upstream_version})")
             continue
 
         pending[path] = {
@@ -319,8 +318,10 @@ def main():
         print(f"    atual : {old_display}")
         print(f"    nova  : {upstream_version}")
 
-    if not pending:
-        print("\nNenhuma atualização pendente.")
+    state = 'pending' if pending else ('unknown' if unknown else 'up_to_date')
+    print(f"LIBS={state}")
+    print(f"CHECKED={len(externals) - unknown}")
+    print(f"UNKNOWN={unknown}")
 
     orphans = find_orphan_lib_folders(externals)
     if orphans:
