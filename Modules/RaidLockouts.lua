@@ -585,9 +585,9 @@ function Module:IsEntranceCheckEnabled()
   local windows = Data.db.global.liqui.windows
   windows.RaidLockouts = windows.RaidLockouts or {}
   if windows.RaidLockouts.checkOnEntrance == nil then
-    windows.RaidLockouts.checkOnEntrance = true
+    windows.RaidLockouts.checkOnEntrance = false
   end
-  return windows.RaidLockouts.checkOnEntrance ~= false
+  return windows.RaidLockouts.checkOnEntrance == true
 end
 
 function Module:EnsureWindow()
@@ -596,7 +596,7 @@ function Module:EnsureWindow()
   local windows = Data.db.global.liqui.windows
   windows.RaidLockouts = windows.RaidLockouts or {}
   if windows.RaidLockouts.checkOnEntrance == nil then
-    windows.RaidLockouts.checkOnEntrance = true
+    windows.RaidLockouts.checkOnEntrance = false
   end
 
   self.window = LibLiqUI:NewElement("Window", {
@@ -668,7 +668,7 @@ function Module:EnsureWindow()
 
   self.entranceCheckButton = CreateFrame("CheckButton", nil, body, "UICheckButtonTemplate")
   setupCheckButton(self.entranceCheckButton, "Raid Lockout Window Check on Entrance")
-  self.entranceCheckButton:SetChecked(windows.RaidLockouts.checkOnEntrance ~= false)
+  self.entranceCheckButton:SetChecked(windows.RaidLockouts.checkOnEntrance == true)
   local entranceLabelWidth = math.ceil(self.entranceCheckButton.Text:GetStringWidth())
   self.entranceCheckButton:SetPoint("RIGHT", self.refreshButton, "LEFT", -(entranceLabelWidth + 18), 0)
   self.entranceCheckButton:SetScript("OnClick", function(clicked)
