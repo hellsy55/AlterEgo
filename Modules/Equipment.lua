@@ -6,6 +6,7 @@ local Module = addon.Core:NewModule("Equipment", "AceConsole-3.0", "AceTimer-3.0
 addon.Module_Equipment = Module
 
 local Data = addon.Data
+local Helpers = addon.Helpers
 local LibLiqUI = addon.Libs.LiqUI
 local TableCount = LibLiqUI.Utils.TableCount
 local TableForEach = LibLiqUI.Utils.TableForEach
@@ -694,7 +695,7 @@ function Module:Render()
 
   local ilvlText = ""
   if character.info.ilvl ~= nil and character.info.ilvl.equipped ~= nil then
-    local ilvlColor = character.info.ilvl.color or WHITE_FONT_COLOR:GenerateHexColor()
+    local ilvlColor = Helpers:GetItemLevelTrackColor(character.info.ilvl.equipped):GenerateHexColor()
     local ilvlValue
     if Data.db.global.showItemLevelDecimals then
       ilvlValue = format("%.2f", character.info.ilvl.equipped)

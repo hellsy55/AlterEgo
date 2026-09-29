@@ -859,11 +859,7 @@ function Module:GetCharacterInfo(unfiltered)
               itemLevel = tostring(floor(displayLevel))
             end
           end
-          if character.info.ilvl.color then
-            itemLevelColor = character.info.ilvl.color
-          else
-            itemLevelColor = WHITE_FONT_COLOR:GenerateHexColor()
-          end
+          itemLevelColor = Helpers:GetItemLevelTrackColor(displayLevel):GenerateHexColor()
         end
         return WrapTextInColorCode(itemLevel, itemLevelColor)
       end,

@@ -102,3 +102,21 @@ function Helpers:GetRatingColor(rating, useRIOScoreColor, isPreviousSeason)
   end
   return color
 end
+
+---Get the upgrade-track color for a displayed character item level.
+---@param itemLevel number?
+---@return ColorMixin
+function Helpers:GetItemLevelTrackColor(itemLevel)
+  if not itemLevel then
+    return WHITE_FONT_COLOR
+  elseif itemLevel >= 331 then
+    return ITEM_LEGENDARY_COLOR
+  elseif itemLevel >= 321 then
+    return ITEM_EPIC_COLOR
+  elseif itemLevel >= 308 then
+    return RARE_BLUE_COLOR
+  elseif itemLevel >= 295 then
+    return UNCOMMON_GREEN_COLOR
+  end
+  return WHITE_FONT_COLOR
+end
