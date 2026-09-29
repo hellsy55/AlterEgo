@@ -201,6 +201,13 @@ function Core:OnEnable()
       Data:UpdateVault()
     end
   )
+  -- Track an actual native Great Vault open separately from generic weekly
+  -- reward updates. This is the trust boundary for reward history: before
+  -- this interaction happens, example reward links must never become history.
+  addon.Events:RegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", function(_, _, interactionType)
+    if interactionType ~= Enum.PlayerInteractionType.WeeklyRewards then return end
+    Data:MarkVaultOpened()
+  end, true)
   -- WEEKLY_REWARDS_UPDATE alone isn't reliable for "the player just
   -- reopened the Great Vault" -- a real bug report confirmed the addon's
   -- window stayed empty/stale on a SECOND look at the vault this session,

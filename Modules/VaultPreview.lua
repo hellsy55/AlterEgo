@@ -53,6 +53,16 @@ local function findSnapshotSlot(character, vaultTypeID, index)
   return nil
 end
 
+---Whether the saved reward snapshot belongs to an older weekly cycle.
+---@param character AE_Character
+---@return boolean
+local function isStaleSnapshot(character)
+  local snapshot = character.vault and character.vault.lastSnapshot
+  return snapshot ~= nil
+    and snapshot.rewardCycle ~= nil
+    and snapshot.rewardCycle ~= Data.db.global.weeklyReset
+end
+
 ---Build one grid cell (icon + item level, or "-" when locked/unknown) for a vault slot.
 ---@param character AE_Character
 ---@param vaultType AE_VaultType
@@ -92,7 +102,8 @@ local function buildSlotCell(character, vaultType, index, useSnapshot)
   if itemLevel then
     text = text .. " " .. itemLevel
   end
-  if useSnapshot then
+  local staleSnapshot = useSnapshot and isStaleSnapshot(character)
+  if staleSnapshot then
     text = LIGHTGRAY_FONT_COLOR:WrapTextInColorCode(text)
   end
 
@@ -103,7 +114,11 @@ local function buildSlotCell(character, vaultType, index, useSnapshot)
       GameTooltip:SetHyperlink(itemLink)
       if useSnapshot then
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("Last known -- vault has since reset without this being claimed.", nil, nil, nil, true)
+        if staleSnapshot then
+          GameTooltip:AddLine("Last known -- vault has since reset without this being claimed.", nil, nil, nil, true)
+        else
+          GameTooltip:AddLine("Reward captured after opening the Great Vault.", nil, nil, nil, true)
+        end
       end
       GameTooltip:AddLine(" ")
       GameTooltip:AddLine("<Shift Click to Link to Chat>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
@@ -207,9 +222,16 @@ function Module:Render()
       text = text .. format(" - Week %d", weekNumber)
     end
     if useSnapshot then
-      text = text .. " (Last Known -- vault has since reset)"
+      if isStaleSnapshot(character) then
+        text = text .. " (Last Known -- vault has since reset)"
+        self.note:SetText(ORANGE_FONT_COLOR:WrapTextInColorCode(text))
+      else
+        text = text .. " (Reward History)"
+        self.note:SetText(LIGHTGRAY_FONT_COLOR:WrapTextInColorCode(text))
+      end
+    else
+      self.note:SetText(LIGHTGRAY_FONT_COLOR:WrapTextInColorCode(text))
     end
-    self.note:SetText(useSnapshot and ORANGE_FONT_COLOR:WrapTextInColorCode(text) or LIGHTGRAY_FONT_COLOR:WrapTextInColorCode(text))
   else
     self.note:SetText("")
   end

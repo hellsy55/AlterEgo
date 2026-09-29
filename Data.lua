@@ -214,6 +214,7 @@ Data.defaultCharacter = {
     worldActivityProgress = {},
     lastSnapshot = nil, ---@type AE_VaultSnapshot?
     lastUpdatedAt = 0, ---@type number Data:UpdateVault last ran, regardless of what it found
+    openedForReset = 0, ---@type number Weekly reset timestamp for which the real Great Vault was opened
   },
 }
 
@@ -1443,10 +1444,11 @@ function Data:TaskWeeklyReset()
           character.vault.hasAvailableRewards = true
         end
       end)
-      -- Last chance to remember what was in the vault THIS character never
-      -- claimed -- character.vault.slots is about to be wiped below for
-      -- good (that's what the whole history feature protects against).
-      self:ArchiveVaultSnapshot(character)
+      -- A new reward cycle has started. Until this character actually opens
+      -- the native Great Vault again, keep the main row in the green
+      -- "Rewards" state and expose no reward history from the prior cycle.
+      character.vault.openedForReset = 0
+      character.vault.lastSnapshot = nil
       -- Mark previous m+ runs as not this week
       TableForEach(character.mythicplus.runHistory, function(run)
         run.thisWeek = false
@@ -2239,32 +2241,37 @@ function Data:UpdateKeystoneItem()
   addon.Core:RequestSyncBroadcast()
 end
 
----Refresh `character.vault.lastSnapshot` from whatever's CURRENTLY unlocked
----in `character.vault.slots`. Unlike `vault.slots` itself (wiped every
----weekly reset by TaskWeeklyReset), this survives the reset -- so a reward
----the player never opened the in-game Great Vault to claim can still be
----shown by the "Rewards" click on the main window after it's already reset
----for real. Called every time the real Great Vault is actually opened/
----refreshed (Data:UpdateVault), so it always reflects the MOST RECENTLY
----seen state -- exactly like re-opening the in-game window would.
----Additive on purpose: only OVERWRITES a slot when this pass actually
----found something unlocked for it; if the current week hasn't unlocked
----anything yet, whatever was captured last time is simply left alone
----instead of being blanked out.
+---Record that the player actually opened the native Great Vault for this
+---weekly reward cycle. Merely receiving WEEKLY_REWARDS_UPDATE is not enough:
+---Blizzard can expose progress/example links before the vault is opened.
+function Data:MarkVaultOpened()
+  local character = self:GetCharacter()
+  if not character or not character.vault then return end
+  character.vault.openedForReset = self.db.global.weeklyReset or 0
+end
+
+---Refresh `character.vault.lastSnapshot` using only concrete rewards that
+---Blizzard returned after the native Great Vault was actually opened.
+---Example reward links are intentionally excluded because they are previews,
+---not the items in the character's real claimable vault.
 ---@param character AE_Character
 function Data:ArchiveVaultSnapshot(character)
   if not character.vault or not character.vault.slots then return end
+
+  local rewardCycle = character.vault.openedForReset
+  if not rewardCycle or rewardCycle == 0 or rewardCycle ~= self.db.global.weeklyReset then
+    return
+  end
+
   local snapshot = character.vault.lastSnapshot
-  local hasAnyUnlocked = false
+  if not snapshot or snapshot.confirmed ~= true or snapshot.rewardCycle ~= rewardCycle then
+    snapshot = { slots = {}, claimed = {}, confirmed = true, rewardCycle = rewardCycle }
+  end
+
+  local hasAnyReward = false
   TableForEach(character.vault.slots, function(slot)
-    -- Gated on exampleRewardLink existing, NOT on progress >= threshold --
-    -- that pair can stay stale even once a reward genuinely exists (see
-    -- VaultPreview.lua::buildSlotCell for the real bug report this came
-    -- from), which was silently skipping slots here that already had a
-    -- perfectly good resolved item.
-    if slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
-      hasAnyUnlocked = true
-      snapshot = snapshot or { slots = {}, claimed = {} }
+    if slot.rewardIsConcrete == true and slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
+      hasAnyReward = true
       snapshot.slots[tostring(slot.id)] = {
         type = slot.type,
         index = slot.index,
@@ -2273,7 +2280,7 @@ function Data:ArchiveVaultSnapshot(character)
       }
     end
   end)
-  if hasAnyUnlocked then
+  if hasAnyReward then
     snapshot.capturedAt = time()
     character.vault.lastSnapshot = snapshot
   end
@@ -2299,7 +2306,12 @@ end
 ---@return boolean
 function Data:HasVaultHistory(character)
   return character.vault ~= nil
+    and character.vault.openedForReset ~= nil
+    and character.vault.openedForReset ~= 0
+    and character.vault.openedForReset == self.db.global.weeklyReset
     and character.vault.lastSnapshot ~= nil
+    and character.vault.lastSnapshot.confirmed == true
+    and character.vault.lastSnapshot.rewardCycle == character.vault.openedForReset
     and next(character.vault.lastSnapshot.slots or {}) ~= nil
 end
 
@@ -2419,6 +2431,7 @@ function Data:UpdateVault()
       local ok, err = pcall(resolveBestVaultItemReward, activity.rewards, function(itemLink)
         if not itemLink then return end
         activity.exampleRewardLink = itemLink
+        activity.rewardIsConcrete = true
         self:ArchiveVaultSnapshot(character)
         addon.Core:Render()
       end)
@@ -2427,7 +2440,6 @@ function Data:UpdateVault()
       end
     end
   end)
-  self:ArchiveVaultSnapshot(character)
 
   local worldActivityProgress = C_WeeklyRewards.GetSortedProgressForActivity(Enum.WeeklyRewardChestThresholdType.World, true)
   if worldActivityProgress then

@@ -323,26 +323,12 @@ local function getMythicPlusVaultItemLevel(keystoneLevel)
   return nil
 end
 
----Whether we actually have item preview data for at least one unlocked
----vault slot (exampleRewardLink is only populated once C_WeeklyRewards has
----something to report -- a character can have hasAvailableRewards == true
----while this is still empty if the Great Vault hasn't been opened on them
----yet this week) -- OR, failing that, whether history remembers a past
----week's contents (Data:HasVaultHistory), which covers a character whose
----live `vault.slots` was already wiped by the weekly reset before this
----was clicked. Deliberately does NOT also require
----slot.progress >= slot.threshold -- that pair can stay stale even once a
----reward genuinely exists (see VaultPreview.lua::buildSlotCell for the
----real bug report this came from); exampleRewardLink being populated at
----all is the reliable signal.
+---Whether this character has confirmed Great Vault reward history. The
+---history is only created after the native vault was opened and concrete
+---reward items were returned; progress/example links do not qualify.
 ---@param character AE_Character
 ---@return boolean
 local function characterHasVaultPreviewData(character)
-  for _, slot in ipairs(character.vault and character.vault.slots or {}) do
-    if slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
-      return true
-    end
-  end
   return Data:HasVaultHistory(character)
 end
 
@@ -1113,21 +1099,9 @@ function Module:GetCharacterInfo(unfiltered)
           GameTooltip:Show()
           return
         end
-        -- Prefer the LIVE current data if it actually has something --
-        -- otherwise characterHasVaultPreviewData above only returned true
-        -- because of the snapshot fallback (e.g. this character's vault
-        -- already reset since they last logged in), so open straight into
-        -- that remembered snapshot instead of landing on an empty grid.
-        -- Same reasoning as characterHasVaultPreviewData above: only
-        -- exampleRewardLink decides this, not progress/threshold.
-        local hasLiveData = false
-        for _, slot in ipairs(character.vault.slots or {}) do
-          if slot.exampleRewardLink and slot.exampleRewardLink ~= "" then
-            hasLiveData = true
-            break
-          end
-        end
-        vaultPreviewModule:OpenCharacter(character, not hasLiveData)
+        -- The pending state is specifically a confirmed reward-history view,
+        -- so never fall back to live example links here.
+        vaultPreviewModule:OpenCharacter(character, true)
       end,
       backgroundColor = {r = 0, g = 0, b = 0, a = 0.3},
       enabled = Data.db.global.vault.raids or Data.db.global.vault.dungeons or Data.db.global.vault.world,
