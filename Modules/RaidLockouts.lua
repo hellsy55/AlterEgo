@@ -44,6 +44,17 @@ local responses = {}
 local lastRequestAt = 0
 local responsePending = false
 local lastStateSentAt = 0
+local lastRaidInfoAt = 0
+
+---Ask the server for a fresh saved-instance list. After a weekly reset the
+---client can keep listing old lockouts until this is called; the reply fires
+---UPDATE_INSTANCE_INFO, which makes Data rebuild the stored lockouts.
+local function refreshRaidInfo()
+  local now = GetTime()
+  if now - lastRaidInfoAt < 10 then return end
+  lastRaidInfoAt = now
+  RequestRaidInfo()
+end
 
 local function baseDifficultyID(difficultyID)
   if not difficultyID then return difficultyID end
@@ -91,7 +102,10 @@ local function buildKilledLookup(character)
   local lookup = {}
   local now = time()
   for _, instance in ipairs(character and character.raids and character.raids.savedInstances or {}) do
-    local expired = instance.expires and instance.expires > 0 and instance.expires <= now
+    -- A lockout is active only while its expiry is in the future. Entries
+    -- with expires == 0 can linger in the client cache after a reset and must
+    -- not be treated as current lockouts.
+    local expired = not (instance.expires and instance.expires > now)
     if not expired then
       local difficultyID = baseDifficultyID(instance.difficultyID)
       for _, encounter in ipairs(instance.encounters or {}) do
@@ -403,6 +417,7 @@ function Module:BroadcastState()
 end
 
 function Module:RequestGroupState()
+  refreshRaidInfo()
   if not IsInRaid() then
     self:RefreshWindow()
     return
@@ -436,11 +451,15 @@ function Module:OnRaidLockoutComm(prefix, message, distribution, sender)
     if tonumber(total) ~= #buildBossCatalog() then return end
     if not IsInRaid() then return end
 
+    -- Refresh the local saved-instance snapshot before answering so expired
+    -- lockouts are not broadcast to the raid after a reset.
+    refreshRaidInfo()
+
     -- Stagger a full raid's replies by roster position so 20-30 clients do
     -- not all try to speak on the same frame.
     if responsePending then return end
     responsePending = true
-    local delay = math.min(1.5, 0.05 * playerRaidIndex())
+    local delay = math.max(1, math.min(1.5, 0.05 * playerRaidIndex()))
     local sinceLast = GetTime() - lastStateSentAt
     if sinceLast < 1 then
       delay = math.max(delay, 1 - sinceLast)
@@ -529,19 +548,66 @@ local function createHeaderButton(parent, text, key, x, width)
   return button
 end
 
+local function getRaidLockoutsWindowStorage()
+  local windows = Data.db.global.liqui.windows
+  windows.RaidLockouts = windows.RaidLockouts or {}
+  return windows.RaidLockouts
+end
+
+local function getSavedSortState()
+  local storage = getRaidLockoutsWindowStorage()
+  local validColumns = { character = true, status = true, bosses = true }
+
+  if not validColumns[storage.sortColumn] then
+    storage.sortColumn = "character"
+  end
+  if storage.sortAscending == nil then
+    storage.sortAscending = true
+  end
+
+  return storage.sortColumn, storage.sortAscending == true
+end
+
+local function saveSortState(column, ascending)
+  local storage = getRaidLockoutsWindowStorage()
+  storage.sortColumn = column
+  storage.sortAscending = ascending == true
+end
+
+local function getSavedDifficultySelection()
+  local storage = getRaidLockoutsWindowStorage()
+  storage.selectedDifficulties = storage.selectedDifficulties or {}
+
+  local selection = storage.selectedDifficulties
+  local hasSelection = false
+  for _, difficultyID in ipairs(SHARED_DIFFICULTIES) do
+    if selection[difficultyID] == true then
+      hasSelection = true
+      break
+    end
+  end
+
+  -- First use (or recovery from invalid SavedVariables): keep the historical
+  -- default of the current raid difficulty, falling back to Heroic. From this
+  -- point onward the table lives in the global DB and survives relogs/reloads.
+  if not hasSelection then
+    local _, currentDifficulty = currentRaidAndDifficulty()
+    currentDifficulty = currentDifficulty or 15
+    for _, difficultyID in ipairs(SHARED_DIFFICULTIES) do
+      selection[difficultyID] = difficultyID == currentDifficulty
+    end
+  end
+
+  return selection
+end
+
 function Module:GetSelectedDifficulties()
-  self.selectedDifficulties = self.selectedDifficulties or {}
+  self.selectedDifficulties = getSavedDifficultySelection()
   local selected = {}
   for _, difficultyID in ipairs(DISPLAY_DIFFICULTIES) do
     if self.selectedDifficulties[difficultyID] then
       table.insert(selected, difficultyID)
     end
-  end
-  if #selected == 0 then
-    local _, currentDifficulty = currentRaidAndDifficulty()
-    currentDifficulty = currentDifficulty or 15
-    self.selectedDifficulties[currentDifficulty] = true
-    table.insert(selected, currentDifficulty)
   end
   return selected
 end
@@ -555,6 +621,7 @@ function Module:SetSort(column)
     -- and Bosses starts with the most kills at the top.
     self.sortAscending = column ~= "bosses"
   end
+  saveSortState(self.sortColumn, self.sortAscending)
   self:RefreshSortHeaders()
   self:RefreshWindow()
 end
@@ -562,6 +629,7 @@ end
 function Module:ResetSort()
   self.sortColumn = "character"
   self.sortAscending = true
+  saveSortState(self.sortColumn, self.sortAscending)
   self:RefreshSortHeaders()
   self:RefreshWindow()
 end
@@ -582,35 +650,31 @@ function Module:RefreshSortHeaders()
 end
 
 function Module:IsEntranceCheckEnabled()
-  local windows = Data.db.global.liqui.windows
-  windows.RaidLockouts = windows.RaidLockouts or {}
-  if windows.RaidLockouts.checkOnEntrance == nil then
-    windows.RaidLockouts.checkOnEntrance = false
+  local storage = getRaidLockoutsWindowStorage()
+  if storage.checkOnEntrance == nil then
+    storage.checkOnEntrance = false
   end
-  return windows.RaidLockouts.checkOnEntrance == true
+  return storage.checkOnEntrance == true
 end
 
 function Module:EnsureWindow()
   if self.window then return end
 
-  local windows = Data.db.global.liqui.windows
-  windows.RaidLockouts = windows.RaidLockouts or {}
-  if windows.RaidLockouts.checkOnEntrance == nil then
-    windows.RaidLockouts.checkOnEntrance = false
+  local raidLockoutsStorage = getRaidLockoutsWindowStorage()
+  if raidLockoutsStorage.checkOnEntrance == nil then
+    raidLockoutsStorage.checkOnEntrance = false
   end
+  self.selectedDifficulties = getSavedDifficultySelection()
 
   self.window = LibLiqUI:NewElement("Window", {
     name = addon.name .. "RaidLockouts",
-    storage = windows.RaidLockouts,
+    storage = raidLockoutsStorage,
     title = "Raid Group Lockouts",
     width = WINDOW_WIDTH,
     height = WINDOW_HEIGHT,
     onShow = function()
-      if not Module.difficultySelectionInitialized then
-        local _, currentDifficulty = currentRaidAndDifficulty()
-        Module.selectedDifficulties = {[currentDifficulty or 15] = true}
-        Module.difficultySelectionInitialized = true
-      end
+      Module.selectedDifficulties = getSavedDifficultySelection()
+      Module.sortColumn, Module.sortAscending = getSavedSortState()
       Module:RefreshDifficultyButtons()
       Module:RefreshSortHeaders()
       Module:RequestGroupState()
@@ -619,10 +683,9 @@ function Module:EnsureWindow()
   })
 
   local body = self.window.body
-  self.selectedDifficulties = self.selectedDifficulties or {}
+  self.selectedDifficulties = getSavedDifficultySelection()
   self.difficultyButtons = {}
-  self.sortColumn = self.sortColumn or "character"
-  if self.sortAscending == nil then self.sortAscending = true end
+  self.sortColumn, self.sortAscending = getSavedSortState()
 
   local previousButton
   for _, difficultyID in ipairs(SHARED_DIFFICULTIES) do
@@ -668,11 +731,11 @@ function Module:EnsureWindow()
 
   self.entranceCheckButton = CreateFrame("CheckButton", nil, body, "UICheckButtonTemplate")
   setupCheckButton(self.entranceCheckButton, "Raid Lockout Window Check on Entrance")
-  self.entranceCheckButton:SetChecked(windows.RaidLockouts.checkOnEntrance == true)
+  self.entranceCheckButton:SetChecked(raidLockoutsStorage.checkOnEntrance == true)
   local entranceLabelWidth = math.ceil(self.entranceCheckButton.Text:GetStringWidth())
   self.entranceCheckButton:SetPoint("RIGHT", self.refreshButton, "LEFT", -(entranceLabelWidth + 18), 0)
   self.entranceCheckButton:SetScript("OnClick", function(clicked)
-    windows.RaidLockouts.checkOnEntrance = clicked:GetChecked() and true or false
+    raidLockoutsStorage.checkOnEntrance = clicked:GetChecked() and true or false
   end)
 
   self.summary = body:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -980,89 +1043,115 @@ end
 
 -- ===== Entering-raid lockout alert =====================================
 
-local alertFrame
+-- Use a regular LiqUI window so the entrance alert shares AlterEgo's standard
+-- titlebar, drag behavior, close button and per-window settings.
+local ALERT_MIN_WIDTH = 300
+local ALERT_SIDE_PADDING = 20
+local ALERT_ROW_HEIGHT = 20
+local ALERT_COLUMN_GAP = 18
+
+local alertWindow
 local alertLines = {}
-local alertDimmer
 
--- Keep this self-contained: the alert borrows EllesmereUI's visual language
--- (near-black panel, thin translucent border, flat confirm button and dimmer)
--- without requiring EllesmereUI to be installed or loaded.
-local function ensureAlertFrame()
-  if alertFrame then return alertFrame end
+local function refreshVisibleAlertLayout(window)
+  if window and window.currentRaid and window.currentDifficultyID then
+    Module:ShowInstanceAlert(window.currentRaid, window.currentDifficultyID)
+  end
+end
 
-  alertDimmer = CreateFrame("Frame", nil, UIParent)
-  alertDimmer:SetFrameStrata("FULLSCREEN_DIALOG")
-  alertDimmer:SetFrameLevel(140)
-  alertDimmer:SetAllPoints(UIParent)
-  alertDimmer:EnableMouse(true)
-  alertDimmer.bg = alertDimmer:CreateTexture(nil, "BACKGROUND")
-  alertDimmer.bg:SetAllPoints()
-  alertDimmer.bg:SetColorTexture(0, 0, 0, 0.55)
-  alertDimmer:Hide()
+local function ensureAlertWindow()
+  if alertWindow then return alertWindow end
 
-  alertFrame = CreateFrame("Frame", "AlterEgoRaidLockoutAlert", UIParent, "BackdropTemplate")
-  alertFrame:SetFrameStrata("FULLSCREEN_DIALOG")
-  alertFrame:SetFrameLevel(150)
-  alertFrame:SetToplevel(true)
-  alertFrame:SetClampedToScreen(true)
-  alertFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
-  alertFrame:SetSize(480, 220)
-  alertFrame:SetMovable(true)
-  alertFrame:EnableMouse(true)
-  alertFrame:RegisterForDrag("LeftButton")
-  alertFrame:SetScript("OnDragStart", alertFrame.StartMoving)
-  alertFrame:SetScript("OnDragStop", alertFrame.StopMovingOrSizing)
-  alertFrame:SetBackdrop({
+  local windows = Data.db.global.liqui.windows
+  windows.RaidLockoutAlert = windows.RaidLockoutAlert or {}
+  local storage = windows.RaidLockoutAlert
+  if storage.bossListLayout ~= "columns" then
+    storage.bossListLayout = "single"
+  end
+
+  -- First run only: open near the top-center of the screen. Once moved, LiqUI
+  -- persists the user's position like it does for the other addon windows.
+  if type(storage.point) ~= "table" then
+    storage.point = {
+      "TOPLEFT",
+      "TOPLEFT",
+      (UIParent:GetWidth() - ALERT_MIN_WIDTH) / 2,
+      -(UIParent:GetHeight() * 0.22),
+    }
+  end
+
+  alertWindow = LibLiqUI:NewElement("Window", {
+    name = addon.name .. "RaidLockoutAlert",
+    title = "",
+    width = ALERT_MIN_WIDTH,
+    height = 200,
+    storage = storage,
+    onSettingsMenu = function(window, menu)
+      local layoutMenu = menu:CreateButton("Boss list layout")
+      layoutMenu:CreateRadio(
+        "Single column",
+        function(value) return (storage.bossListLayout or "single") == value end,
+        function(value)
+          storage.bossListLayout = value
+          refreshVisibleAlertLayout(window)
+          return MenuResponse.Refresh
+        end,
+        "single"
+      )
+      layoutMenu:CreateRadio(
+        "Multiple columns",
+        function(value) return storage.bossListLayout == value end,
+        function(value)
+          storage.bossListLayout = value
+          refreshVisibleAlertLayout(window)
+          return MenuResponse.Refresh
+        end,
+        "columns"
+      )
+    end,
+  })
+  alertWindow:SetFrameStrata("HIGH")
+
+  -- Center the title inside the titlebar (LiqUI left-aligns it by default).
+  local title = alertWindow.titlebar.title
+  title:ClearAllPoints()
+  title:SetPoint("CENTER", alertWindow.titlebar, "CENTER", 0, 0)
+  title:SetJustifyH("CENTER")
+
+  local body = alertWindow.body
+
+  alertWindow.subtitle = body:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  alertWindow.subtitle:SetJustifyH("CENTER")
+  alertWindow.subtitle:SetTextColor(1, 1, 1, 0.72)
+
+  alertWindow.footer = body:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  alertWindow.footer:SetJustifyH("CENTER")
+  alertWindow.footer:SetTextColor(1, 1, 1, 1)
+
+  alertWindow.accept = CreateFrame("Button", nil, body, "BackdropTemplate")
+  alertWindow.accept:SetSize(92, 26)
+  alertWindow.accept:SetBackdrop({
     bgFile = Constants.media.WhiteSquare,
     edgeFile = Constants.media.WhiteSquare,
     edgeSize = 1,
   })
-  -- EllesmereUI modal panel: #0F1116 with a subtle white outline.
-  alertFrame:SetBackdropColor(15 / 255, 17 / 255, 22 / 255, 1)
-  alertFrame:SetBackdropBorderColor(1, 1, 1, 0.15)
-  alertFrame:SetScript("OnHide", function()
-    if alertDimmer then alertDimmer:Hide() end
-  end)
-
-  alertFrame.title = alertFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  alertFrame.title:SetPoint("TOP", alertFrame, "TOP", 0, -16)
-  alertFrame.title:SetJustifyH("CENTER")
-
-  alertFrame.subtitle = alertFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  alertFrame.subtitle:SetPoint("TOP", alertFrame.title, "BOTTOM", 0, -5)
-  alertFrame.subtitle:SetJustifyH("CENTER")
-  alertFrame.subtitle:SetTextColor(1, 1, 1, 0.72)
-
-  alertFrame.footer = alertFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  alertFrame.footer:SetJustifyH("CENTER")
-  alertFrame.footer:SetTextColor(1, 1, 1, 1)
-
-  alertFrame.accept = CreateFrame("Button", nil, alertFrame, "BackdropTemplate")
-  alertFrame.accept:SetSize(92, 26)
-  alertFrame.accept:SetBackdrop({
-    bgFile = Constants.media.WhiteSquare,
-    edgeFile = Constants.media.WhiteSquare,
-    edgeSize = 1,
-  })
-  alertFrame.accept:SetBackdropColor(0.05, 0.52, 0.39, 0.80)
-  alertFrame.accept:SetBackdropBorderColor(1, 1, 1, 0.08)
-  alertFrame.accept.text = alertFrame.accept:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  alertFrame.accept.text:SetPoint("CENTER")
-  alertFrame.accept.text:SetTextColor(1, 1, 1, 1)
-  alertFrame.accept.text:SetText(ACCEPT)
-  alertFrame.accept:SetScript("OnEnter", function(button)
+  alertWindow.accept:SetBackdropColor(0.05, 0.52, 0.39, 0.80)
+  alertWindow.accept:SetBackdropBorderColor(1, 1, 1, 0.08)
+  alertWindow.accept.text = alertWindow.accept:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  alertWindow.accept.text:SetPoint("CENTER")
+  alertWindow.accept.text:SetTextColor(1, 1, 1, 1)
+  alertWindow.accept.text:SetText(ACCEPT)
+  alertWindow.accept:SetScript("OnEnter", function(button)
     button:SetBackdropColor(0.07, 0.62, 0.49, 1)
   end)
-  alertFrame.accept:SetScript("OnLeave", function(button)
+  alertWindow.accept:SetScript("OnLeave", function(button)
     button:SetBackdropColor(0.05, 0.52, 0.39, 0.80)
   end)
-  alertFrame.accept:SetScript("OnClick", function() alertFrame:Hide() end)
+  alertWindow.accept:SetScript("OnClick", function()
+    alertWindow:Hide()
+  end)
 
-  if UISpecialFrames then
-    table.insert(UISpecialFrames, "AlterEgoRaidLockoutAlert")
-  end
-  alertFrame:Hide()
-  return alertFrame
+  return alertWindow
 end
 
 local function raidSlots(character, raid, difficultyID)
@@ -1080,57 +1169,55 @@ local function raidSlots(character, raid, difficultyID)
 end
 
 function Module:ShowInstanceAlert(raid, difficultyID)
-  local frame = ensureAlertFrame()
+  local window = ensureAlertWindow()
   local character = Data:GetCharacter()
   if not character then return end
+
+  window.currentRaid = raid
+  window.currentDifficultyID = difficultyID
 
   local slots, killed, total = raidSlots(character, raid, difficultyID)
   local isSaved = killed > 0
   local difficulty = difficultyInfo(difficultyID)
+  local body = window.body
+  local storage = window.db or {}
+  local useColumns = storage.bossListLayout == "columns" and total > 1
 
-  frame.title:SetText(isSaved and "You are saved" or "You are unsaved")
-  if isSaved then
-    frame.title:SetTextColor(RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
-  else
-    frame.title:SetTextColor(GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
-  end
+  window:SetTitle(isSaved and "You are Saved" or "You are Unsaved")
+  local titleColor = isSaved and RED_FONT_COLOR or GREEN_FONT_COLOR
+  window.titlebar.title:SetTextColor(titleColor.r, titleColor.g, titleColor.b)
 
   -- Use the exact raid-difficulty colors already defined by AlterEgo:
   -- Normal = rare blue, Heroic = epic purple, Mythic = legendary orange.
   local difficultyName = difficulty and difficulty.name or tostring(difficultyID)
   local difficultyColor = difficulty and difficulty.color or WHITE_FONT_COLOR
-  frame.subtitle:SetText(format("%s   ·   %s", raid.name or RAID, difficultyColor:WrapTextInColorCode(difficultyName)))
+  window.subtitle:SetText(format("%s   ·   %s", raid.name or RAID, difficultyColor:WrapTextInColorCode(difficultyName)))
+
+  if isSaved then
+    window.footer:SetText(format("Saved on %d out of %d %s.", killed, total, total == 1 and "boss" or "bosses"))
+  else
+    window.footer:SetText(format("Unsaved on all %d %s.", total, total == 1 and "boss" or "bosses"))
+  end
 
   for _, line in ipairs(alertLines) do line:Hide() end
 
-  local columns = total > 4 and 2 or 1
-  local leftCount = columns == 2 and math.ceil(total / 2) or total
-  local rightCount = columns == 2 and (total - leftCount) or 0
-  local rowsPerColumn = math.max(leftCount, rightCount)
-  local bodyTop = 72
-  local rowHeight = 20
-  local edgePadding = 10
-  local columnGap = columns == 2 and 12 or 0
-  local contentHeight = rowsPerColumn * rowHeight
-  local leftColumnWidth = 0
-  local rightColumnWidth = 0
+  local widest = math.ceil(math.max(window.subtitle:GetStringWidth(), window.footer:GetStringWidth()))
+  local leftCount = useColumns and math.ceil(total / 2) or total
+  local leftWidth = 0
+  local rightWidth = 0
 
-  -- Measure the real rendered boss labels first. The popup width is then
-  -- derived from those labels so the widest left label starts 10 px from the
-  -- left border and the widest right label ends 10 px before the right border.
   for encounterIndex = 1, total do
     local line = alertLines[encounterIndex]
     if not line then
-      line = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+      line = body:CreateFontString(nil, "OVERLAY", "GameFontNormal")
       alertLines[encounterIndex] = line
     end
 
     local encounter = raid.encounters and raid.encounters[encounterIndex]
     local bossName = encounter and encounter.name or format("%s (%d)", raid.name or RAID, encounterIndex)
-    line:SetText("- " .. bossName)
     line:SetWidth(1000)
-    line:SetJustifyH("LEFT")
-
+    line:SetJustifyH(useColumns and "LEFT" or "CENTER")
+    line:SetText((useColumns and "- " or "") .. bossName)
     if slots[encounterIndex] then
       line:SetTextColor(RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
     else
@@ -1138,63 +1225,82 @@ function Module:ShowInstanceAlert(raid, difficultyID)
     end
 
     local textWidth = math.ceil(line:GetStringWidth())
-    if columns == 2 and encounterIndex > leftCount then
-      rightColumnWidth = math.max(rightColumnWidth, textWidth)
+    if useColumns then
+      if encounterIndex > leftCount then
+        rightWidth = math.max(rightWidth, textWidth)
+      else
+        leftWidth = math.max(leftWidth, textWidth)
+      end
     else
-      leftColumnWidth = math.max(leftColumnWidth, textWidth)
+      widest = math.max(widest, textWidth)
     end
   end
 
-  if columns == 1 then
-    rightColumnWidth = 0
-  end
-
-  -- The boss labels define the popup width. This intentionally leaves exactly
-  -- 10 px outside the widest label on each side, making the alert as narrow as
-  -- the current encounter names allow.
-  local frameWidth = edgePadding + leftColumnWidth + columnGap + rightColumnWidth + edgePadding
-  local bossBlockX = edgePadding
-  local rightX = bossBlockX + leftColumnWidth + columnGap
-
-  for encounterIndex = 1, total do
-    local line = alertLines[encounterIndex]
-    line:ClearAllPoints()
-
-    local row
-    local left
-    local width
-    if columns == 2 and encounterIndex > leftCount then
-      row = encounterIndex - leftCount - 1
-      left = rightX
-      width = rightColumnWidth
-    else
-      row = encounterIndex - 1
-      left = bossBlockX
-      width = leftColumnWidth
-    end
-
-    line:SetPoint("TOPLEFT", frame, "TOPLEFT", left, -(bodyTop + row * rowHeight))
-    line:SetWidth(width)
-    line:SetJustifyH("LEFT")
-    line:Show()
-  end
-
-  if isSaved then
-    frame.footer:SetText(format("Saved on %d out of %d %s.", killed, total, total == 1 and "boss" or "bosses"))
+  local frameWidth
+  local bossRows
+  if useColumns then
+    local bossWidth = leftWidth + ALERT_COLUMN_GAP + rightWidth
+    frameWidth = math.max(ALERT_MIN_WIDTH, bossWidth + ALERT_SIDE_PADDING * 2, widest + ALERT_SIDE_PADDING * 2)
+    bossRows = math.max(leftCount, total - leftCount)
   else
-    frame.footer:SetText(format("Unsaved on all %d %s.", total, total == 1 and "boss" or "bosses"))
+    frameWidth = math.max(ALERT_MIN_WIDTH, widest + ALERT_SIDE_PADDING * 2)
+    bossRows = total
   end
 
-  frame.footer:ClearAllPoints()
-  frame.footer:SetPoint("TOP", frame, "TOP", 0, -(bodyTop + contentHeight + 10))
-  frame.accept:ClearAllPoints()
-  frame.accept:SetPoint("TOP", frame.footer, "BOTTOM", 0, -12)
+  local y = 14
+  window.subtitle:ClearAllPoints()
+  window.subtitle:SetPoint("TOP", body, "TOP", 0, -y)
+  y = y + 14 + 12
 
-  frame:SetWidth(frameWidth)
-  frame:SetHeight(bodyTop + contentHeight + 10 + 18 + 12 + frame.accept:GetHeight() + 18)
-  if alertDimmer then alertDimmer:Show() end
-  frame:Show()
-  frame:Raise()
+  if useColumns then
+    local contentWidth = leftWidth + ALERT_COLUMN_GAP + rightWidth
+    local startX = (frameWidth - contentWidth) / 2
+    local rightX = startX + leftWidth + ALERT_COLUMN_GAP
+    for encounterIndex = 1, total do
+      local line = alertLines[encounterIndex]
+      local row
+      local x
+      local width
+      if encounterIndex > leftCount then
+        row = encounterIndex - leftCount - 1
+        x = rightX
+        width = rightWidth
+      else
+        row = encounterIndex - 1
+        x = startX
+        width = leftWidth
+      end
+      line:ClearAllPoints()
+      line:SetWidth(width)
+      line:SetJustifyH("LEFT")
+      line:SetPoint("TOPLEFT", body, "TOPLEFT", x, -(y + row * ALERT_ROW_HEIGHT))
+      line:Show()
+    end
+    y = y + bossRows * ALERT_ROW_HEIGHT
+  else
+    for encounterIndex = 1, total do
+      local line = alertLines[encounterIndex]
+      line:ClearAllPoints()
+      line:SetWidth(frameWidth - ALERT_SIDE_PADDING * 2)
+      line:SetJustifyH("CENTER")
+      line:SetPoint("TOP", body, "TOP", 0, -y)
+      line:Show()
+      y = y + ALERT_ROW_HEIGHT
+    end
+  end
+  y = y + 8
+
+  window.footer:ClearAllPoints()
+  window.footer:SetPoint("TOP", body, "TOP", 0, -y)
+  y = y + 14 + 10
+
+  window.accept:ClearAllPoints()
+  window.accept:SetPoint("TOP", body, "TOP", 0, -y)
+  y = y + window.accept:GetHeight() + 16
+
+  window:SetBodySize(frameWidth, y)
+  window:Show()
+  window:Raise()
 end
 
 function Module:CheckInstanceAlert(suppressCurrent)
@@ -1229,6 +1335,18 @@ function Module:OnInitialize()
   self:EnsureWindow()
 end
 
+function Module:ShowEntranceAlertPreview()
+  local raid, difficultyID = currentRaidAndDifficulty()
+  if not raid then
+    raid = (Data:GetRaids() or {})[1]
+    difficultyID = 15 -- Heroic fallback for out-of-instance UI testing.
+  end
+  if not raid then return end
+
+  Data:UpdateRaidInstances()
+  self:ShowInstanceAlert(raid, difficultyID)
+end
+
 function Module:OnEnable()
   -- PLAYER_ENTERING_WORLD fires both for genuine zone transitions and for
   -- login/UI reload. Seed the current instance on login/reload without
@@ -1252,6 +1370,9 @@ function Module:OnEnable()
 
   addon.Events:RegisterEvent("UPDATE_INSTANCE_INFO", function()
     Module:RefreshWindow()
+    -- Data updates its saved-instance snapshot from this event as well. Paint
+    -- once more after the handlers settle so the window cannot keep stale data.
+    C_Timer.After(0.3, function() Module:RefreshWindow() end)
   end, true)
 
   addon.Events:RegisterEvent("BOSS_KILL", function()
