@@ -314,17 +314,14 @@ local function setDelveWaypoint(delveName)
     C_SuperTrack.SetSuperTrackedUserWaypoint(true)
   end
 
-  if WorldMapFrame then
-    if not WorldMapFrame:IsShown() then
-      if OpenWorldMap then
-        OpenWorldMap(waypoint.mapId)
-      else
-        ShowUIPanel(WorldMapFrame)
-      end
-    end
-    if WorldMapFrame.SetMapID then
-      WorldMapFrame:SetMapID(waypoint.mapId)
-    end
+  -- Midnight protects parts of the WorldMap pin refresh pipeline. Calling
+  -- OpenWorldMap/ShowUIPanel and especially WorldMapFrame:SetMapID() from
+  -- addon code can taint the map canvas; a later Blizzard quest/POI refresh
+  -- can then fail on the protected SetPassThroughButtons() call and propagate
+  -- the same tainted execution into Area POI tooltip widgets. C_Map.OpenWorldMap
+  -- is the restricted, taint-safe API Blizzard provides for this use case.
+  if C_Map.OpenWorldMap then
+    C_Map.OpenWorldMap(waypoint.mapId)
   end
 end
 
