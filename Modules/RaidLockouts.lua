@@ -32,8 +32,8 @@ local BOSSES_X = 330
 
 local STATUS_ORDER = {
   saved = 1,
-  nodata = 2,
-  unsaved = 3,
+  unsaved = 2,
+  nodata = 3,
 }
 
 local FLEX_DIFFICULTY_BASE = {
@@ -559,7 +559,7 @@ local function getSavedSortState()
   local validColumns = { character = true, status = true, bosses = true }
 
   if not validColumns[storage.sortColumn] then
-    storage.sortColumn = "character"
+    storage.sortColumn = "status"
   end
   if storage.sortAscending == nil then
     storage.sortAscending = true
@@ -627,7 +627,7 @@ function Module:SetSort(column)
 end
 
 function Module:ResetSort()
-  self.sortColumn = "character"
+  self.sortColumn = "status"
   self.sortAscending = true
   saveSortState(self.sortColumn, self.sortAscending)
   self:RefreshSortHeaders()
@@ -945,10 +945,10 @@ function Module:RefreshWindow()
     elseif data.status == "unsaved" then unsaved = unsaved + 1
     else nodata = nodata + 1 end
   end
-  self.summary:SetText(format("%s saved  ·  %s no data  ·  %s unsaved  ·  %s players",
+  self.summary:SetText(format("%s saved  ·  %s unsaved  ·  %s no data  ·  %s players",
     RED_FONT_COLOR:WrapTextInColorCode(tostring(saved)),
-    EPIC_PURPLE_COLOR:WrapTextInColorCode(tostring(nodata)),
     GREEN_FONT_COLOR:WrapTextInColorCode(tostring(unsaved)),
+    EPIC_PURPLE_COLOR:WrapTextInColorCode(tostring(nodata)),
     WHITE_FONT_COLOR:WrapTextInColorCode(tostring(#rows))))
 
   local bosses = buildBossCatalog()

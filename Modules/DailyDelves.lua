@@ -520,7 +520,7 @@ function Module:CreateWindow()
 
   self.listAll = CreateFrame("CheckButton", "$parentListAll", self.controls, "UICheckButtonTemplate")
   setupCheckButton(self.listAll, "List all stories", "Show every story variant for each Delve.")
-  self.listAll:SetPoint("LEFT", self.highTier.Text, "RIGHT", 26, 0)
+  self.listAll:SetPoint("LEFT", self.highTier.Text, "RIGHT", 8, 0)
   self.listAll:SetScript("OnClick", function(button)
     Data.db.global.dailyDelves.listAllStories = button:GetChecked() and true or false
     Module:Render()
@@ -528,7 +528,7 @@ function Module:CreateWindow()
 
   self.bountifulDone = CreateFrame("CheckButton", "$parentBountifulDone", self.controls, "UICheckButtonTemplate")
   setupCheckButton(self.bountifulDone, "Check Bountiful Delves done", "Marks a Bountiful Delve as done when you complete its scenario. Spending a Restored Coffer Key is kept as a fallback. Right-click a row to correct it manually.")
-  self.bountifulDone:SetPoint("LEFT", self.listAll.Text, "RIGHT", 26, 0)
+  self.bountifulDone:SetPoint("LEFT", self.listAll.Text, "RIGHT", 8, 0)
   self.bountifulDone:SetScript("OnClick", function(button)
     Data.db.global.dailyDelves.checkBountifulDone = button:GetChecked() and true or false
     if button:GetChecked() then retryBountifulCapture() end
