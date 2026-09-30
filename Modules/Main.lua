@@ -18,6 +18,21 @@ local TableForEach = LibLiqUI.Utils.TableForEach
 local TableGet = LibLiqUI.Utils.TableGet
 local CreateScrollArea = LibLiqUI.Utils.CreateScrollArea
 
+-- Only real currency rows use the per-category showIcons setting. Quest/status
+-- trackers render their own text/icons, so exposing the toggle when a category
+-- contains only those rows makes the option look broken.
+local function CategoryHasIconCurrencies(currencies, category)
+  for _, currency in ipairs(currencies) do
+    if currency.category == category
+      and currency.currencyType ~= "quest"
+      and currency.currencyType ~= "delveMap"
+      and currency.currencyType ~= "gildedStash" then
+      return true
+    end
+  end
+  return false
+end
+
 function Module:OnInitialize()
   self:Render()
 end
@@ -122,6 +137,22 @@ end
 -- Cleared as soon as it's acted on, or the popup is cancelled/dismissed
 -- without a password.
 local pendingSyncAction = nil
+
+do
+  local dialogName = "ALTEREGO_CONFIRM_RESET_TRACKER_ORDER"
+  StaticPopupDialogs[dialogName] = {
+    text = "Reset custom order?\n\nThis restores the default order and categories for Currencies, Weeklies and Seasonal Chores.",
+    button1 = "Reset",
+    button2 = CANCEL,
+    OnAccept = function()
+      Data:ResetTrackerOrder()
+      Module:Render()
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
 
 do
   local dialogName = "ALTEREGO_SYNC_PASSWORD"
@@ -1837,6 +1868,8 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Shows Illidan/Yogg-Saron/Ragnaros lockouts while their Timewalking event is active.", nil, nil, nil, true)
             end)
+            local trackerCurrencies = Data:GetCurrencies()
+
             menu:CreateTitle("Currencies")
             menu:CreateCheckbox(
               "Enable Currencies",
@@ -1849,17 +1882,19 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Time to farm!", nil, nil, nil, true)
             end)
-            menu:CreateCheckbox(
-              "Show icons",
-              function() return Data.db.global.currencies.showIcons end,
-              function()
-                Data.db.global.currencies.showIcons = not Data.db.global.currencies.showIcons
-                self:Render()
-              end
-            ):SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("So fancy!", nil, nil, nil, true)
-            end)
+            if CategoryHasIconCurrencies(trackerCurrencies, nil) then
+              menu:CreateCheckbox(
+                "Show icons",
+                function() return Data.db.global.currencies.showIcons end,
+                function()
+                  Data.db.global.currencies.showIcons = not Data.db.global.currencies.showIcons
+                  self:Render()
+                end
+              ):SetTooltip(function(tooltip, elm)
+                tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+                tooltip:AddLine("So fancy!", nil, nil, nil, true)
+              end)
+            end
             menu:CreateCheckbox(
               "Align text center",
               function() return Data.db.global.currencies.alignCenter end,
@@ -1885,7 +1920,7 @@ function Module:RenderNow()
             local enabledCurrenciesOption = menu:CreateButton(
               "Currencies"
             )
-            TableForEach(Data:GetCurrencies(), function(currency)
+            TableForEach(trackerCurrencies, function(currency)
               if currency.category ~= nil then return end
               local hiddenCurrencies = Data.db.global.currencies.hiddenCurrencies or {}
               enabledCurrenciesOption:CreateCheckbox(
@@ -1910,17 +1945,19 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Track this week's dailies... I mean weeklies.", nil, nil, nil, true)
             end)
-            menu:CreateCheckbox(
-              "Show icons",
-              function() return Data.db.global.weeklies.showIcons end,
-              function()
-                Data.db.global.weeklies.showIcons = not Data.db.global.weeklies.showIcons
-                self:Render()
-              end
-            ):SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("So fancy!", nil, nil, nil, true)
-            end)
+            if CategoryHasIconCurrencies(trackerCurrencies, "weekly") then
+              menu:CreateCheckbox(
+                "Show icons",
+                function() return Data.db.global.weeklies.showIcons end,
+                function()
+                  Data.db.global.weeklies.showIcons = not Data.db.global.weeklies.showIcons
+                  self:Render()
+                end
+              ):SetTooltip(function(tooltip, elm)
+                tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+                tooltip:AddLine("So fancy!", nil, nil, nil, true)
+              end)
+            end
             menu:CreateCheckbox(
               "Align text center",
               function() return Data.db.global.weeklies.alignCenter end,
@@ -1935,7 +1972,7 @@ function Module:RenderNow()
             local enabledWeekliesOption = menu:CreateButton(
               "Weeklies"
             )
-            TableForEach(Data:GetCurrencies(), function(currency)
+            TableForEach(trackerCurrencies, function(currency)
               if currency.category ~= "weekly" then return end
               local hiddenCurrencies = Data.db.global.weeklies.hiddenCurrencies or {}
               enabledWeekliesOption:CreateCheckbox(
@@ -1960,17 +1997,19 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Adulting, but for your alts.", nil, nil, nil, true)
             end)
-            menu:CreateCheckbox(
-              "Show icons",
-              function() return Data.db.global.seasonalChores.showIcons end,
-              function()
-                Data.db.global.seasonalChores.showIcons = not Data.db.global.seasonalChores.showIcons
-                self:Render()
-              end
-            ):SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("So fancy!", nil, nil, nil, true)
-            end)
+            if CategoryHasIconCurrencies(trackerCurrencies, "seasonalChore") then
+              menu:CreateCheckbox(
+                "Show icons",
+                function() return Data.db.global.seasonalChores.showIcons end,
+                function()
+                  Data.db.global.seasonalChores.showIcons = not Data.db.global.seasonalChores.showIcons
+                  self:Render()
+                end
+              ):SetTooltip(function(tooltip, elm)
+                tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+                tooltip:AddLine("So fancy!", nil, nil, nil, true)
+              end)
+            end
             menu:CreateCheckbox(
               "Align text center",
               function() return Data.db.global.seasonalChores.alignCenter end,
@@ -1985,7 +2024,7 @@ function Module:RenderNow()
             local enabledSeasonalChoresOption = menu:CreateButton(
               "Chores"
             )
-            TableForEach(Data:GetCurrencies(), function(currency)
+            TableForEach(trackerCurrencies, function(currency)
               if currency.category ~= "seasonalChore" then return end
               local hiddenCurrencies = Data.db.global.seasonalChores.hiddenCurrencies or {}
               enabledSeasonalChoresOption:CreateCheckbox(
@@ -2000,8 +2039,7 @@ function Module:RenderNow()
             end)
             do
               local resetTrackerOrderButton = menu:CreateButton("Reset custom order", function()
-                Data:ResetTrackerOrder()
-                self:Render()
+                StaticPopup_Show("ALTEREGO_CONFIRM_RESET_TRACKER_ORDER")
               end)
               resetTrackerOrderButton:SetTooltip(function(tooltip, elm)
                 tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)

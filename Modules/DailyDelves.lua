@@ -126,8 +126,15 @@ local function getCurrentVariants()
                     local variantName = widgetInfo.text:match("WHITE_FONT_COLOR:(.*)")
                     if variantName then
                       variantName = strtrim(variantName)
-                      local description = poiInfo.description or ""
-                      activeVariants[variantName] = description:find("Bountiful") and "bountiful" or true
+                      -- atlasName is the locale-independent signal Blizzard uses
+                      -- for a Bountiful Delve. Keep the description check only as
+                      -- a fallback for clients/builds where atlasName is absent.
+                      local isBountiful = poiInfo.atlasName == "delves-bountiful"
+                      if not isBountiful then
+                        local description = poiInfo.description or ""
+                        isBountiful = description:find("Bountiful", 1, true) ~= nil
+                      end
+                      activeVariants[variantName] = isBountiful and "bountiful" or true
                     end
                   end
                 end
@@ -208,6 +215,7 @@ local function prepareBountifulTracking(settings, character, resetAt)
     state.bountifulResetAt = resetAt
     wipe(state.bountifulSeen)
     wipe(state.bountifulDone)
+    state.activeBountifulRun = nil
   end
 end
 
@@ -234,15 +242,6 @@ local function buildAllDelves(liveDelves, settings, character)
     local state = character.dailyDelves
     for delveName in pairs(liveBountiful) do
       state.bountifulSeen[delveName] = true
-      state.bountifulDone[delveName] = nil
-    end
-    -- Blizzard stops returning a Bountiful Delve from GetDelvesForMap() for
-    -- this character after it is completed. Only infer completion for a Delve
-    -- this same character previously saw as Bountiful during this daily cycle.
-    for delveName in pairs(state.bountifulSeen) do
-      if settings.bountifulRotation[delveName] and not liveBountiful[delveName] then
-        state.bountifulDone[delveName] = true
-      end
     end
   end
 
@@ -329,6 +328,167 @@ local function setDelveWaypoint(delveName)
   end
 end
 
+local function toggleBountifulDone(delveName)
+  local settings = Data.db.global.dailyDelves
+  local character = Data:GetCharacter()
+  if not character or not delveName then return end
+  local resetAt = getDailyResetStamp()
+  prepareBountifulTracking(settings, character, resetAt)
+  local state = character.dailyDelves
+  local current = state.bountifulDone[delveName]
+  state.bountifulDone[delveName] = not current or nil
+end
+
+local function findCurrentDelveName()
+  if not IsInInstance() then return nil end
+
+  -- Delves have not been perfectly consistent about which zone/instance API
+  -- returns the canonical name, so try all useful location labels.
+  local candidates = {}
+  local instanceName = GetInstanceInfo()
+  if instanceName and instanceName ~= "" then candidates[#candidates + 1] = instanceName end
+  if GetRealZoneText then
+    local value = GetRealZoneText()
+    if value and value ~= "" then candidates[#candidates + 1] = value end
+  end
+  if GetSubZoneText then
+    local value = GetSubZoneText()
+    if value and value ~= "" then candidates[#candidates + 1] = value end
+  end
+  if GetZoneText then
+    local value = GetZoneText()
+    if value and value ~= "" then candidates[#candidates + 1] = value end
+  end
+
+  local bestMatch, bestSimilarity = nil, 0
+  for _, candidate in ipairs(candidates) do
+    if delves[candidate] then return candidate end
+    for delveName in pairs(delves) do
+      local value = similarity(candidate, delveName)
+      if value >= 80 and value > bestSimilarity then
+        bestMatch, bestSimilarity = delveName, value
+      end
+    end
+  end
+  return bestMatch
+end
+
+local function markBountifulDone(delveName)
+  if not delveName then return end
+  local settings = Data.db.global.dailyDelves
+  local character = Data:GetCharacter()
+  if not character then return end
+  local resetAt = getDailyResetStamp()
+  prepareBountifulTracking(settings, character, resetAt)
+  local state = character.dailyDelves
+  state.bountifulSeen[delveName] = true
+  state.bountifulDone[delveName] = true
+  settings.bountifulRotation[delveName] = true
+  if Module.window and Module.window:IsVisible() then Module:Render() end
+end
+
+-- Latch the current run while it is known to be Bountiful. SCENARIO_COMPLETED
+-- can arrive after the POI has already changed, so completion must use a
+-- positive signal captured during the run rather than re-querying at the end.
+local function captureCurrentBountifulRun()
+  local settings = Data.db.global.dailyDelves
+  if settings.checkBountifulDone ~= true then return end
+
+  local character = Data:GetCharacter()
+  if not character then return end
+  local resetAt = getDailyResetStamp()
+  prepareBountifulTracking(settings, character, resetAt)
+  local state = character.dailyDelves
+
+  local delveName = findCurrentDelveName()
+  if not delveName then
+    state.activeBountifulRun = nil
+    return
+  end
+
+  -- Once latched for this exact instance, keep the positive result through
+  -- transient POI/cache failures and /reloads until the player leaves.
+  if state.activeBountifulRun == delveName then return end
+
+  local isBountiful = settings.bountifulRotation[delveName] == true
+  if not isBountiful then
+    for _, entry in ipairs(getActiveDelves()) do
+      if entry.delveName == delveName then
+        settings.variantCache[delveName] = {
+          variantName = entry.variantName,
+          difficulty = entry.difficulty,
+        }
+        if entry.isBountiful then
+          isBountiful = true
+          settings.bountifulRotation[delveName] = true
+        end
+        break
+      end
+    end
+  end
+
+  if isBountiful then
+    state.bountifulSeen[delveName] = true
+    state.activeBountifulRun = delveName
+  elseif state.activeBountifulRun and state.activeBountifulRun ~= delveName then
+    state.activeBountifulRun = nil
+  end
+end
+
+local function retryBountifulCapture()
+  captureCurrentBountifulRun()
+  -- Area POIs/widgets can populate a few seconds after entering a Delve.
+  for _, delay in ipairs({1, 3, 6}) do
+    C_Timer.After(delay, captureCurrentBountifulRun)
+  end
+end
+
+addon.Events:RegisterEvent({"PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA"}, function()
+  retryBountifulCapture()
+end, true)
+
+addon.Events:RegisterEvent("SCENARIO_UPDATE", function()
+  captureCurrentBountifulRun()
+end, true)
+
+addon.Events:RegisterEvent("SCENARIO_COMPLETED", function()
+  local settings = Data.db.global.dailyDelves
+  if settings.checkBountifulDone ~= true then return end
+
+  local character = Data:GetCharacter()
+  if not character then return end
+  local resetAt = getDailyResetStamp()
+  prepareBountifulTracking(settings, character, resetAt)
+  local state = character.dailyDelves
+
+  -- Prefer the in-run latch. If it was missed because the POI cache loaded
+  -- late, the daily rotation cache still gives a safe positive fallback for
+  -- the Delve currently being completed.
+  local delveName = state.activeBountifulRun
+  if not delveName then
+    local current = findCurrentDelveName()
+    if current and settings.bountifulRotation[current] then
+      delveName = current
+    end
+  end
+
+  if delveName then
+    markBountifulDone(delveName)
+  end
+  state.activeBountifulRun = nil
+end, true)
+
+-- Spending a Restored Coffer Key remains a fallback for unusual cases where
+-- the completion event or the entry latch is missed. Currency ID 3028 is used
+-- instead of the localized currency name.
+local RESTORED_COFFER_KEY_CURRENCY = 3028
+addon.Events:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function(_, _, currencyType, _, quantityChange)
+  if type(quantityChange) ~= "number" or quantityChange >= 0 then return end
+  if Data.db.global.dailyDelves.checkBountifulDone ~= true then return end
+  if currencyType ~= RESTORED_COFFER_KEY_CURRENCY then return end
+  markBountifulDone(findCurrentDelveName())
+end, true)
+
 function Module:OnInitialize()
   self:CreateWindow()
 end
@@ -351,7 +511,7 @@ function Module:CreateWindow()
   self.controls:SetHeight(32)
 
   self.highTier = CreateFrame("CheckButton", "$parentHighTier", self.controls, "UICheckButtonTemplate")
-  setupCheckButton(self.highTier, "Show only High Tier", "Only show Delves rated Fast or Good.")
+  setupCheckButton(self.highTier, "Show High Tier and Bountiful", "Only show Delves rated Fast or Good, plus any currently Bountiful Delve regardless of tier.")
   self.highTier:SetPoint("LEFT", self.controls, "LEFT", 0, 0)
   self.highTier:SetScript("OnClick", function(button)
     Data.db.global.dailyDelves.showOnlyHighTier = button:GetChecked() and true or false
@@ -367,10 +527,11 @@ function Module:CreateWindow()
   end)
 
   self.bountifulDone = CreateFrame("CheckButton", "$parentBountifulDone", self.controls, "UICheckButtonTemplate")
-  setupCheckButton(self.bountifulDone, "Check Bountiful Delves done", "Track Bountiful Delves per character and mark completed ones with a check.")
+  setupCheckButton(self.bountifulDone, "Check Bountiful Delves done", "Marks a Bountiful Delve as done when you complete its scenario. Spending a Restored Coffer Key is kept as a fallback. Right-click a row to correct it manually.")
   self.bountifulDone:SetPoint("LEFT", self.listAll.Text, "RIGHT", 26, 0)
   self.bountifulDone:SetScript("OnClick", function(button)
     Data.db.global.dailyDelves.checkBountifulDone = button:GetChecked() and true or false
+    if button:GetChecked() then retryBountifulCapture() end
     Module:Render()
   end)
 
@@ -412,6 +573,7 @@ function Module:GetRow(index)
   local row = self.rows[index]
   if row then return row end
   row = CreateFrame("Button", "$parentRow" .. index, self.content)
+  row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
   row:SetHeight(ROW_HEIGHT)
   row:SetPoint("LEFT", self.content, "LEFT", 0, 0)
   row:SetPoint("RIGHT", self.content, "RIGHT", 0, 0)
@@ -430,6 +592,9 @@ function Module:GetRow(index)
       GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
       GameTooltip:AddLine(button.delveName, 1, 1, 1)
       GameTooltip:AddLine(format("Click to mark entrance on the map (%.1f, %.1f)", waypoint.x, waypoint.y), 0.75, 0.82, 0.9, true)
+      if button.isBountiful and Data.db.global.dailyDelves.checkBountifulDone then
+        GameTooltip:AddLine("Right-click to manually mark/unmark as done for today.", 0.75, 0.82, 0.9, true)
+      end
       GameTooltip:Show()
     end
   end)
@@ -441,6 +606,9 @@ function Module:GetRow(index)
   row:SetScript("OnClick", function(button, mouseButton)
     if mouseButton == "LeftButton" and button.delveName then
       setDelveWaypoint(button.delveName)
+    elseif mouseButton == "RightButton" and button.delveName and button.isBountiful and Data.db.global.dailyDelves.checkBountifulDone then
+      toggleBountifulDone(button.delveName)
+      Module:Render()
     end
   end)
   self.rows[index] = row
@@ -472,7 +640,10 @@ function Module:Render()
       local stories = {}
       local active = activeByDelve[delveName]
       for storyName, difficulty in pairs(delveInfo.variants) do
-        if not settings.showOnlyHighTier or HIGH_TIER[difficulty] then
+        -- Keep the story visible if it's high tier, or if it's today's
+        -- active story and that story is currently Bountiful.
+        local isTodayBountiful = active and active.isBountiful and active.variantName == storyName
+        if not settings.showOnlyHighTier or HIGH_TIER[difficulty] or isTodayBountiful then
           table.insert(stories, {
             storyName = storyName,
             difficulty = difficulty,
@@ -531,7 +702,7 @@ function Module:Render()
     end
   else
     for _, entry in ipairs(activeDelves) do
-      if not settings.showOnlyHighTier or (entry.difficulty and HIGH_TIER[entry.difficulty]) then
+      if not settings.showOnlyHighTier or (entry.difficulty and HIGH_TIER[entry.difficulty]) or entry.isBountiful then
         table.insert(display, entry)
       end
     end
@@ -556,6 +727,11 @@ function Module:Render()
       local row = self:GetRow(rowIndex)
       row.rowIndex = rowIndex
       row.delveName = entry.delveName
+      if entry.kind == "header" then
+        row.isBountiful = entry.active and entry.active.isBountiful or false
+      else
+        row.isBountiful = entry.isBountiful or false
+      end
       row.bg:SetColorTexture(1, 1, 1, rowIndex % 2 == 0 and 0.035 or 0.015)
       row:ClearAllPoints()
       row:SetPoint("TOPLEFT", self.content, "TOPLEFT", 0, -y)
@@ -563,7 +739,8 @@ function Module:Render()
       row:SetHeight(ROW_HEIGHT)
       local icon = zoneIcons[entry.mapId] or "majorfactions_icons_candle512"
       if entry.kind == "header" then
-        row.text:SetText(format("|A:%s:16:16:0:0|a |cffCBD5E1%s|r", icon, shortDelveName(entry.delveName)))
+        local headerDone = entry.active and entry.active.isBountifulDone and (" " .. CreateAtlasMarkup("common-icon-checkmark", 16, 16)) or ""
+        row.text:SetText(format("|A:%s:16:16:0:0|a |cffCBD5E1%s|r%s", icon, shortDelveName(entry.delveName), headerDone))
       else
         local config = entry.difficulty and difficultyConfig[entry.difficulty] or {name = "Unknown", color = "|cff6B7280"}
         local prefix = entry.kind == "story" and "   " or ""
