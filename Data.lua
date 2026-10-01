@@ -1998,6 +1998,416 @@ function Data:UpdateCurrencies()
   end)
 end
 
+local EMBELLISHED_ITEM_BONUS_ID = 8960
+local CRAFTING_REAGENT_MODIFIER_FIRST = 43
+local CRAFTING_REAGENT_MODIFIER_LAST = 57
+
+-- Midnight optional-reagent embellishments are encoded directly on the
+-- finished crafted item's bonus list. The shared 8960 bonus only marks the
+-- item as "Embellished (2)"; the effect-specific bonus below tells us which
+-- embellishment reagent was actually used.
+--
+-- reagentItemID points at one quality of the reagent. Quality variants share
+-- the same name/icon/effect, so it is sufficient (and more stable) for the
+-- Equipment table icon + reagent tooltip.
+local MIDNIGHT_EMBELLISHMENTS_BY_BONUS_ID = {
+  [12384] = {name = "Arcanoweave Lining", reagentItemID = 240166, spellID = 1283697},
+  [12385] = {name = "Sunfire Silk Lining", reagentItemID = 240164, spellID = 1241711},
+  [12685] = {name = "Devouring Banding", reagentItemID = 244674, spellID = 1244238},
+  [12686] = {name = "Blessed Pango Charm", reagentItemID = 244603, spellID = 1259060},
+  [12687] = {name = "Primal Spore Binding", reagentItemID = 244607, spellID = 1244276},
+  [12692] = {name = "Darkmoon Sigil: Rot", reagentItemID = 245877, spellID = 1245055},
+  [12693] = {name = "Darkmoon Sigil: Hunt", reagentItemID = 245875, spellID = 1245054},
+  [12705] = {name = "Darkmoon Sigil: Blood", reagentItemID = 245871, spellID = 1245053},
+  [12990] = {name = "B1P, Scorcher of Souls", reagentItemID = 248135, spellID = 1246309},
+  [13453] = {name = "Prismatic Focusing Iris", reagentItemID = 251487, spellID = 1251906},
+  [13454] = {name = "Stabilizing Gemstone Bandolier", reagentItemID = 251489, spellID = 1251905},
+  [13587] = {name = "M0LL1, Atomic Anomaly", reagentItemID = 257733, spellID = 1261971},
+  [13588] = {name = "B0P, Curator of Booms", reagentItemID = 257735, spellID = 1261968},
+  [13640] = {name = "Darkmoon Sigil: Void", reagentItemID = 245873, spellID = 1245052},
+  [13764] = {name = "Snakeskin Lining", reagentItemID = 270898, spellID = 1296550},
+  [13767] = {name = "Adorned Fang", reagentItemID = 273068, spellID = 1296870},
+  [13768] = {name = "Polished Ammolite", reagentItemID = 273065, spellID = 1296982},
+  [13769] = {name = "Coiled Snake-Eye", reagentItemID = 273062, spellID = 1297384},
+  [13771] = {name = "Hunter's Ritual Stone", reagentItemID = 273060, spellID = 1297382},
+}
+
+local MIDNIGHT_EMBELLISHMENTS_BY_SPELL_ID = {}
+for _, embellishment in pairs(MIDNIGHT_EMBELLISHMENTS_BY_BONUS_ID) do
+  MIDNIGHT_EMBELLISHMENTS_BY_SPELL_ID[embellishment.spellID] = embellishment
+end
+
+---@param itemLink string?
+---@return number[]
+local function getEquipmentItemBonusIDs(itemLink)
+  local bonusIDs = {}
+  if not itemLink then return bonusIDs end
+
+  local itemPayload = string.match(itemLink, "item:([%-?%d:]+)")
+  if not itemPayload then return bonusIDs end
+  local itemPayloadSplit = {strsplit(":", itemPayload)}
+  local numBonuses = tonumber(itemPayloadSplit[13]) or 0
+  for bonusIndex = 14, 13 + numBonuses do
+    local bonusID = tonumber(itemPayloadSplit[bonusIndex])
+    if bonusID then
+      table.insert(bonusIDs, bonusID)
+    end
+  end
+
+  return bonusIDs
+end
+
+---@param itemLink string?
+---@return table?
+local function findMidnightEmbellishmentByBonusID(itemLink)
+  for _, bonusID in ipairs(getEquipmentItemBonusIDs(itemLink)) do
+    local embellishment = MIDNIGHT_EMBELLISHMENTS_BY_BONUS_ID[bonusID]
+    if embellishment then
+      return embellishment
+    end
+  end
+  return nil
+end
+
+---@param result AE_EquipmentEmbellishmentInfo
+---@param embellishment table
+local function applyKnownEmbellishment(result, embellishment)
+  result.hasEmbellishment = true
+  result.name = embellishment.name
+  result.itemID = embellishment.reagentItemID
+  result.spellID = embellishment.spellID
+  result.tooltipItemLink = "item:" .. tostring(embellishment.reagentItemID)
+
+  local reagentName, reagentLink = C_Item.GetItemInfo(embellishment.reagentItemID)
+  if reagentName then
+    result.name = reagentName
+  end
+  if reagentLink then
+    result.tooltipItemLink = reagentLink
+  end
+
+  result.icon = C_Item.GetItemIconByID(embellishment.reagentItemID)
+  if not reagentName or not result.icon then
+    C_Item.RequestLoadItemDataByID(embellishment.reagentItemID)
+  end
+end
+
+---@param itemLink string?
+---@return boolean
+function Data:IsCraftedEquipmentItem(itemLink)
+  if not itemLink then return false end
+
+  if C_TradeSkillUI.GetItemCraftedQualityByItemInfo(itemLink) ~= nil then
+    return true
+  end
+
+  -- Every normal crafted embellishment carries 8960, so this remains a useful
+  -- fallback when crafted-quality data is not loaded yet. Lucky Keychain removes
+  -- 8960; once item data is available the crafted-quality API still identifies
+  -- that host item as crafted, allowing the Equipment table to show Missing.
+  for _, bonusID in ipairs(getEquipmentItemBonusIDs(itemLink)) do
+    if bonusID == EMBELLISHED_ITEM_BONUS_ID then
+      return true
+    end
+  end
+
+  return false
+end
+
+---@param lineText any
+---@return boolean
+local function isEmbellishedLimitLine(lineText)
+  if type(lineText) ~= "string" or (issecretvalue and issecretvalue(lineText)) then return false end
+
+  local uniqueEquippedText = _G.ITEM_UNIQUE_EQUIPPABLE or "Unique-Equipped"
+  if not string.find(lineText, uniqueEquippedText, 1, true) then
+    return false
+  end
+
+  -- Only the standard Embellished (2) category counts toward the character's
+  -- two-item limit. Lucky Keychain removes this category; outdoor-only effects
+  -- such as Outdoor Embellished (1) are also intentionally excluded.
+  return string.find(lineText, "%(%s*2%s*%)") ~= nil
+end
+
+---@param itemLink string?
+---@return number[]
+local function getCraftingReagentItemIDs(itemLink)
+  local reagentItemIDs = {}
+  if not itemLink then return reagentItemIDs end
+
+  local itemPayload = string.match(itemLink, "item:([%-?%d:]+)")
+  if not itemPayload then return reagentItemIDs end
+  local itemPayloadSplit = {strsplit(":", itemPayload)}
+  local numBonuses = tonumber(itemPayloadSplit[13]) or 0
+  local modifierCountIndex = 14 + numBonuses
+  local numModifiers = tonumber(itemPayloadSplit[modifierCountIndex]) or 0
+  local modifierIndex = modifierCountIndex + 1
+
+  for _ = 1, numModifiers do
+    local modifierType = tonumber(itemPayloadSplit[modifierIndex])
+    local modifierValue = tonumber(itemPayloadSplit[modifierIndex + 1])
+    if modifierType and modifierValue
+      and modifierType >= CRAFTING_REAGENT_MODIFIER_FIRST
+      and modifierType <= CRAFTING_REAGENT_MODIFIER_LAST
+      and modifierValue > 0 then
+      table.insert(reagentItemIDs, modifierValue)
+    end
+    modifierIndex = modifierIndex + 2
+  end
+
+  return reagentItemIDs
+end
+
+local embellishmentReagentCache = {}
+
+---@param itemID number
+---@return boolean? isEmbellishment nil while item data is still loading
+local function isEmbellishmentReagentItem(itemID)
+  if embellishmentReagentCache[itemID] == true then
+    return true
+  end
+
+  local tooltipData = C_TooltipInfo.GetItemByID(itemID)
+  local lines = tooltipData and tooltipData.lines
+  if not lines or next(lines) == nil then
+    C_Item.RequestLoadItemDataByID(itemID)
+    return nil
+  end
+
+  for _, line in ipairs(lines) do
+    if isEmbellishedLimitLine(line.leftText) then
+      embellishmentReagentCache[itemID] = true
+      return true
+    end
+  end
+
+  -- Do not cache a negative result. Tooltip data can arrive in stages, and a
+  -- partial reagent tooltip must not become a permanent false-negative.
+  return false
+end
+
+---@param itemLink string?
+---@return number? itemID
+---@return boolean pendingItemData
+local function findAppliedEmbellishmentReagent(itemLink)
+  local pendingItemData = false
+  for _, reagentItemID in ipairs(getCraftingReagentItemIDs(itemLink)) do
+    local isEmbellishment = isEmbellishmentReagentItem(reagentItemID)
+    if isEmbellishment == true then
+      return reagentItemID, false
+    elseif isEmbellishment == nil then
+      pendingItemData = true
+    end
+  end
+  return nil, pendingItemData
+end
+
+---@param line table
+---@return boolean
+local function isItemSpellEffectLine(line)
+  local lineType = line.type
+  if issecretvalue and issecretvalue(lineType) then return false end
+
+  local lineTypes = Enum and Enum.TooltipDataLineType
+  if lineTypes then
+    local onUse = lineTypes.ItemSpellTriggerOnUse
+    local onEquip = lineTypes.ItemSpellTriggerOnEquip
+    local onProc = lineTypes.ItemSpellTriggerOnProc
+    if (onUse and lineType == onUse)
+      or (onEquip and lineType == onEquip)
+      or (onProc and lineType == onProc) then
+      return true
+    end
+  end
+
+  local lineText = line.leftText
+  if type(lineText) ~= "string" or (issecretvalue and issecretvalue(lineText)) then return false end
+  local prefixes = {
+    _G.ITEM_SPELL_TRIGGER_ONUSE,
+    _G.ITEM_SPELL_TRIGGER_ONEQUIP,
+    _G.ITEM_SPELL_TRIGGER_ONPROC,
+  }
+  for _, prefix in ipairs(prefixes) do
+    if prefix and string.find(lineText, prefix, 1, true) == 1 then
+      return true
+    end
+  end
+
+  return false
+end
+
+---@param value any
+---@return boolean
+local function isUsableNumber(value)
+  if type(value) ~= "number" then return false end
+  return not issecretvalue or not issecretvalue(value)
+end
+
+---@param line table
+---@return number?
+local function getTooltipLineSpellID(line)
+  if isUsableNumber(line.spellID) then
+    return line.spellID
+  end
+
+  if type(line.leftText) == "string" and not (issecretvalue and issecretvalue(line.leftText)) then
+    local spellID = tonumber(string.match(line.leftText, "|Hspell:(%d+)"))
+    if spellID then return spellID end
+  end
+
+  return nil
+end
+
+---@class AE_EquipmentEmbellishmentInfo
+---@field isCrafted boolean
+---@field hasEmbellishment boolean
+---@field name string?
+---@field icon number|string?
+---@field spellID number?
+---@field tooltipLine string?
+---@field itemID number?
+---@field tooltipItemLink string?
+
+---@param itemLink string?
+---@param tooltipData table?
+---@param storedItem table?
+---@return AE_EquipmentEmbellishmentInfo
+function Data:GetEquipmentEmbellishmentInfo(itemLink, tooltipData, storedItem)
+  ---@type AE_EquipmentEmbellishmentInfo
+  local result = {
+    isCrafted = self:IsCraftedEquipmentItem(itemLink),
+    hasEmbellishment = false,
+  }
+
+  -- Preserve the crafted flag captured while an alt was online. This matters in
+  -- particular for Lucky Keychain recrafts, which intentionally no longer carry
+  -- the shared 8960 Embellished marker.
+  if storedItem and storedItem.itemLink == itemLink and storedItem.isCrafted == true then
+    result.isCrafted = true
+  end
+
+  -- Primary detection path: the finished crafted item carries an effect-specific
+  -- bonus ID. This works even when Blizzard has not populated the tooltip yet
+  -- and, unlike the reagent-modifier heuristic, identifies the exact reagent.
+  local knownEmbellishment = findMidnightEmbellishmentByBonusID(itemLink)
+  if knownEmbellishment then
+    result.isCrafted = true
+    applyKnownEmbellishment(result, knownEmbellishment)
+  end
+
+  local lines = tooltipData and tooltipData.lines
+  if not lines or next(lines) == nil then
+    if not knownEmbellishment and storedItem then
+      result.isCrafted = storedItem.isCrafted == true or result.isCrafted
+      result.hasEmbellishment = storedItem.hasEmbellishment == true
+      result.name = storedItem.embellishmentName
+      result.icon = storedItem.embellishmentIcon
+      result.spellID = storedItem.embellishmentSpellID
+      result.tooltipLine = storedItem.embellishmentTooltipLine
+      result.itemID = storedItem.embellishmentItemID
+      result.tooltipItemLink = storedItem.embellishmentTooltipLink
+    end
+    return result
+  end
+
+  local effectLine
+  local firstEffectLine
+  local lastEffectLine
+  local tooltipHasEmbellishedLimit = false
+  for _, line in ipairs(lines) do
+    if isItemSpellEffectLine(line) then
+      firstEffectLine = firstEffectLine or line
+      lastEffectLine = line
+
+      -- Bonus IDs are authoritative, but matching the effect spell provides a
+      -- second stable lookup path for links exported without the full bonus list.
+      if not knownEmbellishment then
+        local lineSpellID = getTooltipLineSpellID(line)
+        local spellEmbellishment = lineSpellID and MIDNIGHT_EMBELLISHMENTS_BY_SPELL_ID[lineSpellID]
+        if spellEmbellishment then
+          knownEmbellishment = spellEmbellishment
+          result.isCrafted = true
+          applyKnownEmbellishment(result, knownEmbellishment)
+        end
+      end
+    end
+    if isEmbellishedLimitLine(line.leftText) then
+      tooltipHasEmbellishedLimit = true
+      result.hasEmbellishment = result.isCrafted
+      -- The embellishment's effect line normally sits immediately before the
+      -- Unique-Equipped category. Prefer that nearest preceding spell effect.
+      effectLine = lastEffectLine or effectLine
+    end
+  end
+  effectLine = effectLine or firstEffectLine
+
+  if not result.hasEmbellishment then
+    -- Saved data is authoritative for an offline character when Blizzard has
+    -- returned only a partial hyperlink tooltip for the exact same item.
+    if storedItem and storedItem.itemLink == itemLink and storedItem.hasEmbellishment == true then
+      result.hasEmbellishment = true
+      result.name = storedItem.embellishmentName
+      result.icon = storedItem.embellishmentIcon
+      result.spellID = storedItem.embellishmentSpellID
+      result.tooltipLine = storedItem.embellishmentTooltipLine
+      result.itemID = storedItem.embellishmentItemID
+      result.tooltipItemLink = storedItem.embellishmentTooltipLink
+    else
+      return result
+    end
+  elseif not knownEmbellishment then
+    -- Compatibility fallback for an embellishment not present in the Midnight
+    -- bonus database. Older item-link modifier layouts can expose the reagent
+    -- item directly; inherent embellishments fall back to the crafted item.
+    local reagentItemID, reagentDataPending = findAppliedEmbellishmentReagent(itemLink)
+    if reagentItemID then
+      result.itemID = reagentItemID
+      local reagentName, reagentLink = C_Item.GetItemInfo(reagentItemID)
+      result.name = reagentName
+      result.icon = C_Item.GetItemIconByID(reagentItemID)
+      result.tooltipItemLink = reagentLink or ("item:" .. tostring(reagentItemID))
+      if not reagentName or not result.icon then
+        C_Item.RequestLoadItemDataByID(reagentItemID)
+      end
+    elseif not reagentDataPending and tooltipHasEmbellishedLimit then
+      -- No optional reagent could be resolved, so this is most likely a crafted
+      -- item with an inherent/built-in embellishment. In that case the item is
+      -- itself the embellishment and its own icon/name are the correct display.
+      local itemID = C_Item.GetItemIDForItemInfo(itemLink)
+      local itemName, normalizedItemLink = C_Item.GetItemInfo(itemLink)
+      result.itemID = itemID
+      result.name = itemName
+      result.icon = itemID and C_Item.GetItemIconByID(itemID) or nil
+      result.tooltipItemLink = normalizedItemLink or itemLink
+    end
+  end
+
+  if effectLine then
+    if type(effectLine.leftText) == "string" and not (issecretvalue and issecretvalue(effectLine.leftText)) then
+      result.tooltipLine = effectLine.leftText
+    end
+    result.spellID = result.spellID or getTooltipLineSpellID(effectLine)
+
+    local effectIcon = effectLine.spellIcon or effectLine.icon
+    if (type(effectIcon) == "number" or type(effectIcon) == "string")
+      and not (issecretvalue and issecretvalue(effectIcon)) then
+      result.icon = result.icon or effectIcon
+    end
+
+    if result.spellID and not result.name then
+      local spellInfo = C_Spell.GetSpellInfo(result.spellID)
+      if spellInfo then
+        result.name = spellInfo.name
+        result.icon = result.icon or spellInfo.iconID
+      end
+    end
+  end
+
+  result.name = result.name or "Embellished"
+  return result
+end
+
 ---Refresh equipment from the API
 function Data:UpdateEquipment()
   local character = self:GetCharacter()
@@ -2065,6 +2475,8 @@ function Data:UpdateEquipment()
       end)
     end
 
+    local embellishmentInfo = self:GetEquipmentEmbellishmentInfo(itemLink or inventoryItemLink, tooltipData)
+
     ---@type AE_Equipment
     local equipment = {
       itemName = itemName,
@@ -2090,6 +2502,14 @@ function Data:UpdateEquipment()
       itemUpgradeColor = itemUpgradeColor,
       enchantID = enchantID,
       enchantTooltipLine = enchantTooltipLine,
+      isCrafted = embellishmentInfo.isCrafted,
+      hasEmbellishment = embellishmentInfo.hasEmbellishment,
+      embellishmentName = embellishmentInfo.name,
+      embellishmentIcon = embellishmentInfo.icon,
+      embellishmentSpellID = embellishmentInfo.spellID,
+      embellishmentTooltipLine = embellishmentInfo.tooltipLine,
+      embellishmentItemID = embellishmentInfo.itemID,
+      embellishmentTooltipLink = embellishmentInfo.tooltipItemLink,
       itemSlotID = slot.id,
       itemSlotName = slot.name,
     }

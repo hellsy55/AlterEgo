@@ -36,6 +36,80 @@ local Slots = {
 local EQUIPMENT_HEADER_HEIGHT = 30
 local CRAFTED_QUALITY_MAX = 5
 
+-- Equipment columns should follow the content that is actually displayed instead
+-- of reserving large fixed widths. Text-bearing columns are recalculated for every
+-- character render so long values expand the table rather than being clipped, while
+-- shorter values reclaim unused space.
+local equipmentColumnMeasureFont
+
+---@param text any
+---@param fontObject string
+---@return number
+local function measureEquipmentColumnText(text, fontObject)
+  if text == nil or text == "" then
+    return 0
+  end
+
+  if not equipmentColumnMeasureFont then
+    equipmentColumnMeasureFont = UIParent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    equipmentColumnMeasureFont:SetWordWrap(false)
+  end
+
+  equipmentColumnMeasureFont:SetFontObject(fontObject)
+  equipmentColumnMeasureFont:SetText(tostring(text))
+  return math.ceil(equipmentColumnMeasureFont:GetStringWidth() or 0)
+end
+
+---@param tableFrame table
+---@param rows LiqUI_TableData
+local function sizeEquipmentColumnsToContent(tableFrame, rows)
+  if not tableFrame or not tableFrame.options or not tableFrame.options.columns then
+    return
+  end
+
+  local padding = (LibLiqUI.Constants and LibLiqUI.Constants.layout and LibLiqUI.Constants.layout.sizes.padding) or 8
+  local horizontalPadding = (padding * 2) + 2
+  local columns = tableFrame.options.columns
+
+  local function fitColumn(columnIndex)
+    local column = columns[columnIndex]
+    if not column then return end
+
+    local contentWidth = measureEquipmentColumnText(column.headerText or "", "GameFontNormalSmall")
+    for _, row in ipairs(rows) do
+      local cell = row.data and row.data[columnIndex]
+      if cell and cell.data ~= nil then
+        local measuredWidth
+        if columnIndex == 2 and row.item then
+          -- Measure the visible item name directly instead of the hyperlink payload,
+          -- then reserve room for the leading item icon. This avoids both clipping
+          -- and accidental over-sizing from hidden link metadata.
+          local itemName = row.item.itemLink and string.match(row.item.itemLink, "%[(.-)%]")
+          if not itemName then
+            local itemID = row.item.itemLink and C_Item.GetItemIDForItemInfo(row.item.itemLink)
+            itemName = itemID and C_Item.GetItemNameByID(itemID) or tostring(cell.data)
+          end
+          measuredWidth = measureEquipmentColumnText("[" .. itemName .. "]", "GameFontHighlightSmall") + 20
+        else
+          measuredWidth = measureEquipmentColumnText(cell.data, "GameFontHighlightSmall")
+        end
+        contentWidth = math.max(contentWidth, measuredWidth)
+      end
+    end
+
+    column.width = math.ceil(contentWidth + horizontalPadding)
+  end
+
+  -- Fit every text-bearing column to the current character. Embellishment stays
+  -- fixed so its icon remains centered in a predictable compact cell.
+  fitColumn(1) -- Slot
+  fitColumn(2) -- Item
+  fitColumn(3) -- iLevel
+  fitColumn(4) -- Upgrade Level
+  fitColumn(6) -- Enchant
+  fitColumn(7) -- Gems
+end
+
 ---@param itemLink string?
 ---@return number
 local function getItemLinkEnchantID(itemLink)
@@ -68,6 +142,42 @@ local function formatEnchantLine(lineText)
   end
 
   return enchantText, enchantTooltip
+end
+
+---@param itemLink string
+---@param socketIndex number
+---@return string?
+local function getGemCraftingQualityMarkup(itemLink, socketIndex)
+  local _, gemLink = C_Item.GetItemGem(itemLink, socketIndex)
+  local gemID = C_Item.GetItemGemID and C_Item.GetItemGemID(itemLink, socketIndex) or nil
+
+  if not gemLink and gemID then
+    C_Item.RequestLoadItemDataByID(gemID)
+  end
+
+  -- Crafted gem links carry their profession-quality atlas directly in the
+  -- visible item name. Reading it from the link keeps this locale-independent
+  -- and works for Midnight's two-tier quality icons as well as older tiers.
+  if gemLink then
+    local qualityMarkup = string.match(gemLink, "(|A:Professions%-ChatIcon%-Quality[^|]*|a)")
+    if qualityMarkup then
+      return qualityMarkup
+    end
+
+    -- Some item links may omit the quality atlas until sparse item data is
+    -- hydrated. Fall back to the gem's own tooltip quality line when available.
+    local gemTooltipData = C_TooltipInfo.GetHyperlink(gemLink)
+    for _, gemLine in pairs((gemTooltipData and gemTooltipData.lines) or {}) do
+      if gemLine.type == Enum.TooltipDataLineType.ProfessionCraftingQuality and gemLine.leftText then
+        qualityMarkup = string.match(gemLine.leftText, "(|A:[^|]-Quality[^|]*|a)")
+        if qualityMarkup then
+          return qualityMarkup
+        end
+      end
+    end
+  end
+
+  return nil
 end
 
 ---@param itemLink string
@@ -385,6 +495,13 @@ end
 ---@param rowA AE_EquipmentTableRow
 ---@param rowB AE_EquipmentTableRow
 ---@return boolean
+local function compareEquipmentEmbellishmentColumn(rowA, rowB)
+  return compareEquipmentPrimaryThenSlot(rowA, rowB, rowA.embellishmentSort, rowB.embellishmentSort)
+end
+
+---@param rowA AE_EquipmentTableRow
+---@param rowB AE_EquipmentTableRow
+---@return boolean
 local function compareEquipmentEnchantColumn(rowA, rowB)
   local itemA = rowA.item
   local itemB = rowB.item
@@ -477,7 +594,7 @@ function Module:OpenCharacter(character)
 end
 
 function Module:Render()
-  local tableWidth = 870
+  local tableWidth = 835
   local rowHeight = 22
 
   if not self.window then
@@ -497,9 +614,10 @@ function Module:Render()
       header = {enabled = true, sticky = true, height = EQUIPMENT_HEADER_HEIGHT},
       columns = {
         {id = "slot", headerText = "Slot", width = 100, sorting = {enabled = true, compare = compareEquipmentSlotColumn}},
-        {id = "item", headerText = "Item", width = 280, sorting = {enabled = true, compare = compareEquipmentItemColumn}},
+        {id = "item", headerText = "Item", width = 200, sorting = {enabled = true, compare = compareEquipmentItemColumn}},
         {id = "ilevel", headerText = "iLevel", width = 80, align = "CENTER", sorting = {enabled = true, compare = compareEquipmentILvlColumn}},
-        {id = "upgrade", headerText = "Upgrade Level", width = 190, sorting = {enabled = true, compare = compareEquipmentUpgradeColumn}},
+        {id = "upgrade", headerText = "Upgrade Level", width = 105, sorting = {enabled = true, compare = compareEquipmentUpgradeColumn}},
+        {id = "embellishment", headerText = "Embellishment", width = 90, align = "CENTER", sorting = {enabled = true, compare = compareEquipmentEmbellishmentColumn}},
         {id = "enchant", headerText = "Enchant", width = 180, sorting = {enabled = true, compare = compareEquipmentEnchantColumn}},
         {id = "gems", headerText = "Gems", width = 80, sorting = {enabled = true, compare = compareEquipmentGemsColumn}},
       },
@@ -528,6 +646,53 @@ function Module:Render()
   ---@type LiqUI_TableData
   local rows = {}
 
+  local isCurrentCharacter = character.GUID == UnitGUID("player")
+  local tooltipDataBySlot = {}
+  local embellishmentInfoBySlot = {}
+  local equippedEmbellishmentCount = 0
+
+  -- Resolve embellishments for the whole equipped set first. The Missing state
+  -- is character-wide: crafted slots only need a warning while fewer than two
+  -- real (Unique-Equipped) embellishments are equipped. Lucky Keychain has no
+  -- Embellished (2) category, so it is intentionally treated like an empty slot.
+  TableForEach(character.equipment, function(item)
+    local tooltipData
+    if isCurrentCharacter then
+      tooltipData = C_TooltipInfo.GetInventoryItem("player", item.itemSlotID)
+    end
+    if tooltipData == nil then
+      tooltipData = C_TooltipInfo.GetHyperlink(item.itemLink)
+    end
+
+    if tooltipData == nil or tooltipData.lines == nil or next(tooltipData.lines) == nil then
+      local itemID = C_Item.GetItemIDForItemInfo(item.itemLink)
+      if itemID then
+        C_Item.RequestLoadItemDataByID(itemID)
+      end
+    end
+
+    tooltipDataBySlot[item.itemSlotID] = tooltipData
+    local embellishmentInfo = Data:GetEquipmentEmbellishmentInfo(item.itemLink, tooltipData, item)
+    embellishmentInfoBySlot[item.itemSlotID] = embellishmentInfo
+    if embellishmentInfo.hasEmbellishment then
+      equippedEmbellishmentCount = equippedEmbellishmentCount + 1
+    end
+  end)
+
+  -- The character-wide missing count is independent of whether another crafted
+  -- host item currently exists. A character with 0/2 or 1/2 real embellishments
+  -- is still missing two or one embellishment respectively. Lucky Keychain is
+  -- intentionally excluded by GetEquipmentEmbellishmentInfo and therefore does
+  -- not reduce this count.
+  local missingEmbellishmentCount = math.max(0, 2 - equippedEmbellishmentCount)
+
+  -- When there are no real embellishments equipped, the title communicates the
+  -- 0/2 state and the per-item Embellishment column is unnecessary. Keep the
+  -- column available as soon as at least one tracked embellishment is equipped.
+  if self.dataTable.db and self.dataTable.db.hiddenColumns then
+    self.dataTable.db.hiddenColumns.embellishment = equippedEmbellishmentCount == 0 and true or nil
+  end
+
   TableForEach(character.equipment, function(item)
     local itemID = C_Item.GetItemIDForItemInfo(item.itemLink)
 
@@ -540,31 +705,31 @@ function Module:Render()
     local socketTooltipLines = {}
     local hasEmptySocket = false
 
-    local tooltipData
-    local isCurrentCharacter = character.GUID == UnitGUID("player")
-    if isCurrentCharacter then
-      -- Prefer the live inventory tooltip for the logged-in character. This is
-      -- the freshest source after applying an enchant; the stored hyperlink can
-      -- briefly lag behind the actual equipped item state.
-      tooltipData = C_TooltipInfo.GetInventoryItem("player", item.itemSlotID)
-    end
-    if tooltipData == nil then
-      tooltipData = C_TooltipInfo.GetHyperlink(item.itemLink)
-    end
+    -- Reuse the tooltip snapshot from the embellishment pre-pass so all columns
+    -- are rendered from the same item state.
+    local tooltipData = tooltipDataBySlot[item.itemSlotID]
 
     local tooltipEnchantFound = false
+    local socketIndex = 0
     if tooltipData ~= nil then
-      for _, line in pairs(tooltipData.lines or {}) do
+      for _, line in ipairs(tooltipData.lines or {}) do
         if line.type == Enum.TooltipDataLineType.ItemEnchantmentPermanent and line.leftText then
           enchantText, enchantTooltip = formatEnchantLine(line.leftText)
           tooltipEnchantFound = true
         end
 
         if line.type == Enum.TooltipDataLineType.GemSocket then
+          socketIndex = socketIndex + 1
           if line.gemIcon then
             local gemTexture = CreateSimpleTextureMarkup(line.gemIcon, 14, 14)
             table.insert(socketTexts, gemTexture)
-            table.insert(socketTooltipLines, gemTexture .. " " .. line.leftText)
+
+            local gemTooltipLine = gemTexture .. " " .. line.leftText
+            local qualityMarkup = getGemCraftingQualityMarkup(item.itemLink, socketIndex)
+            if qualityMarkup then
+              gemTooltipLine = gemTooltipLine .. " " .. qualityMarkup
+            end
+            table.insert(socketTooltipLines, gemTooltipLine)
           elseif line.socketType then
             hasEmptySocket = true
             local socketTexture = CreateSimpleTextureMarkup(string.format("Interface\\ItemSocketingFrame\\UI-EmptySocket-%s", line.socketType), 14, 14)
@@ -605,6 +770,28 @@ function Module:Render()
       end
     end
 
+    local embellishmentInfo = embellishmentInfoBySlot[item.itemSlotID] or {isCrafted = false, hasEmbellishment = false}
+    local embellishmentText = ""
+    local embellishmentSort = ""
+    local embellishmentMissing = false
+
+    if embellishmentInfo.hasEmbellishment then
+      local embellishmentName = embellishmentInfo.name or "Embellished"
+      if embellishmentInfo.icon then
+        -- Match the Gems column: the table only needs the embellishment icon.
+        -- The name and effect are exposed in the hover tooltip below.
+        embellishmentText = CreateSimpleTextureMarkup(embellishmentInfo.icon, 14, 14)
+      else
+        -- Keep the cell intentionally compact even if the icon has not loaded yet.
+        embellishmentText = ""
+      end
+      embellishmentSort = embellishmentName
+    elseif embellishmentInfo.isCrafted and equippedEmbellishmentCount < 2 then
+      embellishmentText = DIM_RED_FONT_COLOR:WrapTextInColorCode("Missing")
+      embellishmentSort = "Missing"
+      embellishmentMissing = true
+    end
+
     local socketSlot = Slots[item.itemSlotID]
     local gemsCellText = strjoin(" ", unpack(socketTexts))
     if socketSlot and socketSlot.canSocket then
@@ -624,6 +811,7 @@ function Module:Render()
     local row = {
       item = item,
       upgradeSort = upgradeSort,
+      embellishmentSort = embellishmentSort,
       enchantSort = enchantSort,
       gemCount = gemCount,
       data = {
@@ -650,6 +838,31 @@ function Module:Render()
         },
         {data = WrapTextInColorCode(tostring(floor(item.itemLevel)), select(4, GetItemQualityColor(item.itemQuality)))},
         {data = upgradeLevel},
+        {
+          data = embellishmentText,
+          onEnter = function(cellFrame)
+            if embellishmentInfo.hasEmbellishment then
+              -- Do not use the reagent/item tooltip here: it adds quality, item
+              -- level and other metadata that are irrelevant in this column.
+              -- Mirror the concise Enchant/Gems hover style instead.
+              GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
+              GameTooltip:AddLine(embellishmentInfo.name or "Embellishment", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+              if embellishmentInfo.tooltipLine and embellishmentInfo.tooltipLine ~= "" then
+                local effectText = embellishmentInfo.tooltipLine:gsub("^Equip:%s*", "")
+                GameTooltip:AddLine(effectText, 1, 1, 1, true)
+              end
+              GameTooltip:Show()
+            elseif embellishmentMissing then
+              GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
+              GameTooltip:AddLine("Missing Embellishment", DIM_RED_FONT_COLOR.r, DIM_RED_FONT_COLOR.g, DIM_RED_FONT_COLOR.b)
+              GameTooltip:AddLine(format("Equipped embellishments: %d/2", equippedEmbellishmentCount), 1, 1, 1)
+              GameTooltip:Show()
+            end
+          end,
+          onLeave = function()
+            GameTooltip:Hide()
+          end,
+        },
         {
           data = enchantColor:WrapTextInColorCode(enchantText),
           onEnter = function(cellFrame)
@@ -715,7 +928,14 @@ function Module:Render()
     end
   end
 
-  self.window:SetTitle(format("%s%s (%s)%s", positionPrefix, nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText))
+  local embellishmentStatusText = ""
+  if missingEmbellishmentCount > 0 then
+    local missingLabel = missingEmbellishmentCount == 1 and "Missing 1 Embellishment" or format("Missing %d Embellishments", missingEmbellishmentCount)
+    embellishmentStatusText = " - " .. DIM_RED_FONT_COLOR:WrapTextInColorCode(missingLabel)
+  end
+
+  self.window:SetTitle(format("%s%s (%s)%s%s", positionPrefix, nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText, embellishmentStatusText))
+  sizeEquipmentColumnsToContent(self.dataTable, rows)
   self.dataTable:SetData(rows)
   local bodyWidth, bodyHeight = self.dataTable:GetSize()
   self.window:SetBodySize(bodyWidth > 0 and bodyWidth or tableWidth, bodyHeight)
