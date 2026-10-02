@@ -2642,7 +2642,7 @@ local function sendNewKeystoneAnnounce(itemLink, dungeon, keystoneLevel)
     Data.cache.pendingKeystoneAnnounce = nil
     return
   end
-  if pcall(SendChatMessage, message, "PARTY") then
+  if pcall(C_ChatInfo.SendChatMessage, message, "PARTY") then
     Data.cache.pendingKeystoneAnnounce = nil
   else
     Data.cache.pendingKeystoneAnnounce = true

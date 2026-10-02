@@ -1072,8 +1072,8 @@ function Module:GetCharacterInfo(unfiltered)
             unpack(dungeonScoreDungeonTable),
           }
           local link = NORMAL_FONT_COLOR:WrapTextInColorCode(LinkUtil.FormatLink("dungeonScore", DUNGEON_SCORE_LINK, unpack(dungeonScoreTable)))
-          if not ChatEdit_InsertLink(link) then
-            ChatFrame_OpenChat(link)
+          if not ChatFrameUtil.InsertLink(link) then
+            ChatFrameUtil.OpenChat(link)
           end
         end
       end,
@@ -1130,8 +1130,8 @@ function Module:GetCharacterInfo(unfiltered)
       onClick = function(infoFrame, character)
         if character.mythicplus.keystone ~= nil and type(character.mythicplus.keystone.itemLink) == "string" and character.mythicplus.keystone.itemLink ~= "" then
           if IsModifiedClick("CHATLINK") then
-            if not ChatEdit_InsertLink(character.mythicplus.keystone.itemLink) then
-              ChatFrame_OpenChat(character.mythicplus.keystone.itemLink)
+            if not ChatFrameUtil.InsertLink(character.mythicplus.keystone.itemLink) then
+              ChatFrameUtil.OpenChat(character.mythicplus.keystone.itemLink)
             end
           end
         end

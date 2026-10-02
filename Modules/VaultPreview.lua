@@ -129,8 +129,8 @@ local function buildSlotCell(character, vaultType, index, useSnapshot)
     end,
     onClick = function()
       if IsModifiedClick("CHATLINK") then
-        if not ChatEdit_InsertLink(itemLink) then
-          ChatFrame_OpenChat(itemLink)
+        if not ChatFrameUtil.InsertLink(itemLink) then
+          ChatFrameUtil.OpenChat(itemLink)
         end
       end
     end,

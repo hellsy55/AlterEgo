@@ -830,13 +830,13 @@ function Module:Render()
           end,
           onClick = function()
             if IsModifiedClick("CHATLINK") then
-              if not ChatEdit_InsertLink(item.itemLink) then
-                ChatFrame_OpenChat(item.itemLink)
+              if not ChatFrameUtil.InsertLink(item.itemLink) then
+                ChatFrameUtil.OpenChat(item.itemLink)
               end
             end
           end,
         },
-        {data = WrapTextInColorCode(tostring(floor(item.itemLevel)), select(4, GetItemQualityColor(item.itemQuality)))},
+        {data = WrapTextInColorCode(tostring(floor(item.itemLevel)), select(4, C_Item.GetItemQualityColor(item.itemQuality)))},
         {data = upgradeLevel},
         {
           data = embellishmentText,
