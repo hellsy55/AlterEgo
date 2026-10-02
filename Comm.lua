@@ -389,28 +389,36 @@ local function IsCharacterIndividuallyEnabled(character)
   return true
 end
 
+local function OnlySyncMaxLevelCharacters()
+  return Data.db.global.sync.onlyMaxLevelCharacters ~= false
+end
+
 ---Every character Sync should push out: every enabled character filed
----under the Main WoW Account (Data:GetSyncEligibleCharacters, the same
----list "Sync All Characters" used to send), PLUS the character you're
----currently logged in on even if it's a leveling alt under max level --
----GetSyncEligibleCharacters applies the Characters-menu's max-level
----display filter, which would otherwise silently stop covering the very
----character you're actively playing just because it hasn't hit max level.
----That fallback still respects the character's own checkbox, though --
----unchecking the character you're currently logged in on should still
----exclude it, same as any other character.
+---under the Main WoW Account (Data:GetSyncEligibleCharacters), plus the
+---currently logged-in character fallback used by the existing sync path.
+---When "Only Sync Max Level Characters" is enabled, both sources are
+---filtered against Retail's current expansion cap so leveling characters
+---never leave this account. Disabling it allows every otherwise-enabled
+---character in the Main WoW Account, regardless of display filters.
 ---@return AE_Character[]
 local function GetBroadcastCandidates()
   local candidates = {}
   local seen = {}
   local eligible = Data.GetSyncEligibleCharacters and Data:GetSyncEligibleCharacters() or Data:GetCharacters()
   for _, character in ipairs(eligible) do
-    table.insert(candidates, character)
-    seen[character.GUID] = true
+    if not OnlySyncMaxLevelCharacters() or Data:IsMaxLevelCharacter(character) then
+      table.insert(candidates, character)
+      seen[character.GUID] = true
+    end
   end
 
   local current = Data:GetCharacter()
-  if current and not seen[current.GUID] and IsEligibleToSend(current) and IsCharacterIndividuallyEnabled(current) then
+  if current
+    and not seen[current.GUID]
+    and IsEligibleToSend(current)
+    and IsCharacterIndividuallyEnabled(current)
+    and (not OnlySyncMaxLevelCharacters() or Data:IsMaxLevelCharacter(current))
+  then
     table.insert(candidates, current)
   end
 
@@ -652,8 +660,9 @@ end
 -- look wrong copied onto a different monitor/resolution.
 local SHAREABLE_SETTINGS_KEYS = {
   "sorting", "showTiers", "showScores", "showAffixColors", "showAffixHeader",
-  "showZeroRatedCharacters", "showEquippedItemLevel", "showItemLevelDecimals",
-  "showRealms", "showGuildInformation", "currentCharacterMarker",
+  "showNonMaxLevelCharacters", "showZeroRatedCharacters", "showItemLevel",
+  "showEquippedItemLevel", "showItemLevelDecimals", "showRealms",
+  "showGuildInformation", "showRating", "showCurrentKeystone", "currentCharacterMarker",
   "currentCharacterMarkerColor", "announceKeystones", "announceResets",
   "vault", "prey", "raids", "dungeons", "world", "currencies", "weeklies",
   "seasonalChores", "trackerOverrides", "useRIOScoreColor", "interface",
@@ -752,6 +761,23 @@ local warnedCorrupted = {}
 -- so a genuinely NEWER update for the same character (a real, separate
 -- change) is never mistaken for a duplicate.
 local processedUpdates = {}
+
+---Clear session-only Sync bookkeeping tied to a character that was explicitly
+---removed from AlterEgo. Persistent lastSentUpdate metadata is cleared by
+---Data:DeleteCharacter itself.
+---@param GUID string
+function addon.Core:ForgetSyncCharacterMetadata(GUID)
+  if not GUID or GUID == "" then return end
+
+  pendingCombatApplies[GUID] = nil
+
+  local prefix = GUID .. "|"
+  for updateKey in pairs(processedUpdates) do
+    if string.sub(updateKey, 1, #prefix) == prefix then
+      processedUpdates[updateKey] = nil
+    end
+  end
+end
 
 -- How long to wait, after the most recently-arrived character of an
 -- in-progress incoming batch (see TrackBatchArrival below), before giving

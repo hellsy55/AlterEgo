@@ -40,12 +40,17 @@ Data.defaultDB = {
       bountifulRotation = {},
       variantCache = {},
     },
+    showNonMaxLevelCharacters = false,
     showZeroRatedCharacters = true,
     showCharacterPosition = false,
+    showItemLevel = true,
     showEquippedItemLevel = false,
     showItemLevelDecimals = false,
     showRealms = true,
     showGuildInformation = false,
+    showDailyDelves = true,
+    showRating = true,
+    showCurrentKeystone = true,
     currentCharacterMarker = "dot",
     currentCharacterMarkerColor = nil, ---@type ColorTable? Falls back to DIM_GREEN_FONT_COLOR when unset
     cachedTimewalkingEra = nil, ---@type "bc"|"wrath"|"cata"|nil Last era read outside protected content
@@ -89,14 +94,14 @@ Data.defaultDB = {
     weeklies = {
       enabled = true,
       hiddenCurrencies = {},
-      showIcons = true,
+      showIcons = false,
       showMaxEarned = true,
       alignCenter = true,
     },
     seasonalChores = {
       enabled = true,
       hiddenCurrencies = {},
-      showIcons = true,
+      showIcons = false,
       showMaxEarned = true,
       alignCenter = true,
     },
@@ -108,7 +113,11 @@ Data.defaultDB = {
     },
     liqui = {
       windows = {
-        Main = {},
+        Main = {
+          horizontalScrollWhenScaled = true,
+          sidebarCollapsed = false,
+          collapsingRowLabelsDisplaysAllIcons = true,
+        },
         Affixes = {},
         DailyDelves = {},
         Equipment = {},
@@ -124,6 +133,7 @@ Data.defaultDB = {
     useRIOScoreColor = false,
     sync = {
       enabled = false,
+      onlyMaxLevelCharacters = true,
       password = "",
       channel = "GUILD", ---@type "BOTH"|"GUILD"|"PARTY" Which distribution(s) to send on when more than one is available. "GUILD" (default) restricts sends to the guild channel; "PARTY" restricts to party/raid; "BOTH" sends on every channel that applies (see Comm.lua's GetUsableChannels).
       passwordAccounts = {}, ---@type table<string, string> Which WoW Account each password's synced characters land in
@@ -539,6 +549,41 @@ function Data:ResetTrackerOrder()
   self.db.global.trackerOverrides = {}
 end
 
+---Restore the main character-grid filters/columns to their shipped defaults.
+---Deliberately leaves sorting, tracker visibility/order, minimap settings, window
+---position/size/scale, account organization, and Sync settings untouched.
+function Data:ResetDisplayFiltersAndColumns()
+  local keys = {
+    "showNonMaxLevelCharacters",
+    "showZeroRatedCharacters",
+    "showCharacterPosition",
+    "showItemLevel",
+    "showEquippedItemLevel",
+    "showItemLevelDecimals",
+    "showRealms",
+    "showGuildInformation",
+    "showRating",
+    "showCurrentKeystone",
+    "useRIOScoreColor",
+  }
+
+  for _, key in ipairs(keys) do
+    self.db.global[key] = self.defaultDB.global[key]
+  end
+
+  -- The clickable AlterEgo title controls the shared row-label column, so it
+  -- belongs to the display reset even though its persisted state lives with
+  -- the Main window settings.
+  self.db.global.liqui.windows.Main.sidebarCollapsed = self.defaultDB.global.liqui.windows.Main.sidebarCollapsed
+end
+
+---Reset the entire AlterEgo SavedVariables database to its shipped defaults.
+---The caller should reload the UI immediately after this so every module starts
+---again from the same clean-install state.
+function Data:ResetAllAddonSettings()
+  self.db:ResetDB(true)
+end
+
 ---The weekly +50% reputation buff each classic-raid Timewalking event grants the player.
 ---These are stable, hardcoded spell IDs (not tied to the calendar), so checking for them directly
 ---is far more reliable than trying to parse calendar event text.
@@ -655,8 +700,24 @@ end
 ---@param characterOrGUID AE_Character|string
 function Data:DeleteCharacter(characterOrGUID)
   local GUID = type(characterOrGUID) == "table" and characterOrGUID.GUID or characterOrGUID
-  if not GUID or self.db.global.characters[GUID] == nil then return end
+  if not GUID then return end
+
   self.db.global.characters[GUID] = nil
+
+  -- Remove persistent per-character Sync bookkeeping along with the actual
+  -- character record so deleting a character does not leave orphaned GUID
+  -- metadata behind in SavedVariables.
+  local sync = self.db.global.sync
+  if sync and sync.lastSentUpdate then
+    sync.lastSentUpdate[GUID] = nil
+  end
+
+  -- Comm.lua also keeps a few session-only per-GUID caches. They are not
+  -- SavedVariables, but clearing them here keeps Remove Character semantically
+  -- complete for the rest of the current login session too.
+  if addon.Core.ForgetSyncCharacterMetadata then
+    addon.Core:ForgetSyncCharacterMetadata(GUID)
+  end
 end
 
 -- ===== WoW Accounts (manual grouping shown in the Characters menu) =======
@@ -798,10 +859,14 @@ function Data:DeleteAccount(accountId)
 
   self.db.global.accounts[accountId] = nil
 
+  local charactersToDelete = {}
   for GUID, character in pairs(self.db.global.characters) do
     if character.accountId == accountId then
-      self.db.global.characters[GUID] = nil
+      table.insert(charactersToDelete, GUID)
     end
+  end
+  for _, GUID in ipairs(charactersToDelete) do
+    self:DeleteCharacter(GUID)
   end
 
   local fallbackId = self:EnsureDefaultAccount()
@@ -933,15 +998,17 @@ end
 ---feature existed.
 ---@return AE_Character[]
 function Data:GetSyncEligibleCharacters()
-  local characters = self:GetCharacters() -- same visibility rules as the main window
+  -- Sync eligibility must not depend on main-window display filters such as
+  -- rating or whether leveling characters are currently visible. The Sync
+  -- module applies its own max-level preference after this list is built.
+  local characters = self:GetCharacters(true)
   local mainAccountId = self:GetMainAccountId()
-  if not mainAccountId then
-    return characters
-  end
-
   local result = {}
   for _, character in ipairs(characters) do
-    if character.accountId == mainAccountId then
+    local account = character.accountId and self.db.global.accounts[character.accountId]
+    local accountEnabled = not account or account.enabled ~= false
+    local inMainAccount = not mainAccountId or character.accountId == mainAccountId
+    if character.enabled ~= false and accountEnabled and inMainAccount then
       table.insert(result, character)
     end
   end
@@ -1137,22 +1204,41 @@ function Data:SortCharacter(character, direction)
   end
 end
 
+---Get Retail's current expansion level cap. Prefer the latest-expansion
+---API so this follows the game's current expansion instead of a hard-coded
+---level or the logged-in account's ownership/subscription state.
+---@return number?
+function Data:GetCurrentMaxLevel()
+  local maxLevel = GetMaxLevelForLatestExpansion and GetMaxLevelForLatestExpansion()
+  if type(maxLevel) ~= "number" or maxLevel <= 0 then
+    maxLevel = GetMaxLevelForPlayerExpansion and GetMaxLevelForPlayerExpansion()
+  end
+  if type(maxLevel) ~= "number" or maxLevel <= 0 then
+    maxLevel = GetEffectivePlayerMaxLevel and GetEffectivePlayerMaxLevel()
+  end
+  return type(maxLevel) == "number" and maxLevel > 0 and maxLevel or nil
+end
+
+---Whether a saved character has reached Retail's current expansion cap.
+---@param character AE_Character
+---@return boolean
+function Data:IsMaxLevelCharacter(character)
+  local level = character and character.info and character.info.level
+  if type(level) ~= "number" then return false end
+  local maxLevel = self:GetCurrentMaxLevel()
+  return maxLevel ~= nil and level >= maxLevel
+end
+
 ---Get user characters
 ---@param unfiltered boolean?
 ---@return AE_Character[]
 function Data:GetCharacters(unfiltered)
   local characters = {}
   for _, character in pairs(self.db.global.characters) do
-    -- The max-level gate is a display FILTER (like enabled/account-enabled/
-    -- zero-rated below), not an existence check -- it must respect
-    -- `unfiltered` too. Applying it unconditionally here made every caller
-    -- that asks for the unfiltered list (e.g. the Characters menu's account
-    -- list, used to view/move/re-enable/delete characters) silently drop
-    -- every character below max level, with no way to ever see or manage
-    -- them again -- looking exactly like their data had vanished.
-    if unfiltered or (character.info.level ~= nil and character.info.level >= 80) then -- Todo later: GetMaxLevelForPlayerExpansion()
-      table.insert(characters, character)
-    end
+    -- Keep every captured character in the working set. Max-level visibility
+    -- is a normal display filter below so unfiltered callers can still manage
+    -- leveling characters even while the main window hides them.
+    table.insert(characters, character)
   end
 
   -- Update custom order
@@ -1208,7 +1294,13 @@ function Data:GetCharacters(unfiltered)
     if account and account.enabled == false then
       keep = false
     end
-    if self.db.global.showZeroRatedCharacters == false and (character.mythicplus.rating and character.mythicplus.rating <= 0) then
+    if self.db.global.showNonMaxLevelCharacters == false and not self:IsMaxLevelCharacter(character) then
+      keep = false
+    end
+    if self.db.global.showZeroRatedCharacters == false
+      and self:IsMaxLevelCharacter(character)
+      and (character.mythicplus.rating and character.mythicplus.rating <= 0)
+    then
       keep = false
     end
     if keep then

@@ -18,9 +18,9 @@ local TableForEach = LibLiqUI.Utils.TableForEach
 local TableGet = LibLiqUI.Utils.TableGet
 local CreateScrollArea = LibLiqUI.Utils.CreateScrollArea
 
--- Only real currency rows use the per-category showIcons setting. Quest/status
--- trackers render their own text/icons, so exposing the toggle when a category
--- contains only those rows makes the option look broken.
+-- Keep the Currencies Show Icons option conditional when that section has no
+-- icon-capable rows. Weeklies and Seasonal Chores always expose their toggle
+-- because quest/status trackers can now prepend their own tracker icon too.
 local function CategoryHasIconCurrencies(currencies, category)
   for _, currency in ipairs(currencies) do
     if currency.category == category
@@ -147,6 +147,53 @@ do
     OnAccept = function()
       Data:ResetTrackerOrder()
       Module:Render()
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
+do
+  local dialogName = "ALTEREGO_CONFIRM_RESET_DISPLAY_FILTERS"
+  StaticPopupDialogs[dialogName] = {
+    text = "Reset display filters and columns?\n\nThis restores the Character display filters and columns to their defaults. Sorting, trackers, minimap settings, window position/size, accounts, and Sync settings are not changed.",
+    button1 = "Reset",
+    button2 = CANCEL,
+    OnAccept = function()
+      Data:ResetDisplayFiltersAndColumns()
+      Module:Render()
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
+do
+  local dialogName = "ALTEREGO_CONFIRM_RESET_ALL_SETTINGS_STEP_1"
+  StaticPopupDialogs[dialogName] = {
+    text = "Reset ALL AlterEgo settings and saved data?\n\nThis will permanently remove every saved character and account, Sync settings/password, display and tracker settings, sorting, minimap settings, and window layout. AlterEgo will return to a clean-install state.",
+    button1 = "Continue",
+    button2 = CANCEL,
+    OnAccept = function()
+      StaticPopup_Show("ALTEREGO_CONFIRM_RESET_ALL_SETTINGS_STEP_2")
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
+do
+  local dialogName = "ALTEREGO_CONFIRM_RESET_ALL_SETTINGS_STEP_2"
+  StaticPopupDialogs[dialogName] = {
+    text = "FINAL WARNING\n\nThis cannot be undone. All AlterEgo SavedVariables will be reset and the UI will reload immediately. You will need to log in on characters again for AlterEgo to capture them.\n\nReset everything now?",
+    button1 = "Reset & Reload",
+    button2 = CANCEL,
+    OnAccept = function()
+      Data:ResetAllAddonSettings()
+      ReloadUI()
     end,
     timeout = 0,
     whileDead = 1,
@@ -908,7 +955,7 @@ function Module:GetCharacterInfo(unfiltered)
       onLeave = function()
         GameTooltip:Hide()
       end,
-      enabled = true,
+      enabled = Data.db.global.showItemLevel,
     },
     {
       label = "Rating",
@@ -1030,7 +1077,7 @@ function Module:GetCharacterInfo(unfiltered)
           end
         end
       end,
-      enabled = true,
+      enabled = Data.db.global.showRating,
     },
     {
       label = "Current Keystone",
@@ -1089,7 +1136,7 @@ function Module:GetCharacterInfo(unfiltered)
           end
         end
       end,
-      enabled = true,
+      enabled = Data.db.global.showCurrentKeystone,
     },
     {
       label = DELVES_GREAT_VAULT_LABEL,
@@ -1275,7 +1322,14 @@ end
 local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, settings)
   local cellColor = CAMPAIGN_COMPLETE_COLOR
   local cellValue = "0"
-  local infoIcon = CreateSimpleTextureMarkup(currency.iconFileID or [[Interface\Icons\INV_Misc_QuestionMark]])
+  local iconFileID = currency.iconFileID
+  if not iconFileID or iconFileID == 0 then
+    iconFileID = [[Interface\Icons\INV_Misc_QuestionMark]]
+  end
+  local infoIcon = CreateSimpleTextureMarkup(iconFileID)
+  local mainWindowSettings = Data.db.global.liqui.windows.Main
+  local showIcons = settings.showIcons == true
+    or (mainWindowSettings.sidebarCollapsed == true and mainWindowSettings.collapsingRowLabelsDisplaysAllIcons ~= false)
 
   if currency.currencyType == "delveMap" then
     local statusValue = "-"
@@ -1294,6 +1348,10 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
         statusValue = "Available"
         cellText = CreateAtlasMarkup("Recurringavailablequesticon", 16, 16)
       end
+    end
+
+    if showIcons then
+      cellText = format("%s %s", infoIcon, cellText)
     end
 
     currencyFrame.Text:SetText(cellText)
@@ -1344,6 +1402,10 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
       cellText = CreateAtlasMarkup(availableAtlas, 16, 16)
     end
 
+    if showIcons then
+      cellText = format("%s %s", infoIcon, cellText)
+    end
+
     currencyFrame.Text:SetText(cellText)
     currencyFrame.Text:SetJustifyH(settings.alignCenter and "CENTER" or "LEFT")
     currencyFrame:SetScript("OnEnter", function()
@@ -1377,6 +1439,10 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
       if fulfilled >= total then
         cellText = GREEN_FONT_COLOR:WrapTextInColorCode(cellText)
       end
+    end
+
+    if showIcons then
+      cellText = format("%s %s", infoIcon, cellText)
     end
 
     currencyFrame.Text:SetText(cellText)
@@ -1422,7 +1488,7 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
     end
 
     cellValue = tostring(charQuantity)
-    if settings.showIcons then
+    if showIcons then
       cellValue = format("%s %s", infoIcon, cellValue)
     end
 
@@ -1525,7 +1591,18 @@ function Module:RenderNow()
   local characters = Data:GetCharacters()
   local numCharacters = TableCount(characters)
   local affixes = Data:GetAffixes(true)
+  local mainWindowSettings = Data.db.global.liqui.windows.Main
+  local windowScalePercent = self.window and self.window:GetWindowScale() or mainWindowSettings.scale or 100
+  local windowScale = math.max(windowScalePercent / 100, 0.01)
+  local horizontalScrollWhenScaled = mainWindowSettings.horizontalScrollWhenScaled ~= false
   local windowWidthMax = LibLiqUI.Utils.GetMaxWindowWidth()
+  if horizontalScrollWhenScaled and windowScale > 1 then
+    -- Window dimensions are stored in unscaled UI units, while the visible
+    -- frame is multiplied by its scale. Tighten the viewport only when scale
+    -- would otherwise make the window wider than the user's screen; the
+    -- existing horizontal ScrollArea then exposes every character by mouse wheel.
+    windowWidthMax = windowWidthMax / windowScale
+  end
   local windowWidth, windowHeight = numCharacters == 0 and 500 or 0, 0
   local weeklyAffixesModule = addon.Core:GetModule("WeeklyAffixes", true)
   local dailyDelvesModule = addon.Core:GetModule("DailyDelves", true)
@@ -1541,6 +1618,23 @@ function Module:RenderNow()
       overlayTextColor = {r = 1, g = 0.82, b = 0, a = 1},
       onShow = function()
         Module:Render()
+      end,
+      onScaleChanged = function()
+        Module:Render()
+      end,
+      onWindowOptionsAfterScaling = function(_, menu)
+        menu:CreateCheckbox(
+          "Horizontal scrolling when outscaled",
+          function() return Data.db.global.liqui.windows.Main.horizontalScrollWhenScaled ~= false end,
+          function()
+            local settings = Data.db.global.liqui.windows.Main
+            settings.horizontalScrollWhenScaled = not (settings.horizontalScrollWhenScaled ~= false)
+            Module:Render()
+          end
+        ):SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("When Scaling would make the character grid wider than your screen, keep the window on-screen and use the mouse wheel over the character grid to scroll horizontally.", nil, nil, nil, true)
+        end)
       end,
       onSettingsMenu = function(window, menu)
             -- The list has grown into a lot of sections (Character, Vault,
@@ -1619,6 +1713,17 @@ function Module:RenderNow()
               )
             end
             menu:CreateCheckbox(
+              "Show Non Max Level Characters",
+              function() return Data.db.global.showNonMaxLevelCharacters end,
+              function()
+                Data.db.global.showNonMaxLevelCharacters = not Data.db.global.showNonMaxLevelCharacters
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show captured characters below Retail's current expansion level cap.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
               "Show characters with zero rating",
               function() return Data.db.global.showZeroRatedCharacters end,
               function()
@@ -1627,7 +1732,7 @@ function Module:RenderNow()
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Too many alts?", nil, nil, nil, true)
+              tooltip:AddLine("Hide max-level characters with no Mythic+ rating. Leveling characters are controlled by Show Non Max Level Characters.", nil, nil, nil, true)
             end)
             menu:CreateCheckbox(
               "Show character position",
@@ -1639,6 +1744,17 @@ function Module:RenderNow()
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Show each character's current position after their name (for example: Name - 1).", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Show Item Level",
+              function() return Data.db.global.showItemLevel end,
+              function()
+                Data.db.global.showItemLevel = not Data.db.global.showItemLevel
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show the Item Level column in the main window.", nil, nil, nil, true)
             end)
             menu:CreateCheckbox(
               "Show Equipped Item Level",
@@ -1683,6 +1799,28 @@ function Module:RenderNow()
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Show the guild name, rank, and realm.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Show Rating",
+              function() return Data.db.global.showRating end,
+              function()
+                Data.db.global.showRating = not Data.db.global.showRating
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show the Mythic+ Rating column in the main window.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Show Current Keystone",
+              function() return Data.db.global.showCurrentKeystone end,
+              function()
+                Data.db.global.showCurrentKeystone = not Data.db.global.showCurrentKeystone
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show the Current Keystone column in the main window.", nil, nil, nil, true)
             end)
             local rioColors = menu:CreateCheckbox(
               "Use Raider.IO rating colors",
@@ -1945,19 +2083,17 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Track this week's dailies... I mean weeklies.", nil, nil, nil, true)
             end)
-            if CategoryHasIconCurrencies(trackerCurrencies, "weekly") then
-              menu:CreateCheckbox(
-                "Show icons",
-                function() return Data.db.global.weeklies.showIcons end,
-                function()
-                  Data.db.global.weeklies.showIcons = not Data.db.global.weeklies.showIcons
-                  self:Render()
-                end
-              ):SetTooltip(function(tooltip, elm)
-                tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-                tooltip:AddLine("So fancy!", nil, nil, nil, true)
-              end)
-            end
+            menu:CreateCheckbox(
+              "Show icons",
+              function() return Data.db.global.weeklies.showIcons end,
+              function()
+                Data.db.global.weeklies.showIcons = not Data.db.global.weeklies.showIcons
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show each Weekly tracker's icon to the left of its current status or progress.", nil, nil, nil, true)
+            end)
             menu:CreateCheckbox(
               "Align text center",
               function() return Data.db.global.weeklies.alignCenter end,
@@ -1997,19 +2133,17 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Adulting, but for your alts.", nil, nil, nil, true)
             end)
-            if CategoryHasIconCurrencies(trackerCurrencies, "seasonalChore") then
-              menu:CreateCheckbox(
-                "Show icons",
-                function() return Data.db.global.seasonalChores.showIcons end,
-                function()
-                  Data.db.global.seasonalChores.showIcons = not Data.db.global.seasonalChores.showIcons
-                  self:Render()
-                end
-              ):SetTooltip(function(tooltip, elm)
-                tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-                tooltip:AddLine("So fancy!", nil, nil, nil, true)
-              end)
-            end
+            menu:CreateCheckbox(
+              "Show icons",
+              function() return Data.db.global.seasonalChores.showIcons end,
+              function()
+                Data.db.global.seasonalChores.showIcons = not Data.db.global.seasonalChores.showIcons
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show each Seasonal Chore tracker's icon to the left of its current status or progress.", nil, nil, nil, true)
+            end)
             menu:CreateCheckbox(
               "Align text center",
               function() return Data.db.global.seasonalChores.alignCenter end,
@@ -2049,6 +2183,30 @@ function Module:RenderNow()
             menu:CreateDivider()
             menu:CreateTitle(INTERFACE_OPTIONS)
             menu:CreateCheckbox(
+              "Show Daily Delves",
+              function() return Data.db.global.showDailyDelves ~= false end,
+              function()
+                Data.db.global.showDailyDelves = not (Data.db.global.showDailyDelves ~= false)
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Show the Daily Delves button in the AlterEgo main window title bar.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Collapsing row labels displays all icons",
+              function() return Data.db.global.liqui.windows.Main.collapsingRowLabelsDisplaysAllIcons ~= false end,
+              function()
+                local settings = Data.db.global.liqui.windows.Main
+                settings.collapsingRowLabelsDisplaysAllIcons = not (settings.collapsingRowLabelsDisplaysAllIcons ~= false)
+                self:Render()
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("When the Row Labels column is hidden, force tracker icons to be shown for Currencies, Weeklies and Seasonal Chores so each row remains identifiable.", nil, nil, nil, true)
+              tooltip:AddLine("This temporarily overrides each section's Show icons setting only while Row Labels are collapsed.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
               "Show Weekly Affixes",
               function() return Data.db.global.showAffixHeader end,
               function()
@@ -2081,9 +2239,27 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("No more moving the button around accidentally!", nil, nil, nil, true)
             end)
+            do
+              local resetDisplayButton = menu:CreateButton("Reset display filters & columns", function()
+                StaticPopup_Show("ALTEREGO_CONFIRM_RESET_DISPLAY_FILTERS")
+              end)
+              resetDisplayButton:SetTooltip(function(tooltip, elm)
+                tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+                tooltip:AddLine("Restore the Character display filters and columns to their default values without changing sorting, trackers, window layout, accounts, or Sync.", nil, nil, nil, true)
+              end)
+            end
+            do
+              local resetAllButton = menu:CreateButton("Reset all addon settings", function()
+                StaticPopup_Show("ALTEREGO_CONFIRM_RESET_ALL_SETTINGS_STEP_1")
+              end)
+              resetAllButton:SetTooltip(function(tooltip, elm)
+                tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+                tooltip:AddLine("Permanently erase all AlterEgo saved characters, accounts, settings, Sync configuration, and window layout, then reload the UI. Requires two confirmations.", nil, nil, nil, true)
+              end)
+            end
             menu:CreateDivider()
             menu:CreateTitle("Multi-Account Sync")
-            menu:CreateCheckbox(
+            local enableSyncOption = menu:CreateCheckbox(
               "Enable Sync",
               function() return Data.db.global.sync.enabled end,
               function()
@@ -2105,10 +2281,21 @@ function Module:RenderNow()
                 -- turned on and closing confirms it actually took.
                 return MenuResponse.CloseAll
               end
-            ):SetTooltip(function(tooltip, elm)
+            )
+            enableSyncOption:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Shares your Main WoW Account's characters with your other WoW accounts, as long as they're in the same guild, raid, or party, and set the same password below.", nil, nil, nil, true)
               tooltip:AddLine("Nobody else who can see messages on that channel receives anything unless they also know your password.", nil, nil, nil, true)
+            end)
+            enableSyncOption:CreateCheckbox(
+              "Only Sync Max Level Characters",
+              function() return Data.db.global.sync.onlyMaxLevelCharacters ~= false end,
+              function()
+                Data.db.global.sync.onlyMaxLevelCharacters = not (Data.db.global.sync.onlyMaxLevelCharacters ~= false)
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Only sends characters at Retail's current maximum level.", nil, nil, nil, true)
             end)
             local setPasswordButton = menu:CreateButton(
               Data.db.global.sync.password ~= "" and ("Change Password: " .. Data.db.global.sync.password) or "Set Password",
@@ -2171,7 +2358,7 @@ function Module:RenderNow()
             )
             syncNowButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Sends every enabled character in your Main WoW Account right now, even if nothing changed, and prints why if it can't.", nil, nil, nil, true)
+              tooltip:AddLine("Sends every eligible character in your Main WoW Account right now, respecting Only Sync Max Level Characters, even if nothing changed, and prints why if it can't.", nil, nil, nil, true)
             end)
             local syncSettingsButton = menu:CreateButton(
               "Sync Addon Settings",
@@ -2509,9 +2696,45 @@ function Module:RenderNow()
     self.window.body.content:SetPoint("BOTTOMRIGHT", self.window.body, "BOTTOMRIGHT")
     self.window.body.content.scrollArea = CreateScrollArea(self.window.body.content, {
       horizontal = true,
+      hideHorizontalScrollBar = true,
       name = "$parentCharacterScroll",
     })
     self.window.body.content.scrollArea:SetAllPoints()
+
+    -- The AlterEgo logo/title doubles as a compact toggle for the row-label
+    -- sidebar. Keep this control in Main rather than LiqUI so it affects only
+    -- this window and leaves character cells untouched.
+    self.window.sidebarToggleButton = CreateFrame("Button", "$parentSidebarToggle", self.window.titlebar)
+    self.window.sidebarToggleButton:RegisterForClicks("LeftButtonUp")
+    self.window.sidebarToggleButton:SetFrameLevel(self.window.titlebar:GetFrameLevel() + 5)
+    SetBackgroundColor(self.window.sidebarToggleButton, 1, 1, 1, 0)
+    self.window.sidebarToggleButton:SetScript("OnEnter", function(button)
+      SetBackgroundColor(button, 1, 1, 1, 0.08)
+      local sidebarCollapsed = Data.db.global.liqui.windows.Main.sidebarCollapsed == true
+      GameTooltip:SetOwner(button, "ANCHOR_TOP")
+      GameTooltip:SetText(sidebarCollapsed and "Show row labels column" or "Hide row labels column", 1, 1, 1)
+      GameTooltip:AddLine(
+        sidebarCollapsed
+          and "Show the left column that labels each row in the main character grid."
+          or "Hide the left column that labels each row in the main character grid to give more horizontal space to your characters.",
+        nil, nil, nil, true
+      )
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine("Character information remains visible in every character column; only the shared row labels are hidden.", nil, nil, nil, true)
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine(sidebarCollapsed and "<Click to Show Row Labels>" or "<Click to Hide Row Labels>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+      GameTooltip:Show()
+    end)
+    self.window.sidebarToggleButton:SetScript("OnLeave", function(button)
+      SetBackgroundColor(button, 1, 1, 1, 0)
+      GameTooltip:Hide()
+    end)
+    self.window.sidebarToggleButton:SetScript("OnClick", function()
+      local settings = Data.db.global.liqui.windows.Main
+      settings.sidebarCollapsed = not (settings.sidebarCollapsed == true)
+      GameTooltip:Hide()
+      Module:Render()
+    end)
 
     -- Closing the main window starts a fresh Settings session next time.
     -- Merely closing the Settings dropdown itself keeps the saved position.
@@ -2547,6 +2770,20 @@ function Module:RenderNow()
   end
 
   local scrollContent = self.window.body.content.scrollArea.content
+  local sidebarCollapsed = mainWindowSettings.sidebarCollapsed == true
+
+  -- Collapsing the sidebar only changes the shared row-label column. The
+  -- character grid keeps rendering every cell exactly as before. Re-anchor
+  -- the content directly to the body so the freed width is usable.
+  self.window.body.sidebar:SetShown(not sidebarCollapsed)
+  self.window.body.content:ClearAllPoints()
+  if sidebarCollapsed then
+    self.window.body.content:SetPoint("TOPLEFT", self.window.body, "TOPLEFT")
+  else
+    self.window.body.content:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPRIGHT")
+  end
+  self.window.body.content:SetPoint("BOTTOMRIGHT", self.window.body, "BOTTOMRIGHT")
+
   EnsureRowHighlightPoller(self.window)
 
   do -- Titlebar: Affixes
@@ -2554,6 +2791,18 @@ function Module:RenderNow()
       self.window.titlebar.title:Hide()
     else
       self.window.titlebar.title:Show()
+    end
+
+    -- Make exactly the visible AlterEgo branding (logo + title, or logo only
+    -- when the title is suppressed for narrow character counts) clickable.
+    local sidebarToggleButton = self.window.sidebarToggleButton
+    sidebarToggleButton:ClearAllPoints()
+    sidebarToggleButton:SetPoint("TOPLEFT", self.window.titlebar, "TOPLEFT", 0, 0)
+    sidebarToggleButton:SetPoint("BOTTOMLEFT", self.window.titlebar, "BOTTOMLEFT", 0, 0)
+    if self.window.titlebar.title:IsShown() then
+      sidebarToggleButton:SetPoint("RIGHT", self.window.titlebar.title, "RIGHT", 6, 0)
+    else
+      sidebarToggleButton:SetPoint("RIGHT", self.window.titlebar.icon, "RIGHT", 6, 0)
     end
 
     if currentAffixes and TableCount(currentAffixes) > 0 and Data.db.global.showAffixHeader then
@@ -2616,21 +2865,30 @@ function Module:RenderNow()
         affixAnchor = affixFrame
       end)
 
-      self.window.dailyDelvesSeparator:ClearAllPoints()
-      self.window.dailyDelvesSeparator:SetPoint("LEFT", affixAnchor, "RIGHT", 8, 0)
-      self.window.dailyDelvesSeparator:Show()
-      self.window.dailyDelvesButton:ClearAllPoints()
-      self.window.dailyDelvesButton:SetPoint("LEFT", self.window.dailyDelvesSeparator, "RIGHT", 8, 0)
-      self.window.dailyDelvesButton:Show()
+      if Data.db.global.showDailyDelves ~= false then
+        self.window.dailyDelvesSeparator:ClearAllPoints()
+        self.window.dailyDelvesSeparator:SetPoint("LEFT", affixAnchor, "RIGHT", 8, 0)
+        self.window.dailyDelvesSeparator:Show()
+        self.window.dailyDelvesButton:ClearAllPoints()
+        self.window.dailyDelvesButton:SetPoint("LEFT", self.window.dailyDelvesSeparator, "RIGHT", 8, 0)
+        self.window.dailyDelvesButton:Show()
+      else
+        self.window.dailyDelvesSeparator:Hide()
+        self.window.dailyDelvesButton:Hide()
+      end
     else
       self.window.dailyDelvesSeparator:Hide()
-      self.window.dailyDelvesButton:ClearAllPoints()
-      if numCharacters < 3 then
-        self.window.dailyDelvesButton:SetPoint("LEFT", self.window.titlebar.icon, "RIGHT", 6, 0)
+      if Data.db.global.showDailyDelves ~= false then
+        self.window.dailyDelvesButton:ClearAllPoints()
+        if numCharacters < 3 then
+          self.window.dailyDelvesButton:SetPoint("LEFT", self.window.titlebar.icon, "RIGHT", 6, 0)
+        else
+          self.window.dailyDelvesButton:SetPoint("CENTER", self.window.titlebar, "CENTER", 0, 0)
+        end
+        self.window.dailyDelvesButton:Show()
       else
-        self.window.dailyDelvesButton:SetPoint("CENTER", self.window.titlebar, "CENTER", 0, 0)
+        self.window.dailyDelvesButton:Hide()
       end
-      self.window.dailyDelvesButton:Show()
     end
   end
 
@@ -4177,17 +4435,37 @@ function Module:RenderNow()
     end)
   end
 
-  local bodyWidth = math.min(windowWidth, windowWidthMax)
-  if numCharacters > 0 then
-    bodyWidth = bodyWidth + Constants.sizes.sidebar.width
+  local sidebarWidth = numCharacters > 0 and not sidebarCollapsed and Constants.sizes.sidebar.width or 0
+  local bodyWidth
+  if horizontalScrollWhenScaled and windowScale > 1 then
+    -- windowWidthMax is the maximum TOTAL unscaled body width at the current
+    -- scale, so reserve the fixed sidebar before sizing the character viewport.
+    local characterViewportWidthMax = math.max(1, windowWidthMax - sidebarWidth)
+    bodyWidth = math.min(windowWidth, characterViewportWidthMax) + sidebarWidth
+  else
+    -- Preserve the addon's existing sizing behavior when this feature is off
+    -- (and at 100% or lower scaling).
+    bodyWidth = math.min(windowWidth, windowWidthMax) + sidebarWidth
   end
   self.window:SetBodySize(bodyWidth, windowHeight)
   self.window.body.content.scrollArea:UpdateLayout(windowWidth, windowHeight)
 
   local zeroCharactersText = "|cffffffffHi there :-)|r\nEnable a character top right for AlterEgo to show you some goodies!"
   if numCharacters <= 0 then
-    if not Data.db.global.showZeroRatedCharacters and TableCount(Data:GetCharacters(true)) > 0 then
-      zeroCharactersText = zeroCharactersText .. "\n\n|cff00ee00New Season?|r\nYou are currently hiding characters with zero rating. If this is not your intention then enable the setting |cffffffffShow characters with zero rating|r"
+    local unfilteredCharacters = Data:GetCharacters(true)
+    local hasHiddenNonMaxCharacter = false
+    if not Data.db.global.showNonMaxLevelCharacters then
+      for _, character in ipairs(unfilteredCharacters) do
+        if not Data:IsMaxLevelCharacter(character) then
+          hasHiddenNonMaxCharacter = true
+          break
+        end
+      end
+    end
+    if hasHiddenNonMaxCharacter then
+      zeroCharactersText = zeroCharactersText .. "\n\n|cff00ee00Leveling alts?|r\nYou are currently hiding characters below the current expansion level cap. Enable |cffffffffShow Non Max Level Characters|r to display them."
+    elseif not Data.db.global.showZeroRatedCharacters and TableCount(unfilteredCharacters) > 0 then
+      zeroCharactersText = zeroCharactersText .. "\n\n|cff00ee00New Season?|r\nYou are currently hiding max-level characters with zero rating. If this is not your intention then enable the setting |cffffffffShow characters with zero rating|r"
     end
     self.window:ShowOverlay(zeroCharactersText)
   else
