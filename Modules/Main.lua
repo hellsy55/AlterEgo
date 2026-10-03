@@ -128,6 +128,25 @@ do
   }
 end
 
+do
+  local dialogName = "ALTEREGO_CONFIRM_CHANGE_MAIN_ACCOUNT"
+  StaticPopupDialogs[dialogName] = {
+    text = "Change Main WoW Account?\n\n%s is currently Main.\nSet %s as the new Main WoW Account?\n\nSync will send characters from the new Main account and protect them from incoming sync data.",
+    button1 = "Change Main",
+    button2 = CANCEL,
+    OnAccept = function(_, account)
+      if account then
+        Data:SetMainAccount(account.id)
+        if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+        Module:Render()
+      end
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
 -- What RequestPasswordThen should do once a non-empty password is
 -- actually confirmed via the popup below -- "enable" just turns Sync on,
 -- "syncNow" turns it on AND immediately force-syncs. This is also what
@@ -247,6 +266,9 @@ do
       if action == "enable" or action == "syncNow" or action == "syncSettings" then
         Data.db.global.sync.enabled = true
       end
+      if Data.db.global.sync.enabled and addon.Core.AnnounceSyncPresence then
+        addon.Core:AnnounceSyncPresence()
+      end
       if action == "syncNow" then
         addon.Core:ForceSyncBroadcast()
       elseif action == "syncSettings" then
@@ -332,8 +354,963 @@ do
   }
 end
 
+-- Guided setup for Multi-Account Sync. The tutorial deliberately stays shorter than the
+-- individual setting tooltips: it explains the order of operations, what each control does,
+-- and highlights where the user should click in the Main window.
+local SYNC_TUTORIAL_STEPS = {
+  {
+    title = "Open Multi-Account Sync Settings",
+    text = "All Sync controls live in Settings under Multi-Account Sync. Before configuring them, make sure AlterEgo is installed and enabled on every WoW account you want to connect, and that those clients can share a guild or party/raid addon channel.",
+    target = "syncSection",
+    location = "Settings > Multi-Account Sync",
+  },
+  {
+    title = "Choose Your Main WoW Account",
+    text = "Open Accounts & Characters and mark the WoW Account played by this AlterEgo installation as Main. Sync sends characters filed under that Main account. Characters received from another account stay in a separate WoW Account so they are not sent back in a loop.",
+    target = "accounts",
+    location = "Accounts & Characters",
+  },
+  {
+    title = "Set the Same Password Everywhere",
+    text = "Use Set Password and enter the exact same word or phrase on every WoW account you want to sync. This is only an AlterEgo Sync password, never your Battle.net password. Incoming data is accepted only when the password matches.",
+    target = "setPassword",
+    location = "Settings > Multi-Account Sync > Set Password",
+  },
+  {
+    title = "Choose a Sync Channel",
+    text = "Sync Channel decides how your accounts reach each other. \"Guild\" uses the guild addon channel. \"Party/Raid\" requires all accounts to be on the same group. \"Both\" uses every available channels. Choose a channel every account can access at the same time.",
+    target = "syncChannel",
+    location = "Settings > Multi-Account Sync > Sync Channel",
+  },
+  {
+    title = "Choose Which Characters to Send",
+    text = "Only Sync Max Level Characters is enabled by default. Leave it on to share only current max-level characters, or turn it off to include leveling characters. Character and WoW Account enable/disable choices are still respected.",
+    target = "onlyMaxLevel",
+    location = "Settings > Multi-Account Sync > Enable Sync > Only Sync Max Level Characters",
+  },
+  {
+    title = "Enable Sync on Every Account",
+    text = "Turn on Enable Sync on each WoW account. AlterEgo announces its presence, compares character versions with matching peers, and automatically sends changed or missing eligible data when a usable channel is available. Multi-Account Sync will pause for combat/encounter restrictions and resume remaining data afterward.",
+    target = "enableSync",
+    location = "Settings > Multi-Account Sync > Enable Sync",
+  },
+  {
+    title = "Test It with Sync Now",
+    text = "Click Sync Now on one account while the other account is online and reachable. AlterEgo asks matching peers what they already have, then sends only eligible characters that are missing or outdated and prints progress/results in chat.",
+    target = "syncNow",
+    location = "Settings > Multi-Account Sync > Sync Now",
+  },
+  {
+    title = "Optional: Sync Addon Settings",
+    text = "Sync Addon Settings shares AlterEgo display and behavior preferences with the other account. We recommend using it on the account where everything is already set up the way you want, so those settings can be shared with the new account. It only runs when you click it and confirm.",
+    target = "syncSettings",
+    location = "Settings > Multi-Account Sync > Sync Addon Settings",
+  },
+  {
+    title = "Sync Readiness Checklist",
+    text = "Use this live checklist to confirm the local setup, see whether another matching Sync peer is currently detected, and check the most recent confirmed character sync. When the required items are green, use Sync Now to force a version reconciliation.",
+    target = "syncNow",
+    location = "Settings > Multi-Account Sync > Sync Now",
+    readinessChecklist = true,
+  },
+}
+
+local syncTutorialFrame = nil
+-- Session-only tutorial progress. Reopening the guide resumes the last viewed step,
+-- while /reload or a new login naturally resets this local back to step 1.
+local syncTutorialSessionStep = 1
+local syncTutorialHighlight = nil
+local syncTutorialSettingsMenu = nil
+
+-- Dynamic parent rows in Blizzard's Menu API keep the text that existed when the
+-- description was created. Keep a direct handle to their current frame so a radio
+-- choice can update that visible parent label immediately instead of showing stale
+-- text until the entire Settings dropdown is reopened.
+local liveMenuLabelFrames = setmetatable({}, {__mode = "k"})
+local function BindLiveMenuLabel(description)
+  if not description or not description.AddInitializer then return end
+  description:AddInitializer(function(frame, desc)
+    liveMenuLabelFrames[description] = frame
+    if frame and frame.fontString then
+      frame.fontString:SetText(MenuUtil.GetElementText(desc))
+    end
+  end)
+end
+
+local function SetLiveMenuLabel(description, text)
+  if not description then return end
+  if MenuUtil.SetElementText then
+    MenuUtil.SetElementText(description, text)
+  else
+    description.text = text
+  end
+  local frame = liveMenuLabelFrames[description]
+  if frame and frame:IsShown() and frame.fontString then
+    frame.fontString:SetText(text)
+  end
+end
+
+local syncTutorialWindowStorage = nil
+local syncTutorialMenuTargets = {}
+local syncTutorialMenuTargetDescriptions = {}
+local syncTutorialMenuTargetText = {
+  mainAccount = function(text)
+    local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
+    local account = mainAccountId and Data.db.global.accounts[mainAccountId]
+    return account ~= nil and text:find(account.name, 1, true) == 1 and text:find("[Main]", 1, true) ~= nil
+  end,
+  syncSection = function(text) return text == "Multi-Account Sync" end,
+  enableSync = function(text) return text == "Enable Sync" end,
+  onlyMaxLevel = function(text) return text == "Only Sync Max Level Characters" end,
+  setPassword = function(text) return text == "Set Password" or text:match("^Change Password:") ~= nil end,
+  syncChannel = function(text) return text:match("^Sync Channel:") ~= nil end,
+  syncNow = function(text) return text == "Sync Now" end,
+  syncSettings = function(text) return text == "Sync Addon Settings" end,
+}
+
+local function IsSyncTutorialBlocked()
+  return InCombatLockdown() or (IsEncounterInProgress and IsEncounterInProgress())
+end
+
+local function IncreaseSyncTutorialFont(fontString, extraSize)
+  if not fontString or not fontString.GetFont or not fontString.SetFont then return end
+  local font, size, flags = fontString:GetFont()
+  if font and size then
+    fontString:SetFont(font, size + (extraSize or 2), flags)
+  end
+end
+
+local function GetSyncTutorialWindowStorage()
+  if syncTutorialWindowStorage then return syncTutorialWindowStorage end
+
+  local windows = Data.db.global.liqui.windows
+  windows.SyncTutorial = windows.SyncTutorial or {}
+  syncTutorialWindowStorage = windows.SyncTutorial
+
+  -- Scale/color/border behave like every other LiqUI window and persist normally,
+  -- but position is deliberately session-local: every fresh UI session starts at the high default anchor.
+  syncTutorialWindowStorage.point = nil
+  return syncTutorialWindowStorage
+end
+
+local function ApplyDefaultSyncTutorialPosition(frame)
+  local storage = GetSyncTutorialWindowStorage()
+  if not frame or storage.point then return end
+
+  frame:ClearAllPoints()
+  -- Start high on the screen while remaining horizontally centered. This keeps the
+  -- tutorial close to AlterEgo's confirmation-dialog area without covering the middle
+  -- of the gameplay view.
+  frame:SetPoint("TOP", UIParent, "TOP", 0, -90)
+
+  -- Save the resolved/clamped point for reopenings during this session. The next UI
+  -- session clears only this point while preserving the rest of the window preferences.
+  frame:SaveSettings()
+end
+
+---Find a Main-window titlebar button from its original config name. LiqUI stores the
+---button frames in the same order as the config entries, which is more reliable than
+---depending on generated global frame names (some button labels contain spaces).
+---@param configName string
+---@return Frame?
+local function GetMainTitlebarButton(configName)
+  local window = Module.window
+  if not window or not window.titlebarButtons or not window.options or not window.options.titlebarButtons then
+    return nil
+  end
+  for index, config in ipairs(window.options.titlebarButtons) do
+    if config.name == configName then
+      return window.titlebarButtons[index]
+    end
+  end
+  return nil
+end
+
+---Keep the live Blizzard_Menu frame for tutorial-relevant settings while that menu is open.
+---Those frames are temporary/recycled, so callers must still check IsShown() before using them.
+---@param key string
+---@param frame Frame
+---@param description table?
+local function RegisterSyncTutorialMenuTarget(key, frame, description)
+  syncTutorialMenuTargets[key] = frame
+  syncTutorialMenuTargetDescriptions[key] = description
+end
+
+local function IsLiveSyncTutorialMenuTarget(key, frame)
+  if not frame or not frame:IsShown() then return false end
+  local fontString = frame.fontString or frame.Text
+  local text = fontString and fontString:GetText() or ""
+  local matcher = syncTutorialMenuTargetText[key]
+  return matcher and matcher(text or "") or false
+end
+
+local function GetSyncTutorialTargetFrame(step)
+  if not step then return nil end
+
+  local exact = step.target and syncTutorialMenuTargets[step.target]
+  if IsLiveSyncTutorialMenuTarget(step.target, exact) then
+    return exact
+  end
+
+  -- The max-level option is a child submenu of Enable Sync. Until that submenu is open,
+  -- highlight its parent so the user knows exactly where to hover/click next.
+  if step.target == "onlyMaxLevel" then
+    local enableSync = syncTutorialMenuTargets.enableSync
+    if IsLiveSyncTutorialMenuTarget("enableSync", enableSync) then
+      return enableSync
+    end
+  end
+
+  if step.target == "accounts" or step.target == "mainAccount" then
+    return GetMainTitlebarButton("Accounts & Characters")
+  end
+
+  -- Every other Sync control lives below the Settings gear. If its exact menu row is not
+  -- currently visible, point to the gear first; opening it lets AddInitializer replace this
+  -- fallback with the exact row automatically.
+  local window = Module.window
+  return window and window.titlebar and window.titlebar.SettingsButton or nil
+end
+
+---Scroll the root Settings menu enough to bring a tutorial target into view without
+---selecting it. Menu rows are ordinary pooled frames, so this is purely navigation.
+---@param key string
+local function ScrollSyncTutorialTargetIntoView(key)
+  local settingsMenu = syncTutorialSettingsMenu
+  local target = syncTutorialMenuTargets[key]
+  if not settingsMenu or not settingsMenu:IsShown() or not target or not target:IsShown() then return end
+  local scrollBox = settingsMenu.ScrollBox
+  if not scrollBox or not scrollBox:IsShown() then return end
+
+  local viewTop, viewBottom = scrollBox:GetTop(), scrollBox:GetBottom()
+  local targetTop, targetBottom = target:GetTop(), target:GetBottom()
+  local scrollRange = scrollBox.GetDerivedScrollRange and scrollBox:GetDerivedScrollRange() or 0
+  if not viewTop or not viewBottom or not targetTop or not targetBottom or not scrollRange or scrollRange <= 0 then
+    return
+  end
+
+  local percentage = scrollBox:GetScrollPercentage() or 0
+  local padding = 8
+  if targetTop > viewTop - padding then
+    percentage = percentage - ((targetTop - (viewTop - padding)) / scrollRange)
+  elseif targetBottom < viewBottom + padding then
+    percentage = percentage + (((viewBottom + padding) - targetBottom) / scrollRange)
+  else
+    return
+  end
+
+  percentage = math.max(0, math.min(1, percentage))
+  scrollBox:SetScrollPercentage(percentage, ScrollBoxConstants.NoScrollInterpolation)
+  Module.settingsMenuScrollPercentage = percentage
+end
+
+---Navigate the tutorial to the control for the current step without invoking that
+---control's responder. DropdownButton:OpenMenu and description:ForceOpenSubmenu only
+---open UI; they do not toggle checkboxes, choose radios, or press buttons.
+---@param step table
+local function NavigateSyncTutorialToStep(step)
+  if not step then return end
+  local window = Module.window
+  if not window or not window:IsShown() then return end
+
+  if step.target == "accounts" or step.target == "mainAccount" then
+    local accountsButton = GetMainTitlebarButton("Accounts & Characters")
+    if accountsButton and accountsButton.OpenMenu then
+      accountsButton:OpenMenu()
+    end
+
+    -- For readiness failures caused by having no selected Main-account
+    -- characters, go one step further and open the Main account's character
+    -- submenu. This is navigation only; it never toggles the account or any
+    -- character checkbox automatically.
+    if step.target == "mainAccount" then
+      C_Timer.After(0, function()
+        if not syncTutorialFrame or not syncTutorialFrame:IsShown() then return end
+        local description = syncTutorialMenuTargetDescriptions.mainAccount
+        if description and description.CanOpenSubmenu and description:CanOpenSubmenu() then
+          description:ForceOpenSubmenu()
+        end
+      end)
+    end
+    return
+  end
+
+  local settingsButton = window.titlebar and window.titlebar.SettingsButton
+  if not settingsButton or not settingsButton.OpenMenu then return end
+  if not settingsButton:IsMenuOpen() then
+    settingsButton:OpenMenu()
+  end
+
+  -- Let Blizzard finish acquiring/repositioning the scrolling menu before moving it.
+  C_Timer.After(0, function()
+    if not syncTutorialFrame or not syncTutorialFrame:IsShown() then return end
+
+    local rootTarget = step.target == "onlyMaxLevel" and "enableSync" or step.target
+    ScrollSyncTutorialTargetIntoView(rootTarget)
+
+    C_Timer.After(0, function()
+      if not syncTutorialFrame or not syncTutorialFrame:IsShown() then return end
+
+      if step.target == "onlyMaxLevel" then
+        local description = syncTutorialMenuTargetDescriptions.enableSync
+        if description and description.CanOpenSubmenu and description:CanOpenSubmenu() then
+          description:ForceOpenSubmenu()
+        end
+      elseif step.target == "syncChannel" then
+        local description = syncTutorialMenuTargetDescriptions.syncChannel
+        if description and description.CanOpenSubmenu and description:CanOpenSubmenu() then
+          description:ForceOpenSubmenu()
+        end
+      end
+
+    end)
+  end)
+end
+
+local function EnsureSyncTutorialHighlight()
+  if syncTutorialHighlight then return syncTutorialHighlight end
+
+  local highlight = CreateFrame("Frame", addon.name .. "SyncTutorialHighlight", UIParent, "BackdropTemplate")
+  highlight:SetFrameStrata("TOOLTIP")
+  highlight:SetFrameLevel(10000)
+  highlight:EnableMouse(false)
+  highlight:SetBackdrop({
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    edgeSize = 12,
+    insets = { left = 2, right = 2, top = 2, bottom = 2 },
+  })
+  highlight:SetBackdropBorderColor(1, 0.82, 0, 1)
+  highlight.fill = highlight:CreateTexture(nil, "BACKGROUND")
+  highlight.fill:SetAllPoints()
+  highlight.fill:SetColorTexture(1, 0.82, 0, 0.08)
+  highlight:Hide()
+  highlight:SetScript("OnUpdate", function(self)
+    if not syncTutorialFrame or not syncTutorialFrame:IsShown() then
+      self:Hide()
+      return
+    end
+
+    local step = SYNC_TUTORIAL_STEPS[syncTutorialFrame.stepIndex or 1]
+    if syncTutorialFrame.highlightTarget then
+      step = { target = syncTutorialFrame.highlightTarget }
+    end
+    local target = GetSyncTutorialTargetFrame(step)
+    if not target or not target:IsVisible() then
+      self:Hide()
+      return
+    end
+
+    self:ClearAllPoints()
+    self:SetPoint("TOPLEFT", target, "TOPLEFT", -4, 4)
+    self:SetPoint("BOTTOMRIGHT", target, "BOTTOMRIGHT", 4, -4)
+    self:SetAlpha(0.72 + 0.22 * math.sin(GetTime() * 4))
+    self:Show()
+  end)
+
+  syncTutorialHighlight = highlight
+  return highlight
+end
+
+local function HideSyncTutorialHighlight()
+  if syncTutorialHighlight then
+    syncTutorialHighlight:Hide()
+  end
+end
+
+local function GetSyncTutorialEligibleCharacterStatus()
+  local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
+  local mainAccount = mainAccountId and Data.db.global.accounts[mainAccountId]
+  local allMainCharacters = mainAccountId and Data:GetCharactersByAccount(mainAccountId, true) or {}
+  local eligibleCharacters = Data.GetSyncEligibleCharacters and Data:GetSyncEligibleCharacters() or Data:GetCharacters(true)
+  local onlyMaxLevel = Data.db.global.sync.onlyMaxLevelCharacters ~= false
+
+  local eligibleCount = 0
+  for _, character in ipairs(eligibleCharacters) do
+    if not onlyMaxLevel or Data:IsMaxLevelCharacter(character) then
+      eligibleCount = eligibleCount + 1
+    end
+  end
+
+  local enabledMainCount = #eligibleCharacters
+  local totalMainCount = #allMainCharacters
+  local detail = format("%d ready to send", eligibleCount)
+  local target = mainAccountId and "mainAccount" or "accounts"
+  local buttonText = "Open Main Account"
+
+  if not mainAccountId then
+    detail = "0 ready; Main account not selected"
+    target = "accounts"
+    buttonText = "Open Accounts"
+  elseif mainAccount and mainAccount.enabled == false then
+    detail = "0 ready; Main account tracking is off"
+    target = "mainAccount"
+    buttonText = "Open Main Account"
+  elseif totalMainCount == 0 then
+    detail = "0 ready; no characters in Main account"
+    target = "mainAccount"
+    buttonText = "Open Main Account"
+  elseif enabledMainCount == 0 then
+    detail = "0 ready; no Main account characters selected"
+    target = "mainAccount"
+    buttonText = "Open Main Account"
+  elseif onlyMaxLevel and eligibleCount == 0 then
+    local maxLevel = Data.GetCurrentMaxLevel and Data:GetCurrentMaxLevel()
+    detail = maxLevel
+      and format("0 ready; %d selected, none detected at level %d", enabledMainCount, maxLevel)
+      or format("0 ready; %d selected, max level unavailable", enabledMainCount)
+    target = "mainAccount"
+  end
+
+  return eligibleCount, detail, target, buttonText
+end
+
+local function GetSyncTutorialChannelStatus()
+  local setting = Data.db.global.sync.channel or "GUILD"
+  local guildAvailable = IsInGuild()
+  local groupAvailable = IsInRaid() or IsInGroup()
+
+  if setting == "GUILD" then
+    return guildAvailable, guildAvailable and "Guild available" or "Guild unavailable"
+  elseif setting == "PARTY" then
+    return groupAvailable, groupAvailable and (IsInRaid() and "Raid available" or "Party available") or "Party/Raid unavailable"
+  end
+
+  local available = {}
+  if guildAvailable then table.insert(available, "Guild") end
+  if groupAvailable then table.insert(available, IsInRaid() and "Raid" or "Party") end
+  if #available > 0 then
+    return true, "Both selected; available: " .. table.concat(available, " + ")
+  end
+  return false, "No selected channel is available"
+end
+
+local function GetSyncTutorialReadinessRows()
+  local rows = {}
+  local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
+  local mainAccount = mainAccountId and Data.db.global.accounts[mainAccountId]
+  table.insert(rows, {
+    ready = mainAccountId ~= nil,
+    label = "Main WoW Account",
+    detail = mainAccount and mainAccount.name or "Not selected",
+    target = "accounts",
+    buttonText = "Open Accounts",
+  })
+
+  local password = Data.db.global.sync.password
+  table.insert(rows, {
+    ready = password ~= nil and password ~= "",
+    label = "Password",
+    detail = (password ~= nil and password ~= "") and "Configured" or "Not configured",
+    target = "setPassword",
+    buttonText = "Open Password",
+  })
+
+  table.insert(rows, {
+    ready = Data.db.global.sync.enabled == true,
+    label = "Enable Sync",
+    detail = Data.db.global.sync.enabled and "On" or "Off",
+    target = "enableSync",
+    buttonText = "Open Enable Sync",
+  })
+
+  local channelReady, channelDetail = GetSyncTutorialChannelStatus()
+  table.insert(rows, {
+    ready = channelReady,
+    label = "Sync Channel",
+    detail = channelDetail,
+    target = "syncChannel",
+    buttonText = "Open Channel",
+  })
+
+  local eligibleCount, eligibleDetail, eligibleTarget, eligibleButtonText = GetSyncTutorialEligibleCharacterStatus()
+  table.insert(rows, {
+    ready = eligibleCount > 0,
+    label = "Eligible Characters",
+    detail = eligibleDetail,
+    target = eligibleTarget,
+    buttonText = eligibleButtonText,
+  })
+
+  local peerStatus = addon.Core.GetSyncPeerStatus and addon.Core:GetSyncPeerStatus() or { count = 0, names = {}, lastSuccessfulSyncAt = 0, lastSuccessfulSyncPeer = "" }
+  local peerNames = peerStatus.names or {}
+  table.insert(rows, {
+    ready = (peerStatus.count or 0) > 0,
+    label = "Sync Peer",
+    detail = (peerStatus.count or 0) > 0 and format("Detected: %s", table.concat(peerNames, ", ")) or "No matching peer detected",
+  })
+
+  local lastSyncAt = tonumber(peerStatus.lastSuccessfulSyncAt) or 0
+  local lastSyncPeer = peerStatus.lastSuccessfulSyncPeer or ""
+  table.insert(rows, {
+    ready = lastSyncAt > 0,
+    informational = true,
+    label = "Last Successful Sync",
+    detail = lastSyncAt > 0 and format("%s%s", date("%Y-%m-%d %H:%M", lastSyncAt), lastSyncPeer ~= "" and (" with " .. lastSyncPeer) or "") or "No confirmed character sync yet",
+  })
+
+  local blocked = IsSyncTutorialBlocked()
+  table.insert(rows, {
+    ready = not blocked,
+    label = "Combat / Encounter",
+    detail = blocked and "Blocked until combat/encounter ends" or "Clear",
+  })
+
+  return rows
+end
+
+local function RefreshSyncTutorialReadinessChecklist()
+  if not syncTutorialFrame or not syncTutorialFrame.readinessPanel then return end
+  local step = SYNC_TUTORIAL_STEPS[syncTutorialFrame.stepIndex or 1]
+  local show = step and step.readinessChecklist == true
+  syncTutorialFrame.readinessPanel:SetShown(show)
+  if not show then return end
+
+  local rows = GetSyncTutorialReadinessRows()
+  local allReady = true
+  for index, row in ipairs(rows) do
+    if not row.informational then
+      allReady = allReady and row.ready
+    end
+    local rowFrame = syncTutorialFrame.readinessRows[index]
+    if rowFrame then
+      local state
+      if row.informational and not row.ready then
+        state = "|cff66b3ffINFO|r"
+      else
+        state = row.ready and "|cff55dd77READY|r" or "|cffff6666CHECK|r"
+      end
+      rowFrame.text:SetText(format("%s  %s: |cffffffff%s|r", state, row.label, row.detail))
+      rowFrame.target = row.target
+      rowFrame.text:ClearAllPoints()
+      rowFrame.text:SetPoint("LEFT", rowFrame, "LEFT", 0, 0)
+      rowFrame.text:SetPoint("RIGHT", rowFrame, "RIGHT", row.target and -136 or 0, 0)
+      rowFrame.openButton:SetShown(row.target ~= nil)
+      rowFrame.openButton:SetEnabled(row.target ~= nil)
+      rowFrame.openButton:SetText(row.buttonText or "Open")
+      rowFrame.openPulse:SetShown(row.target ~= nil and not row.ready and not row.informational)
+    end
+  end
+
+  if syncTutorialFrame.readinessSummary then
+    if allReady then
+      syncTutorialFrame.readinessSummary:SetText("|cff55dd77Local setup is ready.|r  Use Sync Now to test the connection.")
+    else
+      syncTutorialFrame.readinessSummary:SetText("|cffffcc55Complete the items marked CHECK.|r  Use the shortcut buttons to open the related setting.")
+    end
+  end
+  if syncTutorialFrame.readinessSyncNowButton then
+    syncTutorialFrame.readinessSyncNowButton:SetShown(allReady)
+    syncTutorialFrame.readinessSyncNowPulse:SetShown(allReady)
+  end
+  if syncTutorialFrame.readinessSummary then
+    syncTutorialFrame.readinessSummary:ClearAllPoints()
+    syncTutorialFrame.readinessSummary:SetPoint("TOPLEFT", syncTutorialFrame.readinessPanel, "TOPLEFT", 12, -272)
+    if allReady then
+      syncTutorialFrame.readinessSummary:SetPoint("RIGHT", syncTutorialFrame.readinessSyncNowButton, "LEFT", -10, 0)
+    else
+      syncTutorialFrame.readinessSummary:SetPoint("RIGHT", syncTutorialFrame.readinessPanel, "RIGHT", -12, 0)
+    end
+  end
+end
+
+local function RefreshSyncTutorial()
+  if not syncTutorialFrame then return end
+
+  local index = math.max(1, math.min(syncTutorialFrame.stepIndex or 1, #SYNC_TUTORIAL_STEPS))
+  syncTutorialFrame.stepIndex = index
+  syncTutorialSessionStep = index
+  local step = SYNC_TUTORIAL_STEPS[index]
+
+  syncTutorialFrame.stepCounter:SetText(format("STEP %d / %d", index, #SYNC_TUTORIAL_STEPS))
+  syncTutorialFrame.stepTitle:SetText(step.title)
+  syncTutorialFrame.stepText:SetText(step.text)
+  syncTutorialFrame.locationText:SetText(GREEN_FONT_COLOR:WrapTextInColorCode("Look here: ") .. step.location)
+  syncTutorialFrame.previousButton:SetEnabled(index > 1)
+  syncTutorialFrame.nextButton:SetText(index == #SYNC_TUTORIAL_STEPS and "Done" or "Next")
+
+  for dotIndex, dot in ipairs(syncTutorialFrame.progressDots) do
+    if dotIndex == index then
+      dot:SetColorTexture(1, 0.82, 0, 1)
+    elseif dotIndex < index then
+      dot:SetColorTexture(0.35, 0.85, 0.45, 0.8)
+    else
+      dot:SetColorTexture(0.45, 0.45, 0.45, 0.5)
+    end
+  end
+
+  RefreshSyncTutorialReadinessChecklist()
+  EnsureSyncTutorialHighlight():Show()
+end
+
+local function HideSyncTutorial()
+  if syncTutorialFrame and syncTutorialFrame:IsShown() then
+    syncTutorialFrame:Hide()
+  end
+  HideSyncTutorialHighlight()
+end
+
+function Module:ShowSyncTutorial()
+  if not syncTutorialFrame then
+    -- Reuse LiqUI's own Window element so the tutorial inherits AlterEgo's standard titlebar,
+    -- border, background, drag behavior, close button, and overall visual language.
+    local frame = LibLiqUI:NewElement("Window", {
+      name = addon.name .. "SyncTutorial",
+      title = "Multi-Account Sync Tutorial",
+      icon = Constants.media.LogoTransparent,
+      width = 620,
+      height = 660,
+      border = 1,
+      storage = GetSyncTutorialWindowStorage(),
+    })
+    frame:SetFrameStrata("DIALOG")
+    frame:SetToplevel(true)
+    frame:SetClampedToScreen(true)
+
+    -- Keep LiqUI's normal Settings cog. Scale/color/border persist like other windows;
+    -- only the tutorial position resets at the start of each UI session.
+    if frame.titlebar and frame.titlebar.title then
+      IncreaseSyncTutorialFont(frame.titlebar.title, 2)
+    end
+
+    local body = frame.body
+
+    frame.header = body:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.header:SetPoint("TOPLEFT", body, "TOPLEFT", 24, -20)
+    frame.header:SetText("GUIDED MULTI-ACCOUNT SETUP")
+    frame.header:SetTextColor(0.7, 0.7, 0.7, 1)
+    IncreaseSyncTutorialFont(frame.header, 2)
+
+    frame.stepCounter = body:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.stepCounter:SetPoint("TOPRIGHT", body, "TOPRIGHT", -24, -20)
+    frame.stepCounter:SetTextColor(0.7, 0.7, 0.7, 1)
+    IncreaseSyncTutorialFont(frame.stepCounter, 2)
+
+    frame.progressDots = {}
+    frame.progressButtons = {}
+    for index = 1, #SYNC_TUTORIAL_STEPS do
+      local stepIndex = index
+      local stepButton = CreateFrame("Button", nil, body)
+      stepButton:SetSize(46, 16)
+      if index == 1 then
+        stepButton:SetPoint("TOPLEFT", body, "TOPLEFT", 24, -36)
+      else
+        stepButton:SetPoint("LEFT", frame.progressButtons[index - 1], "RIGHT", 4, 0)
+      end
+
+      local dot = stepButton:CreateTexture(nil, "ARTWORK")
+      dot:SetSize(46, 3)
+      dot:SetPoint("CENTER")
+      frame.progressDots[index] = dot
+      frame.progressButtons[index] = stepButton
+
+      stepButton:SetScript("OnClick", function()
+        frame.highlightTarget = nil
+        frame.stepIndex = stepIndex
+        RefreshSyncTutorial()
+      end)
+      stepButton:SetScript("OnEnter", function(button)
+        dot:SetAlpha(1)
+        GameTooltip:SetOwner(button, "ANCHOR_TOP")
+        GameTooltip:SetText(format("Step %d: %s", stepIndex, SYNC_TUTORIAL_STEPS[stepIndex].title), 1, 1, 1)
+        GameTooltip:AddLine("Click to jump directly to this step.", nil, nil, nil, true)
+        GameTooltip:Show()
+      end)
+      stepButton:SetScript("OnLeave", function()
+        dot:SetAlpha(0.9)
+        GameTooltip:Hide()
+      end)
+    end
+
+    frame.locationPanel = CreateFrame("Button", nil, body)
+    frame.locationPanel:SetPoint("TOPLEFT", body, "TOPLEFT", 24, -62)
+    frame.locationPanel:SetPoint("TOPRIGHT", body, "TOPRIGHT", -24, -62)
+    frame.locationPanel:SetHeight(44)
+    frame.locationPanel:EnableMouse(true)
+    frame.locationPanel:RegisterForClicks("LeftButtonUp")
+    SetBackgroundColor(frame.locationPanel, 1, 1, 1, 0.06)
+    frame.locationPanel:SetScript("OnEnter", function(panel)
+      SetBackgroundColor(panel, 1, 1, 1, 0.12)
+    end)
+    frame.locationPanel:SetScript("OnLeave", function(panel)
+      SetBackgroundColor(panel, 1, 1, 1, 0.06)
+    end)
+
+    -- Make the navigation affordance unmistakable without triggering any setting itself.
+    frame.locationPulse = CreateFrame("Frame", nil, frame.locationPanel, "BackdropTemplate")
+    frame.locationPulse:SetPoint("TOPLEFT", frame.locationPanel, "TOPLEFT", -2, 2)
+    frame.locationPulse:SetPoint("BOTTOMRIGHT", frame.locationPanel, "BOTTOMRIGHT", 2, -2)
+    frame.locationPulse:SetFrameLevel(frame.locationPanel:GetFrameLevel() + 3)
+    frame.locationPulse:EnableMouse(false)
+    frame.locationPulse:SetBackdrop({
+      edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+      edgeSize = 12,
+      insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    frame.locationPulse:SetBackdropBorderColor(1, 0.82, 0, 0.85)
+    frame.locationPulse:SetScript("OnUpdate", function(pulse)
+      pulse:SetAlpha(0.58 + 0.30 * math.sin(GetTime() * 4.5))
+    end)
+    frame.locationPanel:SetScript("OnClick", function()
+      local step = SYNC_TUTORIAL_STEPS[frame.stepIndex or 1]
+      -- Defer until after this click finishes so an already-open Blizzard menu can close cleanly
+      -- before the requested dropdown/submenu is opened.
+      C_Timer.After(0, function()
+        NavigateSyncTutorialToStep(step)
+      end)
+    end)
+
+    frame.locationIcon = frame.locationPanel:CreateTexture(nil, "ARTWORK")
+    frame.locationIcon:SetPoint("LEFT", frame.locationPanel, "LEFT", 10, 0)
+    frame.locationIcon:SetSize(18, 18)
+    frame.locationIcon:SetTexture(Constants.media.LogoTransparent)
+
+    frame.clickHereText = frame.locationPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.clickHereText:SetPoint("RIGHT", frame.locationPanel, "RIGHT", -12, 0)
+    frame.clickHereText:SetText("<  CLICK HERE")
+    frame.clickHereText:SetTextColor(1, 0.82, 0, 1)
+    IncreaseSyncTutorialFont(frame.clickHereText, 3)
+
+    frame.locationText = frame.locationPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.locationText:SetPoint("LEFT", frame.locationIcon, "RIGHT", 8, 0)
+    frame.locationText:SetPoint("RIGHT", frame.clickHereText, "LEFT", -14, 0)
+    frame.locationText:SetJustifyH("LEFT")
+    IncreaseSyncTutorialFont(frame.locationText, 3)
+
+    frame.stepTitle = body:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    frame.stepTitle:SetPoint("TOPLEFT", frame.locationPanel, "BOTTOMLEFT", 0, -22)
+    frame.stepTitle:SetPoint("RIGHT", body, "RIGHT", -24, 0)
+    frame.stepTitle:SetJustifyH("LEFT")
+    IncreaseSyncTutorialFont(frame.stepTitle, 3)
+
+    frame.stepText = body:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    frame.stepText:SetPoint("TOPLEFT", frame.stepTitle, "BOTTOMLEFT", 0, -14)
+    frame.stepText:SetPoint("RIGHT", body, "RIGHT", -24, 0)
+    frame.stepText:SetJustifyH("LEFT")
+    frame.stepText:SetJustifyV("TOP")
+    frame.stepText:SetWordWrap(true)
+    IncreaseSyncTutorialFont(frame.stepText, 3)
+
+    frame.readinessPanel = CreateFrame("Frame", nil, body, "BackdropTemplate")
+    frame.readinessPanel:SetPoint("TOPLEFT", frame.stepText, "BOTTOMLEFT", 0, -18)
+    frame.readinessPanel:SetPoint("RIGHT", body, "RIGHT", -24, 0)
+    frame.readinessPanel:SetHeight(330)
+    frame.readinessPanel:SetBackdrop({
+      bgFile = "Interface\\Buttons\\WHITE8X8",
+      edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+      edgeSize = 10,
+      insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    frame.readinessPanel:SetBackdropColor(0, 0, 0, 0.24)
+    frame.readinessPanel:SetBackdropBorderColor(0.45, 0.45, 0.45, 0.75)
+
+    frame.readinessHeader = frame.readinessPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.readinessHeader:SetPoint("TOPLEFT", frame.readinessPanel, "TOPLEFT", 12, -10)
+    frame.readinessHeader:SetText("LIVE READINESS")
+    IncreaseSyncTutorialFont(frame.readinessHeader, 2)
+
+    frame.readinessRows = {}
+    for index = 1, 8 do
+      local rowFrame = CreateFrame("Frame", nil, frame.readinessPanel)
+      rowFrame:SetPoint("TOPLEFT", frame.readinessPanel, "TOPLEFT", 12, -34 - ((index - 1) * 28))
+      rowFrame:SetPoint("RIGHT", frame.readinessPanel, "RIGHT", -12, 0)
+      rowFrame:SetHeight(26)
+
+      rowFrame.text = rowFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      rowFrame.text:SetPoint("LEFT", rowFrame, "LEFT", 0, 0)
+      rowFrame.text:SetPoint("RIGHT", rowFrame, "RIGHT", -136, 0)
+      rowFrame.text:SetJustifyH("LEFT")
+      rowFrame.text:SetWordWrap(false)
+      IncreaseSyncTutorialFont(rowFrame.text, 2)
+
+      rowFrame.openButton = CreateFrame("Button", nil, rowFrame, "UIPanelButtonTemplate")
+      rowFrame.openButton:SetSize(126, 24)
+      rowFrame.openButton:SetPoint("RIGHT", rowFrame, "RIGHT", 0, 0)
+      rowFrame.openButton:SetText("Open")
+      IncreaseSyncTutorialFont(rowFrame.openButton:GetFontString(), 1)
+      rowFrame.openButton:SetScript("OnClick", function()
+        if not rowFrame.target then return end
+        frame.highlightTarget = rowFrame.target
+        C_Timer.After(0, function()
+          NavigateSyncTutorialToStep({ target = rowFrame.target })
+        end)
+      end)
+
+      rowFrame.openPulse = CreateFrame("Frame", nil, rowFrame.openButton, "BackdropTemplate")
+      rowFrame.openPulse:SetPoint("TOPLEFT", rowFrame.openButton, "TOPLEFT", -2, 2)
+      rowFrame.openPulse:SetPoint("BOTTOMRIGHT", rowFrame.openButton, "BOTTOMRIGHT", 2, -2)
+      rowFrame.openPulse:SetFrameLevel(rowFrame.openButton:GetFrameLevel() + 3)
+      rowFrame.openPulse:EnableMouse(false)
+      rowFrame.openPulse:SetBackdrop({
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+      })
+      rowFrame.openPulse:SetBackdropBorderColor(1, 0.82, 0, 0.9)
+      rowFrame.openPulse:SetScript("OnUpdate", function(pulse)
+        pulse:SetAlpha(0.58 + 0.30 * math.sin(GetTime() * 4.5))
+      end)
+      rowFrame.openPulse:Hide()
+
+      frame.readinessRows[index] = rowFrame
+    end
+
+    frame.readinessSyncNowButton = CreateFrame("Button", nil, frame.readinessPanel, "UIPanelButtonTemplate")
+    frame.readinessSyncNowButton:SetSize(126, 24)
+    -- Keep the shortcut on the same visual row as the readiness summary
+    -- ("Local setup is ready") instead of dropping it to the panel bottom.
+    frame.readinessSyncNowButton:SetPoint("TOPRIGHT", frame.readinessPanel, "TOPRIGHT", -12, -266)
+    frame.readinessSyncNowButton:SetText("Open Sync Now")
+    IncreaseSyncTutorialFont(frame.readinessSyncNowButton:GetFontString(), 1)
+    frame.readinessSyncNowButton:SetScript("OnClick", function()
+      frame.highlightTarget = "syncNow"
+      C_Timer.After(0, function()
+        NavigateSyncTutorialToStep({ target = "syncNow" })
+      end)
+    end)
+    frame.readinessSyncNowButton:Hide()
+
+    frame.readinessSyncNowPulse = CreateFrame("Frame", nil, frame.readinessSyncNowButton, "BackdropTemplate")
+    frame.readinessSyncNowPulse:SetPoint("TOPLEFT", frame.readinessSyncNowButton, "TOPLEFT", -2, 2)
+    frame.readinessSyncNowPulse:SetPoint("BOTTOMRIGHT", frame.readinessSyncNowButton, "BOTTOMRIGHT", 2, -2)
+    frame.readinessSyncNowPulse:SetFrameLevel(frame.readinessSyncNowButton:GetFrameLevel() + 3)
+    frame.readinessSyncNowPulse:EnableMouse(false)
+    frame.readinessSyncNowPulse:SetBackdrop({
+      edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+      edgeSize = 10,
+      insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    frame.readinessSyncNowPulse:SetBackdropBorderColor(1, 0.82, 0, 0.9)
+    frame.readinessSyncNowPulse:SetScript("OnUpdate", function(pulse)
+      pulse:SetAlpha(0.58 + 0.30 * math.sin(GetTime() * 4.5))
+    end)
+    frame.readinessSyncNowPulse:Hide()
+
+    frame.readinessSummary = frame.readinessPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.readinessSummary:SetPoint("TOPLEFT", frame.readinessPanel, "TOPLEFT", 12, -272)
+    frame.readinessSummary:SetPoint("RIGHT", frame.readinessPanel, "RIGHT", -12, 0)
+    frame.readinessSummary:SetHeight(44)
+    frame.readinessSummary:SetJustifyH("LEFT")
+    frame.readinessSummary:SetJustifyV("TOP")
+    frame.readinessSummary:SetWordWrap(true)
+    IncreaseSyncTutorialFont(frame.readinessSummary, 1)
+
+    frame.readinessPanel.refreshElapsed = 0
+    frame.readinessPanel:SetScript("OnUpdate", function(panel, elapsed)
+      if not panel:IsShown() then return end
+      panel.refreshElapsed = (panel.refreshElapsed or 0) + elapsed
+      if panel.refreshElapsed < 0.4 then return end
+      panel.refreshElapsed = 0
+      RefreshSyncTutorialReadinessChecklist()
+    end)
+    frame.readinessPanel:Hide()
+
+    frame.hint = body:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    frame.hint:SetPoint("BOTTOM", body, "BOTTOM", 0, 66)
+    frame.hint:SetText("Click Look here to open the highlighted setting so you can set it up.")
+    IncreaseSyncTutorialFont(frame.hint, 2)
+
+    frame.previousButton = CreateFrame("Button", nil, body, "UIPanelButtonTemplate")
+    frame.previousButton:SetSize(120, 28)
+    frame.previousButton:SetPoint("BOTTOMLEFT", body, "BOTTOMLEFT", 24, 22)
+    frame.previousButton:SetText("Previous")
+    IncreaseSyncTutorialFont(frame.previousButton:GetFontString(), 2)
+    frame.previousButton:SetScript("OnClick", function()
+      frame.highlightTarget = nil
+      frame.stepIndex = math.max(1, (frame.stepIndex or 1) - 1)
+      RefreshSyncTutorial()
+    end)
+
+    frame.nextButton = CreateFrame("Button", nil, body, "UIPanelButtonTemplate")
+    frame.nextButton:SetSize(120, 28)
+    frame.nextButton:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", -24, 22)
+    IncreaseSyncTutorialFont(frame.nextButton:GetFontString(), 2)
+    frame.nextButton:SetScript("OnClick", function()
+      if (frame.stepIndex or 1) >= #SYNC_TUTORIAL_STEPS then
+        HideSyncTutorial()
+        return
+      end
+      frame.highlightTarget = nil
+      frame.stepIndex = (frame.stepIndex or 1) + 1
+      RefreshSyncTutorial()
+    end)
+
+    frame:HookScript("OnHide", HideSyncTutorialHighlight)
+    syncTutorialFrame = frame
+  end
+
+  syncTutorialFrame.stepIndex = syncTutorialSessionStep
+  syncTutorialFrame.highlightTarget = nil
+  RefreshSyncTutorial()
+  syncTutorialFrame:Show()
+
+  -- First open in each UI session defaults high on the screen. LiqUI then stores any
+  -- user drag in our session-only table, so reopening remembers it until /reload/logout.
+  ApplyDefaultSyncTutorialPosition(syncTutorialFrame)
+end
+
+
 local CHARACTER_WIDTH = 130
 local RAIDS_ROW_HEIGHT = 48
+
+-- Raid boss icons are laid out against the *current* character-column width.
+-- A single character can grow wider than CHARACTER_WIDTH when the titlebar needs
+-- extra room, so using the fixed width here would leave the icon grid stuck on
+-- the left side of the expanded column.
+local function LayoutRaidEncounterIcons(difficultyFrame, numEncounters, columnWidth)
+  if not difficultyFrame or not difficultyFrame.iconFrames or not numEncounters or numEncounters <= 0 then return end
+
+  columnWidth = math.max(columnWidth or CHARACTER_WIDTH, 1)
+  local gapWidth = 6
+  local encounterX = 3
+  local halfEncounters = math.ceil(numEncounters / 2)
+  local gapCount = halfEncounters + 1
+  local gapWidthTotal = gapCount * gapWidth
+  local iconSize = math.max(1, (columnWidth - gapWidthTotal) / (halfEncounters + (numEncounters % 2 == 0 and 0.5 or 0)))
+  local iconSlotHeight = RAIDS_ROW_HEIGHT * 0.5
+  local iconSlotInset = 2
+  local maxRenderedIconSize = math.max(1, iconSlotHeight - (iconSlotInset * 2))
+  local killIcon = TableGet(Constants.raidKillIcons, "id", Data.db.global.raids.killIcon or "skull") or Constants.raidKillIcons[1]
+  local killIconScale = killIcon.scale or 1
+  -- Clamp the final rendered texture inside the top/bottom half-row with an
+  -- explicit inset. Keeping a small gutter around every shape avoids texture
+  -- filtering (especially on Skull/Diamond edges) visually bleeding into the
+  -- neighboring difficulty quadrant even when the frame itself is in-bounds.
+  local iconHeight = math.min(iconSize * killIconScale, maxRenderedIconSize)
+
+  for encounterIndex = 1, numEncounters do
+    local iconFrame = difficultyFrame.iconFrames[encounterIndex]
+    if iconFrame then
+      encounterX = encounterX + gapWidth / 2 + (iconSize / 2)
+      -- Each encounter stays centered inside its own top/bottom half of the
+      -- difficulty row, so every icon remains inside that difficulty quadrant.
+      local encounterY = encounterIndex % 2 == 0 and (iconSlotHeight * 1.5) or (iconSlotHeight * 0.5)
+
+      iconFrame:ClearAllPoints()
+      iconFrame:SetPoint("CENTER", difficultyFrame, "TOPLEFT", encounterX, -encounterY)
+      iconFrame:SetSize(iconHeight, iconHeight)
+    end
+  end
+end
+
+local function LayoutTimewalkingRaidIcons(timewalkingFrame, numBosses, columnWidth)
+  if not timewalkingFrame or not timewalkingFrame.iconFrames or not numBosses or numBosses <= 0 then return end
+
+  columnWidth = math.max(columnWidth or CHARACTER_WIDTH, 1)
+  local killIcon = TableGet(Constants.raidKillIcons, "id", Data.db.global.raids.killIcon or "skull") or Constants.raidKillIcons[1]
+  local killIconScale = killIcon.scale or 1
+  local slotWidth = columnWidth / numBosses
+  local iconHeight = math.min(slotWidth * 0.6, RAIDS_ROW_HEIGHT * 0.8) * killIconScale
+
+  for bossIndex = 1, numBosses do
+    local iconFrame = timewalkingFrame.iconFrames[bossIndex]
+    if iconFrame then
+      iconFrame:ClearAllPoints()
+      iconFrame:SetPoint("CENTER", timewalkingFrame, "TOPLEFT", (bossIndex - 0.5) * slotWidth, -RAIDS_ROW_HEIGHT / 2)
+      iconFrame:SetSize(iconHeight, iconHeight)
+    end
+  end
+end
+
 local dungeonPortalUnlockLevel = 10
 local vaultMythicPlusMinLevel = 2
 local vaultMaxLevelRewardMythic = 10
@@ -1299,24 +2276,505 @@ end
 local function EnsureRowHighlightPoller(window)
   if window.rowHighlightPollerInstalled then return end
   window.rowHighlightPollerInstalled = true
+
+  local function IsDescendantOf(frame, ancestor)
+    local current = frame
+    while current do
+      if current == ancestor then
+        return true
+      end
+      current = current.GetParent and current:GetParent() or nil
+    end
+    return false
+  end
+
   local elapsed = 0
   window:HookScript("OnUpdate", function(_, dt)
     elapsed = elapsed + dt
     if elapsed < 0.05 then return end
     elapsed = 0
+
     local hovered = nil
+    local scrollArea = window.body and window.body.content and window.body.content.scrollArea
+    local scrollContent = scrollArea and scrollArea.content
+    local viewport = scrollArea and scrollArea.container
+    local cursorInsideCharacterViewport = viewport and viewport:IsShown() and viewport:IsMouseOver()
+
     for _, entry in ipairs(Module.rowHighlightFrames or {}) do
       if entry.frame:IsShown() and entry.frame:IsMouseOver() then
-        hovered = entry
-        break
+        -- IsMouseOver() can still report true for a child that has been scrolled
+        -- beyond a WowScrollBox viewport. Only accept character-grid cells while
+        -- the cursor is physically inside the visible viewport; sidebar rows are
+        -- unaffected. This prevents hidden columns from producing "ghost" row
+        -- highlights to the left/right of a Visible Characters-limited window.
+        local inCharacterGrid = scrollContent and IsDescendantOf(entry.frame, scrollContent)
+        if not inCharacterGrid or cursorInsideCharacterViewport then
+          hovered = entry
+          break
+        end
       end
     end
+
     if hovered then
       Module:ShowRowHighlight(hovered.rowTop, hovered.rowHeight)
     else
       Module:HideRowHighlight()
     end
   end)
+end
+
+---Keep the Main-window titlebar controls inside the window at every width. LiqUI normally lays
+---every titlebar button out in one row from right to left; for this window only, keep the primary
+---window controls in the upper rows and move Weekly Affixes / Daily Delves into dedicated lower
+---rows whenever everything cannot fit safely on one line. Both groups wrap independently so no
+---header control can overlap another at any supported window width.
+---@param window LiqUI_WindowInstance
+---@param requestedBodyWidth number
+---@param bodyHeight number
+---@return number bodyWidth
+local function LayoutMainTitlebarButtons(window, requestedBodyWidth, bodyHeight)
+  local rowHeight = Constants.sizes.titlebar.height
+  local customButtons = window.titlebarButtons or {}
+  local fixedButtons = {}
+  if window.titlebar and window.titlebar.CloseButton then
+    table.insert(fixedButtons, window.titlebar.CloseButton)
+  end
+  if window.titlebar and window.titlebar.SettingsButton then
+    table.insert(fixedButtons, window.titlebar.SettingsButton)
+  end
+
+  local function ButtonWidth(button)
+    local width = button and button:GetWidth() or 0
+    if not width or width <= 0 then
+      return rowHeight
+    end
+    return width
+  end
+
+  local fixedWidth = 0
+  for _, button in ipairs(fixedButtons) do
+    fixedWidth = fixedWidth + ButtonWidth(button)
+  end
+
+  local customWidths = {}
+  local customOverflowWidths = {}
+  local widestPrimaryButton = 0
+  for index, button in ipairs(customButtons) do
+    -- Read the configured width rather than the frame's current width: overflow rows
+    -- intentionally compact the click target a few pixels, and that must not become the
+    -- new baseline on the next Render(). A 26px overflow slot still leaves comfortable
+    -- padding around the largest 18px icon and lets five primary icons fit in a 130px row.
+    local config = window.options and window.options.titlebarButtons and window.options.titlebarButtons[index]
+    local width = (config and config.size) or rowHeight
+    customWidths[index] = width
+    customOverflowWidths[index] = math.min(width, math.max(24, rowHeight - 4))
+    widestPrimaryButton = math.max(widestPrimaryButton, width)
+  end
+
+  -- Branding stays on the real titlebar. Use its actual on-screen extent when available so
+  -- primary buttons can never collide with the AlterEgo logo/title toggle.
+  local function GetBrandReserve()
+    local windowLeft = window:GetLeft()
+    if windowLeft and window.sidebarToggleButton and window.sidebarToggleButton:IsVisible() then
+      local right = window.sidebarToggleButton:GetRight()
+      if right then
+        return math.max(0, right - windowLeft)
+      end
+    end
+    return window.sidebarToggleButton and math.max(0, window.sidebarToggleButton:GetWidth() or 0) or 0
+  end
+
+  -- Secondary controls are intentionally treated as a separate group. When the header needs
+  -- more than one row they are always placed below every primary-control row.
+  local secondaryButtons = {}
+  if window.affixes and window.affixes:IsVisible() and window.affixes.buttons then
+    for _, button in ipairs(window.affixes.buttons) do
+      if button and button:IsVisible() then
+        table.insert(secondaryButtons, button)
+      end
+    end
+  end
+  if window.dailyDelvesButton and window.dailyDelvesButton:IsVisible() then
+    table.insert(secondaryButtons, window.dailyDelvesButton)
+  end
+
+  local secondaryGap = 6
+  local dailyGapWithSeparator = 24
+  local function GapBeforeSecondary(hasPrevious, button)
+    if not hasPrevious then return 0 end
+    if button == window.dailyDelvesButton then
+      return dailyGapWithSeparator
+    end
+    return secondaryGap
+  end
+
+  local function SecondaryRowWidth(row)
+    local width = 0
+    for index, button in ipairs(row) do
+      width = width + GapBeforeSecondary(index > 1, button) + ButtonWidth(button)
+    end
+    return width
+  end
+
+  local widestSecondaryButton = 0
+  for _, button in ipairs(secondaryButtons) do
+    widestSecondaryButton = math.max(widestSecondaryButton, ButtonWidth(button))
+  end
+
+  local brandReserve = GetBrandReserve()
+  local bodyWidth = math.max(
+    requestedBodyWidth,
+    brandReserve + fixedWidth,
+    widestPrimaryButton,
+    widestSecondaryButton
+  )
+
+  local function AssignPrimaryRows(firstRowCapacity)
+    local rows = { {} }
+    local rowIndex = 1
+    local usedWidth = 0
+    for index in ipairs(customWidths) do
+      local width = rowIndex == 1 and customWidths[index] or customOverflowWidths[index]
+      local capacity = rowIndex == 1 and firstRowCapacity or bodyWidth
+      if rowIndex == 1 and #rows[rowIndex] == 0 and width > capacity then
+        rowIndex = 2
+        rows[rowIndex] = {}
+        usedWidth = 0
+        width = customOverflowWidths[index]
+        capacity = bodyWidth
+      elseif usedWidth > 0 and usedWidth + width > capacity then
+        rowIndex = rowIndex + 1
+        rows[rowIndex] = {}
+        usedWidth = 0
+        width = customOverflowWidths[index]
+        capacity = bodyWidth
+      end
+      table.insert(rows[rowIndex], index)
+      usedWidth = usedWidth + width
+    end
+    return rows
+  end
+
+  -- Weekly Affixes / Daily Delves share the real titlebar only when the entire header can
+  -- fit safely on one row: branding on the left, the secondary group centered, and every
+  -- primary/fixed control on the right. If any of those regions would collide, keep the
+  -- secondary group in dedicated centered lower row(s).
+  local primaryRows
+  local secondaryRows = {}
+  local firstRowCapacity = math.max(0, bodyWidth - brandReserve - fixedWidth)
+  primaryRows = AssignPrimaryRows(firstRowCapacity)
+
+  local primaryClusterWidth = fixedWidth
+  for _, width in ipairs(customWidths) do
+    primaryClusterWidth = primaryClusterWidth + width
+  end
+
+  local secondaryWidth = SecondaryRowWidth(secondaryButtons)
+  local secondaryClearance = 6
+  local centeredSecondaryLeft = (bodyWidth - secondaryWidth) / 2
+  local centeredSecondaryRight = centeredSecondaryLeft + secondaryWidth
+  local rightPrimaryLeft = bodyWidth - primaryClusterWidth
+  local allPrimaryControlsFitFirstRow = #primaryRows == 1
+  local secondaryFitsCenteredOnTitlebar = #secondaryButtons == 0 or (
+    allPrimaryControlsFitFirstRow
+    and centeredSecondaryLeft >= (brandReserve + secondaryClearance)
+    and centeredSecondaryRight <= (rightPrimaryLeft - secondaryClearance)
+  )
+  local useDedicatedSecondaryRows = #secondaryButtons > 0 and not secondaryFitsCenteredOnTitlebar
+
+  if useDedicatedSecondaryRows then
+    local row = {}
+    local usedWidth = 0
+    for _, button in ipairs(secondaryButtons) do
+      local gap = GapBeforeSecondary(#row > 0, button)
+      local width = ButtonWidth(button)
+      if #row > 0 and usedWidth + gap + width > bodyWidth then
+        table.insert(secondaryRows, row)
+        row = {}
+        usedWidth = 0
+        gap = 0
+      end
+      table.insert(row, button)
+      usedWidth = usedWidth + gap + width
+    end
+    if #row > 0 then
+      table.insert(secondaryRows, row)
+    end
+  end
+
+  local primaryOverflowCount = math.max(0, #primaryRows - 1)
+  local totalOverflowCount = primaryOverflowCount + #secondaryRows
+  window.titlebarOverflowRows = window.titlebarOverflowRows or {}
+
+  local function EnsureOverflowRow(rowIndex)
+    local overflow = window.titlebarOverflowRows[rowIndex]
+    if overflow then return overflow end
+
+    overflow = CreateFrame("Frame", "$parentTitlebarOverflow" .. rowIndex, window)
+    overflow:SetHeight(rowHeight)
+    overflow:SetFrameLevel(window.titlebar:GetFrameLevel() + 1)
+    overflow:EnableMouse(true)
+    overflow:RegisterForDrag("LeftButton")
+    overflow:SetScript("OnDragStart", function() window:StartMoving() end)
+    overflow:SetScript("OnDragStop", function()
+      window:StopMovingOrSizing()
+      window:SaveSettings()
+    end)
+    SetBackgroundColor(overflow, 0, 0, 0, 0.5)
+    window.titlebarOverflowRows[rowIndex] = overflow
+    return overflow
+  end
+
+  for rowIndex = 1, totalOverflowCount do
+    local overflow = EnsureOverflowRow(rowIndex)
+    overflow:ClearAllPoints()
+    overflow:SetPoint("TOPLEFT", window, "TOPLEFT", 0, -(rowHeight * rowIndex))
+    overflow:SetPoint("TOPRIGHT", window, "TOPRIGHT", 0, -(rowHeight * rowIndex))
+    overflow:Show()
+  end
+  for rowIndex = totalOverflowCount + 1, #window.titlebarOverflowRows do
+    window.titlebarOverflowRows[rowIndex]:Hide()
+  end
+
+  -- Primary controls always occupy the top rows: Close, Settings, then custom controls.
+  local anchorFrame = nil
+  if window.titlebar.CloseButton then
+    window.titlebar.CloseButton:SetParent(window.titlebar)
+    window.titlebar.CloseButton:ClearAllPoints()
+    window.titlebar.CloseButton:SetPoint("RIGHT", window.titlebar, "RIGHT", 0, 0)
+    anchorFrame = window.titlebar.CloseButton
+  end
+  if window.titlebar.SettingsButton then
+    window.titlebar.SettingsButton:SetParent(window.titlebar)
+    window.titlebar.SettingsButton:ClearAllPoints()
+    window.titlebar.SettingsButton:SetPoint("RIGHT", anchorFrame or window.titlebar, anchorFrame and "LEFT" or "RIGHT", 0, 0)
+    anchorFrame = window.titlebar.SettingsButton
+  end
+
+  for _, buttonIndex in ipairs(primaryRows[1]) do
+    local button = customButtons[buttonIndex]
+    button:SetParent(window.titlebar)
+    button:SetWidth(customWidths[buttonIndex])
+    button:ClearAllPoints()
+    button:SetPoint("RIGHT", anchorFrame or window.titlebar, anchorFrame and "LEFT" or "RIGHT", 0, 0)
+    anchorFrame = button
+  end
+
+  for rowIndex = 2, #primaryRows do
+    local overflow = window.titlebarOverflowRows[rowIndex - 1]
+    local overflowAnchor = nil
+    for _, buttonIndex in ipairs(primaryRows[rowIndex]) do
+      local button = customButtons[buttonIndex]
+      button:SetParent(overflow)
+      button:SetWidth(customOverflowWidths[buttonIndex])
+      button:ClearAllPoints()
+      if overflowAnchor then
+        button:SetPoint("RIGHT", overflowAnchor, "LEFT", 0, 0)
+      else
+        button:SetPoint("RIGHT", overflow, "RIGHT", 0, 0)
+      end
+      overflowAnchor = button
+    end
+  end
+
+  -- Re-anchor secondary controls after the primary layout is known. The separator only appears
+  -- when Daily Delves shares a row with an affix, so it can never be stranded at the start of a
+  -- wrapped row.
+  if window.dailyDelvesSeparator then
+    window.dailyDelvesSeparator:Hide()
+  end
+
+  local function PlaceSecondaryRow(row, host, centered)
+    if #row == 0 then return end
+    local rowWidth = SecondaryRowWidth(row)
+    local previous = nil
+    for _, button in ipairs(row) do
+      button:SetParent(host)
+      button:ClearAllPoints()
+      if not previous then
+        if centered then
+          button:SetPoint("LEFT", host, "CENTER", -(rowWidth / 2), 0)
+        else
+          button:SetPoint("LEFT", window.sidebarToggleButton or host, "RIGHT", secondaryGap, 0)
+        end
+      else
+        local gap = GapBeforeSecondary(true, button)
+        button:SetPoint("LEFT", previous, "RIGHT", gap, 0)
+        if button == window.dailyDelvesButton and window.dailyDelvesSeparator then
+          window.dailyDelvesSeparator:SetParent(host)
+          window.dailyDelvesSeparator:ClearAllPoints()
+          window.dailyDelvesSeparator:SetPoint("CENTER", previous, "RIGHT", gap / 2, 0)
+          window.dailyDelvesSeparator:Show()
+        end
+      end
+      if button.SetFrameLevel and host.GetFrameLevel then
+        button:SetFrameLevel(host:GetFrameLevel() + 1)
+      end
+      previous = button
+    end
+  end
+
+  if useDedicatedSecondaryRows then
+    for index, row in ipairs(secondaryRows) do
+      local host = window.titlebarOverflowRows[primaryOverflowCount + index]
+      PlaceSecondaryRow(row, host, true)
+    end
+  else
+    PlaceSecondaryRow(secondaryButtons, window.titlebar, true)
+  end
+
+  local topOffset = rowHeight * (1 + totalOverflowCount)
+  local function AnchorContent(frame)
+    if not frame then return end
+    frame:ClearAllPoints()
+    frame:SetPoint("TOPLEFT", window, "TOPLEFT", 0, -topOffset)
+    frame:SetPoint("TOPRIGHT", window, "TOPRIGHT", 0, -topOffset)
+    frame:SetPoint("BOTTOMLEFT", window, "BOTTOMLEFT", 0, 0)
+    frame:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", 0, 0)
+  end
+  AnchorContent(window.body)
+  AnchorContent(window.overlay)
+  window:SetSize(bodyWidth, bodyHeight + topOffset)
+
+  return bodyWidth
+end
+
+---Update the large character-grid edge arrows so they only appear on sides that
+---still contain off-screen character columns.
+---@param window table
+local function UpdateCharacterScrollEdgeButtons(window)
+  local navigation = window and window.characterScrollNavigation
+  local scrollArea = window and window.body and window.body.content and window.body.content.scrollArea
+  local scrollBox = scrollArea and scrollArea.horizontalScrollBox
+  local settings = Data.db.global.liqui.windows.Main
+  if not navigation or settings.showCharacterScrollArrows == false or not scrollBox or not scrollBox:IsShown() then
+    if navigation then
+      navigation.left:Hide()
+      navigation.right:Hide()
+    end
+    return
+  end
+
+  local arrowScale = math.max(50, math.min(200, tonumber(settings.characterScrollArrowScale) or 100)) / 100
+  local iconSize = math.floor((80 * arrowScale) + 0.5)
+  local hitWidth = math.max(48, iconSize)
+  local hitHeight = math.max(60, iconSize + 20)
+  -- Keep the texture itself inside the window. The native atlas has transparent
+  -- padding, so a very small outward nudge keeps the visible arrow close to the
+  -- edge without letting the artwork cross the window boundary.
+  local visualEdgeOffset = math.max(2, math.floor((4 * arrowScale) + 0.5))
+  for _, button in pairs({navigation.left, navigation.right}) do
+    button:SetSize(hitWidth, hitHeight)
+    button.Icon:SetSize(iconSize, iconSize)
+    button.Icon:ClearAllPoints()
+    if button.isLeftEdge then
+      button.Icon:SetPoint("LEFT", window.body, "LEFT", -visualEdgeOffset, 0)
+    else
+      button.Icon:SetPoint("RIGHT", window.body, "RIGHT", visualEdgeOffset, 0)
+    end
+  end
+
+  local range = scrollBox.GetDerivedScrollRange and scrollBox:GetDerivedScrollRange() or 0
+  local scrollable = range and range > 1 and (not scrollBox.HasScrollableExtent or scrollBox:HasScrollableExtent())
+  if not scrollable then
+    navigation.left:Hide()
+    navigation.right:Hide()
+    return
+  end
+
+  local percentage = scrollBox.GetScrollPercentage and scrollBox:GetScrollPercentage() or 0
+  navigation.left:SetShown(percentage > 0.001)
+  navigation.right:SetShown(percentage < 0.999)
+end
+
+---Create persistent, clickable edge arrows for the horizontally-scrollable character grid.
+---They are intentionally separate from Blizzard's hidden scrollbar: mouse-wheel scrolling
+---remains available everywhere. Left click advances by one character column; right click
+---jumps directly to the first/last character on that side.
+---@param window table
+local function EnsureCharacterScrollEdgeButtons(window)
+  if window.characterScrollNavigation then return end
+  local host = window.body and window.body.content
+  local scrollArea = host and host.scrollArea
+  if not host or not scrollArea then return end
+
+  local navigation = {}
+  local function CreateEdgeButton(side)
+    local isLeft = side == "left"
+    local button = CreateFrame("Button", nil, window)
+    local anchorHost = window.body or host
+    button.isLeftEdge = isLeft
+    button:SetSize(88, 100)
+    -- Keep a generous invisible hitbox inside the window, but anchor the artwork
+    -- independently so the atlas' built-in transparent padding does not make the
+    -- arrow look inset from the actual window edge.
+    button:SetPoint(isLeft and "LEFT" or "RIGHT", anchorHost, isLeft and "LEFT" or "RIGHT", 0, 0)
+    button:SetFrameLevel(host:GetFrameLevel() + 50)
+    button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    -- Reuse the same Blizzard arrow atlases AlterEgo already uses for moving
+    -- characters and row labels so overflow navigation matches the addon UI.
+    button.Icon = button:CreateTexture(nil, "ARTWORK")
+    button.Icon:SetAtlas(isLeft and "common-icon-backarrow" or "common-icon-forwardarrow", true)
+    button.Icon:SetDesaturation(1)
+    button.Icon:SetSize(80, 80)
+    if isLeft then
+      button.Icon:SetPoint("LEFT", anchorHost, "LEFT", -4, 0)
+    else
+      button.Icon:SetPoint("RIGHT", anchorHost, "RIGHT", 4, 0)
+    end
+
+    button:SetScript("OnEnter", function(self)
+      self.Icon:SetDesaturation(0)
+      GameTooltip:SetOwner(self, isLeft and "ANCHOR_RIGHT" or "ANCHOR_LEFT")
+      GameTooltip:SetText(isLeft and "More characters to the left" or "More characters to the right", 1, 1, 1)
+      GameTooltip:AddLine(isLeft and "Left Click: show the previous character." or "Left Click: show the next character.", nil, nil, nil, true)
+      GameTooltip:AddLine(isLeft and "Right Click: jump to the first character." or "Right Click: jump to the last character.", nil, nil, nil, true)
+      GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", function(self)
+      self.Icon:SetDesaturation(1)
+      GameTooltip:Hide()
+    end)
+    button:SetScript("OnClick", function(_, mouseButton)
+      local scrollBox = scrollArea.horizontalScrollBox
+      if not scrollBox then return end
+
+      if mouseButton == "RightButton" then
+        if isLeft then
+          scrollBox:ScrollToBegin()
+        else
+          scrollBox:ScrollToEnd()
+        end
+      else
+        local range = scrollBox.GetDerivedScrollRange and scrollBox:GetDerivedScrollRange() or 0
+        if range and range > 0 then
+          local percentage = scrollBox.GetScrollPercentage and scrollBox:GetScrollPercentage() or 0
+          local currentOffset = percentage * range
+          local direction = isLeft and -1 or 1
+          local columnWidth = tonumber(window.characterScrollColumnWidth) or CHARACTER_WIDTH
+          local targetOffset = math.max(0, math.min(range, currentOffset + (direction * columnWidth)))
+          local targetPercentage = targetOffset / range
+          scrollBox:SetScrollPercentage(targetPercentage, ScrollBoxConstants.NoScrollInterpolation)
+        end
+      end
+
+      UpdateCharacterScrollEdgeButtons(window)
+    end)
+    button:Hide()
+    return button
+  end
+
+  navigation.left = CreateEdgeButton("left")
+  navigation.right = CreateEdgeButton("right")
+  navigation.driver = CreateFrame("Frame", nil, host)
+  navigation.driver.elapsed = 0
+  navigation.driver:SetScript("OnUpdate", function(self, elapsed)
+    self.elapsed = self.elapsed + elapsed
+    if self.elapsed < 0.08 then return end
+    self.elapsed = 0
+    UpdateCharacterScrollEdgeButtons(window)
+  end)
+  window.characterScrollNavigation = navigation
 end
 
 local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, settings)
@@ -1594,13 +3052,11 @@ function Module:RenderNow()
   local mainWindowSettings = Data.db.global.liqui.windows.Main
   local windowScalePercent = self.window and self.window:GetWindowScale() or mainWindowSettings.scale or 100
   local windowScale = math.max(windowScalePercent / 100, 0.01)
-  local horizontalScrollWhenScaled = mainWindowSettings.horizontalScrollWhenScaled ~= false
   local windowWidthMax = LibLiqUI.Utils.GetMaxWindowWidth()
-  if horizontalScrollWhenScaled and windowScale > 1 then
-    -- Window dimensions are stored in unscaled UI units, while the visible
-    -- frame is multiplied by its scale. Tighten the viewport only when scale
-    -- would otherwise make the window wider than the user's screen; the
-    -- existing horizontal ScrollArea then exposes every character by mouse wheel.
+  if windowScale > 1 then
+    -- Horizontal character scrolling is always available. Window dimensions are
+    -- stored in unscaled UI units, so tighten the viewport whenever scaling would
+    -- otherwise push the visible window past the screen edge.
     windowWidthMax = windowWidthMax / windowScale
   end
   local windowWidth, windowHeight = numCharacters == 0 and 500 or 0, 0
@@ -1623,17 +3079,74 @@ function Module:RenderNow()
         Module:Render()
       end,
       onWindowOptionsAfterScaling = function(_, menu)
+        local settings = Data.db.global.liqui.windows.Main
+
         menu:CreateCheckbox(
-          "Horizontal scrolling when outscaled",
-          function() return Data.db.global.liqui.windows.Main.horizontalScrollWhenScaled ~= false end,
+          "Show Overflow Arrows",
+          function() return settings.showCharacterScrollArrows ~= false end,
           function()
-            local settings = Data.db.global.liqui.windows.Main
-            settings.horizontalScrollWhenScaled = not (settings.horizontalScrollWhenScaled ~= false)
-            Module:Render()
+            settings.showCharacterScrollArrows = not (settings.showCharacterScrollArrows ~= false)
+            UpdateCharacterScrollEdgeButtons(self.window)
+            return MenuResponse.Refresh
           end
-        ):SetTooltip(function(tooltip, elm)
+        ):SetTooltip(function(tooltip)
+          tooltip:AddLine("Show Overflow Arrows", 1, 1, 1, true)
+          tooltip:AddLine("Show the large left/right indicators when additional characters exist outside the visible area. Horizontal scrolling remains available when this is disabled.", nil, nil, nil, true)
+        end)
+
+        local arrowScale = math.max(50, math.min(200, tonumber(settings.characterScrollArrowScale) or 100))
+        local arrowScalingButton = menu:CreateButton(format("Arrow Scaling: %d%%", arrowScale))
+        BindLiveMenuLabel(arrowScalingButton)
+        for scalePercent = 50, 200, 10 do
+          arrowScalingButton:CreateRadio(
+            scalePercent .. "%",
+            function(value) return (tonumber(Data.db.global.liqui.windows.Main.characterScrollArrowScale) or 100) == value end,
+            function(value)
+              Data.db.global.liqui.windows.Main.characterScrollArrowScale = value
+              UpdateCharacterScrollEdgeButtons(self.window)
+              SetLiveMenuLabel(arrowScalingButton, format("Arrow Scaling: %d%%", value))
+              -- Keep Settings open; the radio state and parent label refresh immediately.
+              return MenuResponse.Refresh
+            end,
+            scalePercent
+          )
+        end
+        arrowScalingButton:SetTooltip(function(tooltip, elm)
           tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-          tooltip:AddLine("When Scaling would make the character grid wider than your screen, keep the window on-screen and use the mouse wheel over the character grid to scroll horizontally.", nil, nil, nil, true)
+          tooltip:AddLine("Adjust the size of the character overflow arrows. 100% uses the default 80x80 icon size.", nil, nil, nil, true)
+        end)
+
+        local visibleLimit = tonumber(settings.visibleCharacterLimit) or 15
+        local visibleCharactersButton = menu:CreateButton(
+          visibleLimit > 0 and format("Visible Characters: %d", visibleLimit) or "Visible Characters: Unlimited"
+        )
+        BindLiveMenuLabel(visibleCharactersButton)
+        visibleCharactersButton:CreateRadio(
+          "Unlimited",
+          function() return (tonumber(Data.db.global.liqui.windows.Main.visibleCharacterLimit) or 15) <= 0 end,
+          function()
+            Data.db.global.liqui.windows.Main.visibleCharacterLimit = 0
+            Module:Render()
+            SetLiveMenuLabel(visibleCharactersButton, "Visible Characters: Unlimited")
+            return MenuResponse.Refresh
+          end
+        )
+        for count = 1, 20 do
+          visibleCharactersButton:CreateRadio(
+            tostring(count),
+            function(value) return (tonumber(Data.db.global.liqui.windows.Main.visibleCharacterLimit) or 0) == value end,
+            function(value)
+              Data.db.global.liqui.windows.Main.visibleCharacterLimit = value
+              Module:Render()
+              SetLiveMenuLabel(visibleCharactersButton, format("Visible Characters: %d", value))
+              return MenuResponse.Refresh
+            end,
+            count
+          )
+        end
+        visibleCharactersButton:SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Limit how many character columns are visible at once. Extra characters stay in the grid and remain available through horizontal scrolling and the edge arrows.", nil, nil, nil, true)
         end)
       end,
       onSettingsMenu = function(window, menu)
@@ -1648,6 +3161,11 @@ function Module:RenderNow()
             -- so keep this state on the module instead of on the menu frame
             -- itself, and restore it after the menu has finished laying out.
             menu:AddMenuAcquiredCallback(function(settingsMenu)
+              -- Shared menu callbacks also fire for submenus. Keep the first live frame: it is
+              -- the root Settings menu whose ScrollBox contains the Multi-Account Sync rows.
+              if not syncTutorialSettingsMenu or not syncTutorialSettingsMenu:IsShown() then
+                syncTutorialSettingsMenu = settingsMenu
+              end
               local scrollPercentage = Module.settingsMenuScrollPercentage
               if scrollPercentage == nil then return end
 
@@ -1658,6 +3176,9 @@ function Module:RenderNow()
               end)
             end)
             menu:AddMenuReleasedCallback(function(settingsMenu)
+              if syncTutorialSettingsMenu == settingsMenu then
+                syncTutorialSettingsMenu = nil
+              end
               if self.window and self.window:IsShown() and settingsMenu.ScrollBox and settingsMenu.ScrollBox:IsShown() then
                 Module.settingsMenuScrollPercentage = settingsMenu.ScrollBox:GetScrollPercentage()
               else
@@ -1674,6 +3195,7 @@ function Module:RenderNow()
                 function(id)
                   Data.db.global.currentCharacterMarker = id
                   self:Render()
+                  return MenuResponse.Refresh
                 end,
                 marker.id
               )
@@ -1718,6 +3240,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showNonMaxLevelCharacters = not Data.db.global.showNonMaxLevelCharacters
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1729,6 +3252,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showZeroRatedCharacters = not Data.db.global.showZeroRatedCharacters
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1740,6 +3264,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showCharacterPosition = not Data.db.global.showCharacterPosition
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1751,6 +3276,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showItemLevel = not Data.db.global.showItemLevel
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1762,6 +3288,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showEquippedItemLevel = not Data.db.global.showEquippedItemLevel
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1773,6 +3300,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showItemLevelDecimals = not Data.db.global.showItemLevelDecimals
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1784,6 +3312,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showRealms = not Data.db.global.showRealms
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1795,6 +3324,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showGuildInformation = not Data.db.global.showGuildInformation
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1806,6 +3336,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showRating = not Data.db.global.showRating
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1817,6 +3348,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showCurrentKeystone = not Data.db.global.showCurrentKeystone
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1828,6 +3360,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.useRIOScoreColor = not Data.db.global.useRIOScoreColor
                 self:Render()
+                return MenuResponse.Refresh
               end
             )
             rioColors:SetTooltip(function(tooltip, elm)
@@ -1846,6 +3379,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.vault.raids = not Data.db.global.vault.raids
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1857,6 +3391,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.vault.dungeons = not Data.db.global.vault.dungeons
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1868,6 +3403,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.vault.world = not Data.db.global.vault.world
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1880,6 +3416,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.prey.enabled = not Data.db.global.prey.enabled
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1896,6 +3433,7 @@ function Module:RenderNow()
                 function(difficultyID)
                   Data.db.global.prey.hiddenDifficulties[difficultyID] = not hiddenDifficulties[difficultyID]
                   self:Render()
+                  return MenuResponse.Refresh
                 end,
                 difficulty.id
               )
@@ -1907,6 +3445,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.dungeons.enabled = not Data.db.global.dungeons.enabled
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1918,6 +3457,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showTiers = not Data.db.global.showTiers
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1929,6 +3469,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showScores = not Data.db.global.showScores
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1940,6 +3481,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showAffixColors = not Data.db.global.showAffixColors
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1952,6 +3494,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.raids.enabled = not Data.db.global.raids.enabled
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1963,6 +3506,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.raids.colors = not Data.db.global.raids.colors
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -1976,6 +3520,7 @@ function Module:RenderNow()
                 function(id)
                   Data.db.global.raids.killIcon = id
                   self:Render()
+                  return MenuResponse.Refresh
                 end,
                 icon.id
               )
@@ -1991,6 +3536,7 @@ function Module:RenderNow()
                 function(id)
                   Data.db.global.raids.hiddenDifficulties[id] = not hiddenDifficulties[id]
                   self:Render()
+                  return MenuResponse.Refresh
                 end,
                 difficulty.id
               )
@@ -2001,6 +3547,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.raids.timewalkingLockouts = not Data.db.global.raids.timewalkingLockouts
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2015,6 +3562,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.currencies.enabled = not Data.db.global.currencies.enabled
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2027,6 +3575,7 @@ function Module:RenderNow()
                 function()
                   Data.db.global.currencies.showIcons = not Data.db.global.currencies.showIcons
                   self:Render()
+                  return MenuResponse.Refresh
                 end
               ):SetTooltip(function(tooltip, elm)
                 tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2039,6 +3588,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.currencies.alignCenter = not Data.db.global.currencies.alignCenter
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2050,6 +3600,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.currencies.showMaxEarned = not Data.db.global.currencies.showMaxEarned
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2067,6 +3618,7 @@ function Module:RenderNow()
                 function(id)
                   Data.db.global.currencies.hiddenCurrencies[id] = not hiddenCurrencies[id]
                   self:Render()
+                  return MenuResponse.Refresh
                 end,
                 currency.id
               )
@@ -2078,6 +3630,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.weeklies.enabled = not Data.db.global.weeklies.enabled
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2089,6 +3642,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.weeklies.showIcons = not Data.db.global.weeklies.showIcons
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2100,6 +3654,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.weeklies.alignCenter = not Data.db.global.weeklies.alignCenter
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2117,6 +3672,7 @@ function Module:RenderNow()
                 function(id)
                   Data.db.global.weeklies.hiddenCurrencies[id] = not hiddenCurrencies[id]
                   self:Render()
+                  return MenuResponse.Refresh
                 end,
                 currency.id
               )
@@ -2128,6 +3684,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.seasonalChores.enabled = not Data.db.global.seasonalChores.enabled
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2139,6 +3696,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.seasonalChores.showIcons = not Data.db.global.seasonalChores.showIcons
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2150,6 +3708,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.seasonalChores.alignCenter = not Data.db.global.seasonalChores.alignCenter
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2167,6 +3726,7 @@ function Module:RenderNow()
                 function(id)
                   Data.db.global.seasonalChores.hiddenCurrencies[id] = not hiddenCurrencies[id]
                   self:Render()
+                  return MenuResponse.Refresh
                 end,
                 currency.id
               )
@@ -2188,6 +3748,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showDailyDelves = not (Data.db.global.showDailyDelves ~= false)
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2200,6 +3761,7 @@ function Module:RenderNow()
                 local settings = Data.db.global.liqui.windows.Main
                 settings.collapsingRowLabelsDisplaysAllIcons = not (settings.collapsingRowLabelsDisplaysAllIcons ~= false)
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2212,6 +3774,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.showAffixHeader = not Data.db.global.showAffixHeader
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2223,6 +3786,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.minimap.hide = not Data.db.global.minimap.hide
                 addon.Libs.LibDBIcon:Refresh(addon.name, Data.db.global.minimap)
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2234,6 +3798,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.minimap.lock = not Data.db.global.minimap.lock
                 addon.Libs.LibDBIcon:Refresh(addon.name, Data.db.global.minimap)
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2258,7 +3823,10 @@ function Module:RenderNow()
               end)
             end
             menu:CreateDivider()
-            menu:CreateTitle("Multi-Account Sync")
+            local syncSectionTitle = menu:CreateTitle("Multi-Account Sync")
+            syncSectionTitle:AddInitializer(function(frame, description)
+              RegisterSyncTutorialMenuTarget("syncSection", frame, description)
+            end)
             local enableSyncOption = menu:CreateCheckbox(
               "Enable Sync",
               function() return Data.db.global.sync.enabled end,
@@ -2267,7 +3835,10 @@ function Module:RenderNow()
                   Data.db.global.sync.enabled = false
                   addon.Core:ResetSyncBatchGuard()
                   addon.Core:Print("Sync: stopped. Nothing will be sent or received until you turn Enable Sync back on.")
-                  return
+                  -- This checkbox also owns the Only Sync Max Level Characters submenu.
+                  -- Refresh the open menu explicitly so its checked state updates immediately
+                  -- instead of looking off while Sync is already disabled.
+                  return MenuResponse.Refresh
                 end
                 -- Only actually turns on once a password is confirmed --
                 -- RequestPasswordThen enables it itself once that
@@ -2275,25 +3846,37 @@ function Module:RenderNow()
                 -- immediately here when one already is.
                 if RequestPasswordThen("enable") then
                   Data.db.global.sync.enabled = true
+                  if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+                  -- Parent checkboxes with child menu entries are not reliably redrawn just
+                  -- because their backing value changed. Force the redraw so Enable Sync
+                  -- visibly lights up while preserving its nested max-level option.
+                  return MenuResponse.Refresh
                 end
-                -- Always force-close: either the popup just opened and
-                -- should be the only thing on screen, or Sync just
-                -- turned on and closing confirms it actually took.
+                -- No password yet: close the menu so the password popup is the only active UI.
                 return MenuResponse.CloseAll
               end
             )
+            enableSyncOption:AddInitializer(function(button, description)
+              RegisterSyncTutorialMenuTarget("enableSync", button, description)
+            end)
             enableSyncOption:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Shares your Main WoW Account's characters with your other WoW accounts, as long as they're in the same guild, raid, or party, and set the same password below.", nil, nil, nil, true)
               tooltip:AddLine("Nobody else who can see messages on that channel receives anything unless they also know your password.", nil, nil, nil, true)
             end)
-            enableSyncOption:CreateCheckbox(
+            local onlyMaxLevelOption = enableSyncOption:CreateCheckbox(
               "Only Sync Max Level Characters",
               function() return Data.db.global.sync.onlyMaxLevelCharacters ~= false end,
               function()
                 Data.db.global.sync.onlyMaxLevelCharacters = not (Data.db.global.sync.onlyMaxLevelCharacters ~= false)
+                if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+                return MenuResponse.Refresh
               end
-            ):SetTooltip(function(tooltip, elm)
+            )
+            onlyMaxLevelOption:AddInitializer(function(button, description)
+              RegisterSyncTutorialMenuTarget("onlyMaxLevel", button, description)
+            end)
+            onlyMaxLevelOption:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Only sends characters at Retail's current maximum level.", nil, nil, nil, true)
             end)
@@ -2308,6 +3891,9 @@ function Module:RenderNow()
                 return MenuResponse.CloseAll
               end
             )
+            setPasswordButton:AddInitializer(function(button, description)
+              RegisterSyncTutorialMenuTarget("setPassword", button, description)
+            end)
             setPasswordButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Must be identical on every account you want to sync with.", nil, nil, nil, true)
@@ -2318,6 +3904,10 @@ function Module:RenderNow()
               format("Sync Channel: %s", syncChannelNames[Data.db.global.sync.channel] or "Guild"),
               function() end
             )
+            BindLiveMenuLabel(syncChannelButton)
+            syncChannelButton:AddInitializer(function(button, description)
+              RegisterSyncTutorialMenuTarget("syncChannel", button, description)
+            end)
             syncChannelButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Guild only is the safest default -- it doesn't need to know which channel the other account can actually see.", nil, nil, nil, true)
@@ -2332,11 +3922,9 @@ function Module:RenderNow()
                 function(value) return (Data.db.global.sync.channel or "GUILD") == value end,
                 function(value)
                   Data.db.global.sync.channel = value
-                  -- No MenuResponse.Refresh here on purpose -- closes the
-                  -- whole settings menu on click, so the change is only
-                  -- visible again once you reopen it -- confirming it
-                  -- actually took, rather than silently continuing to
-                  -- show the same open dropdown.
+                  if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+                  SetLiveMenuLabel(syncChannelButton, format("Sync Channel: %s", syncChannelNames[value] or "Guild"))
+                  return MenuResponse.Refresh
                 end,
                 option.value
               )
@@ -2356,9 +3944,12 @@ function Module:RenderNow()
                 return MenuResponse.CloseAll
               end
             )
+            syncNowButton:AddInitializer(function(button, description)
+              RegisterSyncTutorialMenuTarget("syncNow", button, description)
+            end)
             syncNowButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Sends every eligible character in your Main WoW Account right now, respecting Only Sync Max Level Characters, even if nothing changed, and prints why if it can't.", nil, nil, nil, true)
+              tooltip:AddLine("Checks matching Sync peers, then sends only eligible Main WoW Account characters they report missing or outdated. Prints why if it can't reconcile.", nil, nil, nil, true)
             end)
             local syncSettingsButton = menu:CreateButton(
               "Sync Addon Settings",
@@ -2376,12 +3967,41 @@ function Module:RenderNow()
                 return MenuResponse.CloseAll
               end
             )
+            syncSettingsButton:AddInitializer(function(button, description)
+              RegisterSyncTutorialMenuTarget("syncSettings", button, description)
+            end)
             syncSettingsButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Shares your display and behavior settings, not characters, with your other WoW accounts, over the same password and channel as everything else here.", nil, nil, nil, true)
               tooltip:AddLine("Only happens when you click this and confirm -- never automatically.", nil, nil, nil, true)
             end)
+            local syncTutorialButton = menu:CreateButton(
+              "Sync Tutorial",
+              function()
+                Module:ShowSyncTutorial()
+                return MenuResponse.CloseAll
+              end
+            )
+            syncTutorialButton:SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Opens a step-by-step guide for configuring Multi-Account Sync from start to finish.", nil, nil, nil, true)
+            end)
           end,
+      onWindowOptionsAfterBorder = function(_, menu)
+        local settings = Data.db.global.liqui.windows.Main
+        menu:CreateCheckbox(
+          "Show Logo Icon Only",
+          function() return settings.logoIconOnly == true end,
+          function()
+            settings.logoIconOnly = not (settings.logoIconOnly == true)
+            self:Render()
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip)
+          tooltip:AddLine("Show Logo Icon Only", 1, 1, 1, true)
+          tooltip:AddLine("Show only the AlterEgo logo in the Main window header. This also shrinks the Show/Hide Row Labels hitbox so more header controls can fit on the same row.", nil, nil, nil, true)
+        end)
+      end,
       titlebarButtons = {
         {
           name = "Accounts & Characters",
@@ -2406,7 +4026,9 @@ function Module:RenderNow()
                 function(value) return Data.db.global.characters[value].enabled end,
                 function(value)
                   Data.db.global.characters[value].enabled = not Data.db.global.characters[value].enabled
+                  if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
                   self:Render()
+                  return MenuResponse.Refresh
                 end,
                 char.GUID
               )
@@ -2417,6 +4039,7 @@ function Module:RenderNow()
                   function() return (char.accountId or Data:EnsureDefaultAccount()) == targetAccount.id end,
                   function()
                     Data:MoveCharacterToAccount(char.GUID, targetAccount.id)
+                    if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
                     self:Render()
                     return MenuResponse.Refresh
                   end
@@ -2469,12 +4092,19 @@ function Module:RenderNow()
                 function() return account.enabled end,
                 function()
                   Data:SetAccountEnabled(account.id, not account.enabled)
+                  if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
                   self:Render()
+                  return MenuResponse.Refresh
                 end
               )
 
               if accountRow.SetIcon then
                 accountRow:SetIcon(Constants.media.IconAccount)
+              end
+              if isMainAccount then
+                accountRow:AddInitializer(function(button, description)
+                  RegisterSyncTutorialMenuTarget("mainAccount", button, description)
+                end)
               end
 
               accountRow:CreateButton("Rename or Delete WoW Account", function()
@@ -2498,9 +4128,25 @@ function Module:RenderNow()
                   function()
                     if isMainAccount then
                       Data:SetMainAccount(nil)
-                    else
-                      Data:SetMainAccount(account.id)
+                      if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+                      self:Render()
+                      return
                     end
+
+                    local currentMainId = Data:GetMainAccountId()
+                    if currentMainId and currentMainId ~= account.id then
+                      local currentMain = Data.db.global.accounts[currentMainId]
+                      StaticPopup_Show(
+                        "ALTEREGO_CONFIRM_CHANGE_MAIN_ACCOUNT",
+                        (currentMain and currentMain.name) or "The current Main WoW Account",
+                        account.name,
+                        account
+                      )
+                      return
+                    end
+
+                    Data:SetMainAccount(account.id)
+                    if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
                     self:Render()
                   end
                 )
@@ -2614,12 +4260,16 @@ function Module:RenderNow()
               function()
                 Data.db.global.announceKeystones.multiline = not Data.db.global.announceKeystones.multiline
                 withCharacterNames:SetEnabled(Data.db.global.announceKeystones.multiline)
+                return MenuResponse.Refresh
               end
             )
             withCharacterNames = menu:CreateCheckbox(
               "Include character names",
               function() return Data.db.global.announceKeystones.multilineNames end,
-              function() Data.db.global.announceKeystones.multilineNames = not Data.db.global.announceKeystones.multilineNames end
+              function()
+                Data.db.global.announceKeystones.multilineNames = not Data.db.global.announceKeystones.multilineNames
+                return MenuResponse.Refresh
+              end
             )
             withMultipleMessages:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2644,6 +4294,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.announceResets = not Data.db.global.announceResets
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2655,6 +4306,7 @@ function Module:RenderNow()
               function()
                 Data.db.global.announceKeystones.autoParty = not Data.db.global.announceKeystones.autoParty
                 self:Render()
+                return MenuResponse.Refresh
               end
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
@@ -2700,6 +4352,20 @@ function Module:RenderNow()
       name = "$parentCharacterScroll",
     })
     self.window.body.content.scrollArea:SetAllPoints()
+    -- WowScrollBox clips its rendering, but explicitly clip every layer of the
+    -- character viewport as well so off-screen columns never leak outside the
+    -- visible Main-window character area.
+    local characterScrollArea = self.window.body.content.scrollArea
+    if characterScrollArea.container.SetClipsChildren then
+      characterScrollArea.container:SetClipsChildren(true)
+    end
+    if characterScrollArea.horizontalScrollBox and characterScrollArea.horizontalScrollBox.SetClipsChildren then
+      characterScrollArea.horizontalScrollBox:SetClipsChildren(true)
+    end
+    if self.window.body.content.SetClipsChildren then
+      self.window.body.content:SetClipsChildren(true)
+    end
+    EnsureCharacterScrollEdgeButtons(self.window)
 
     -- The AlterEgo logo/title doubles as a compact toggle for the row-label
     -- sidebar. Keep this control in Main rather than LiqUI so it affects only
@@ -2740,6 +4406,7 @@ function Module:RenderNow()
     -- Merely closing the Settings dropdown itself keeps the saved position.
     self.window:HookScript("OnHide", function()
       Module.settingsMenuScrollPercentage = nil
+      HideSyncTutorial()
     end)
 
     self.window.affixes = CreateFrame("Frame", "$parentAffixes", self.window.titlebar)
@@ -2787,30 +4454,35 @@ function Module:RenderNow()
   EnsureRowHighlightPoller(self.window)
 
   do -- Titlebar: Affixes
-    if numCharacters < 3 then
+    local logoIconOnly = mainWindowSettings.logoIconOnly == true
+    if logoIconOnly or numCharacters < 3 then
       self.window.titlebar.title:Hide()
     else
       self.window.titlebar.title:Show()
     end
 
-    -- Make exactly the visible AlterEgo branding (logo + title, or logo only
-    -- when the title is suppressed for narrow character counts) clickable.
+    -- Make exactly the visible AlterEgo branding clickable. In icon-only mode
+    -- keep the hitbox compact around the logo itself; the titlebar layout reads
+    -- this frame's actual width, so the space released by hiding the title is
+    -- immediately available to the other header controls.
     local sidebarToggleButton = self.window.sidebarToggleButton
+    sidebarToggleButton:SetEnabled(numCharacters > 0)
     sidebarToggleButton:ClearAllPoints()
-    sidebarToggleButton:SetPoint("TOPLEFT", self.window.titlebar, "TOPLEFT", 0, 0)
-    sidebarToggleButton:SetPoint("BOTTOMLEFT", self.window.titlebar, "BOTTOMLEFT", 0, 0)
     if self.window.titlebar.title:IsShown() then
+      sidebarToggleButton:SetPoint("TOPLEFT", self.window.titlebar, "TOPLEFT", 0, 0)
+      sidebarToggleButton:SetPoint("BOTTOMLEFT", self.window.titlebar, "BOTTOMLEFT", 0, 0)
       sidebarToggleButton:SetPoint("RIGHT", self.window.titlebar.title, "RIGHT", 6, 0)
     else
-      sidebarToggleButton:SetPoint("RIGHT", self.window.titlebar.icon, "RIGHT", 6, 0)
+      local titlebarHeight = Constants.sizes.titlebar.height
+      sidebarToggleButton:SetSize(titlebarHeight, titlebarHeight)
+      sidebarToggleButton:SetPoint("CENTER", self.window.titlebar.icon, "CENTER", 0, 0)
     end
 
     if currentAffixes and TableCount(currentAffixes) > 0 and Data.db.global.showAffixHeader then
-      if numCharacters < 2 then
-        self.window.affixes:Hide()
-      else
-        self.window.affixes:Show()
-      end
+      -- The titlebar layout now wraps the right-side controls into as many rows as needed,
+      -- so Weekly Affixes no longer has to disappear just because only one character column
+      -- is visible. Keep it available and let LayoutMainTitlebarButtons reserve its space.
+      self.window.affixes:Show()
     else
       self.window.affixes:Hide()
     end
@@ -4157,15 +5829,7 @@ function Module:RenderNow()
             SetHighlightColor(difficultyFrame, 1, 1, 1, 0)
           end)
 
-          local gapWidth = 6
-          local encounterX = 3
-          local halfEncounters = math.ceil(numEncounters / 2)
-          local gapCount = halfEncounters + 1
-          local gapWidthTotal = gapCount * gapWidth
-          local iconSize = (CHARACTER_WIDTH - gapWidthTotal) / (halfEncounters + (numEncounters % 2 == 0 and 0.5 or 0))
-          local iconSizeMax = RAIDS_ROW_HEIGHT * 0.5
           local killIcon = TableGet(Constants.raidKillIcons, "id", Data.db.global.raids.killIcon or "skull") or Constants.raidKillIcons[1]
-          local killIconScale = killIcon.scale or 1
           TableForEach(difficultyFrame.iconFrames, function(f) f:Hide() end)
           TableForEach(encounters or {}, function(encounter, encounterIndex)
             local iconFrame = difficultyFrame.iconFrames[encounterIndex]
@@ -4198,19 +5862,9 @@ function Module:RenderNow()
             iconFrame.Background:SetTexture(killIcon.texture)
             iconFrame.Background:SetVertexColor(color.r, color.g, color.b, alpha)
 
-            local iconHeight = math.min(iconSize, iconSizeMax) * killIconScale
-            local heightGap = (RAIDS_ROW_HEIGHT - iconHeight * 2) / 2
-            local encounterY = heightGap
-            encounterX = encounterX + gapWidth / 2 + (iconSize / 2)
-            encounterY = encounterY + (iconHeight / 2) + 2
-            if encounterIndex % 2 == 0 then -- Bottom
-              encounterY = encounterY + iconHeight - 4
-            end
-
-            iconFrame:SetPoint("CENTER", difficultyFrame, "TOPLEFT", encounterX, -encounterY)
-            iconFrame:SetSize(iconHeight, iconHeight)
             iconFrame:Show()
           end)
+          LayoutRaidEncounterIcons(difficultyFrame, numEncounters, characterFrame:GetWidth())
         end)
       end
 
@@ -4237,9 +5891,6 @@ function Module:RenderNow()
           }
 
           local killIcon = TableGet(Constants.raidKillIcons, "id", Data.db.global.raids.killIcon or "skull") or Constants.raidKillIcons[1]
-          local killIconScale = killIcon.scale or 1
-          local slotWidth = CHARACTER_WIDTH / 3
-          local iconHeight = math.min(slotWidth * 0.6, RAIDS_ROW_HEIGHT * 0.8) * killIconScale
 
           TableForEach(timewalkingFrame.iconFrames, function(f) f:Hide() end)
           TableForEach(bosses, function(boss, bossIndex)
@@ -4263,8 +5914,6 @@ function Module:RenderNow()
 
             iconFrame.Background:SetTexture(killIcon.texture)
             iconFrame.Background:SetVertexColor(color.r, color.g, color.b, alpha)
-            iconFrame:SetSize(iconHeight, iconHeight)
-            iconFrame:SetPoint("CENTER", timewalkingFrame, "TOPLEFT", (bossIndex - 0.5) * slotWidth, -RAIDS_ROW_HEIGHT / 2)
             iconFrame:SetScript("OnEnter", function()
               GameTooltip:SetOwner(iconFrame, "ANCHOR_RIGHT")
               GameTooltip:SetText(boss.name, 1, 1, 1)
@@ -4276,6 +5925,7 @@ function Module:RenderNow()
             end)
             iconFrame:Show()
           end)
+          LayoutTimewalkingRaidIcons(timewalkingFrame, #bosses, characterFrame:GetWidth())
         else
           timewalkingFrame:Hide()
         end
@@ -4436,19 +6086,61 @@ function Module:RenderNow()
   end
 
   local sidebarWidth = numCharacters > 0 and not sidebarCollapsed and Constants.sizes.sidebar.width or 0
-  local bodyWidth
-  if horizontalScrollWhenScaled and windowScale > 1 then
-    -- windowWidthMax is the maximum TOTAL unscaled body width at the current
-    -- scale, so reserve the fixed sidebar before sizing the character viewport.
-    local characterViewportWidthMax = math.max(1, windowWidthMax - sidebarWidth)
-    bodyWidth = math.min(windowWidth, characterViewportWidthMax) + sidebarWidth
-  else
-    -- Preserve the addon's existing sizing behavior when this feature is off
-    -- (and at 100% or lower scaling).
-    bodyWidth = math.min(windowWidth, windowWidthMax) + sidebarWidth
+  -- The horizontal ScrollArea is now the permanent overflow mechanism. Cap the
+  -- viewport by both the screen-safe width and the optional number of character
+  -- columns the user wants visible at once; the full character grid remains in
+  -- the scroll content either way.
+  local characterViewportWidthMax = math.max(1, windowWidthMax - sidebarWidth)
+  local visibleCharacterLimit = tonumber(mainWindowSettings.visibleCharacterLimit) or 15
+  if visibleCharacterLimit > 0 and numCharacters > 0 then
+    characterViewportWidthMax = math.min(characterViewportWidthMax, visibleCharacterLimit * CHARACTER_WIDTH)
   end
-  self.window:SetBodySize(bodyWidth, windowHeight)
-  self.window.body.content.scrollArea:UpdateLayout(windowWidth, windowHeight)
+  local bodyWidth = math.min(windowWidth, characterViewportWidthMax) + sidebarWidth
+
+  if numCharacters == 1 then
+    -- Keep the one-character window at a stable width whether Row Labels are shown or hidden.
+    -- With labels hidden, the character column expands into their freed space; with labels shown,
+    -- the same window is split back into the normal sidebar + the remaining character width.
+    bodyWidth = math.max(bodyWidth, CHARACTER_WIDTH + Constants.sizes.sidebar.width)
+  end
+
+  bodyWidth = LayoutMainTitlebarButtons(self.window, bodyWidth, windowHeight)
+
+  local characterContentWidth = windowWidth
+  local expandSingleVisibleColumn = numCharacters > 0 and (numCharacters == 1 or visibleCharacterLimit == 1)
+  local finalCharacterWidth = CHARACTER_WIDTH
+
+  -- When the viewport shows a single character, let that character consume all
+  -- horizontal space available to the character area. This applies both to a
+  -- genuinely single-character list and to Visible Characters = 1 with several
+  -- tracked characters. Showing Row Labels simply subtracts the sidebar from the
+  -- same window width; hiding Row Labels gives the full window body to the column.
+  if expandSingleVisibleColumn then
+    finalCharacterWidth = math.max(CHARACTER_WIDTH, bodyWidth - sidebarWidth)
+    for characterIndex = 1, numCharacters do
+      local characterFrame = self.window.characterFrames and self.window.characterFrames[characterIndex]
+      if characterFrame and characterFrame:IsShown() then
+        characterFrame:ClearAllPoints()
+        characterFrame:SetPoint("TOPLEFT", scrollContent, "TOPLEFT", (characterIndex - 1) * finalCharacterWidth, 0)
+        characterFrame:SetPoint("BOTTOMLEFT", scrollContent, "BOTTOMLEFT", (characterIndex - 1) * finalCharacterWidth, 0)
+        characterFrame:SetWidth(finalCharacterWidth)
+
+        -- The column can grow after its rows were initially rendered. Reflow raid
+        -- and Timewalking icons against the final width so every group remains centered.
+        for _, difficultyFrame in ipairs(characterFrame.difficultyFrames or {}) do
+          LayoutRaidEncounterIcons(difficultyFrame, #(difficultyFrame.iconFrames or {}), finalCharacterWidth)
+        end
+        if characterFrame.timewalkingFrame and characterFrame.timewalkingFrame:IsShown() then
+          LayoutTimewalkingRaidIcons(characterFrame.timewalkingFrame, #(characterFrame.timewalkingFrame.iconFrames or {}), finalCharacterWidth)
+        end
+      end
+    end
+    characterContentWidth = finalCharacterWidth * numCharacters
+  end
+
+  self.window.characterScrollColumnWidth = finalCharacterWidth
+  self.window.body.content.scrollArea:UpdateLayout(characterContentWidth, windowHeight)
+  UpdateCharacterScrollEdgeButtons(self.window)
 
   local zeroCharactersText = "|cffffffffHi there :-)|r\nEnable a character top right for AlterEgo to show you some goodies!"
   if numCharacters <= 0 then
@@ -4471,4 +6163,5 @@ function Module:RenderNow()
   else
     self.window:HideOverlay()
   end
+
 end

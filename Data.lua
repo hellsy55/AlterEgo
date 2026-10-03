@@ -14,7 +14,7 @@ local TableFind = addon.Libs.LiqUI.Utils.TableFind
 local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
 local TableGet = addon.Libs.LiqUI.Utils.TableGet
 
-Data.dbVersion = 43
+Data.dbVersion = 44
 
 Data.defaultDB = {
   ---@type AE_Global
@@ -114,7 +114,10 @@ Data.defaultDB = {
     liqui = {
       windows = {
         Main = {
-          horizontalScrollWhenScaled = true,
+          visibleCharacterLimit = 15,
+          logoIconOnly = false,
+          showCharacterScrollArrows = true,
+          characterScrollArrowScale = 100,
           sidebarCollapsed = false,
           collapsingRowLabelsDisplaysAllIcons = true,
         },
@@ -138,6 +141,9 @@ Data.defaultDB = {
       channel = "GUILD", ---@type "BOTH"|"GUILD"|"PARTY" Which distribution(s) to send on when more than one is available. "GUILD" (default) restricts sends to the guild channel; "PARTY" restricts to party/raid; "BOTH" sends on every channel that applies (see Comm.lua's GetUsableChannels).
       passwordAccounts = {}, ---@type table<string, string> Which WoW Account each password's synced characters land in
       lastSentUpdate = {}, ---@type table<string, number> Per-character GUID -> the character.lastUpdate value we last actually broadcast, so unchanged characters aren't resent
+      lastConfirmedUpdate = {}, ---@type table<string, number> Per-character GUID -> lastUpdate most recently confirmed by another Sync peer via ACK
+      lastSuccessfulSyncAt = 0, ---@type number Epoch timestamp of the most recent character sync confirmed by a peer (sent or received)
+      lastSuccessfulSyncPeer = "", ---@type string Last peer character name involved in a confirmed character sync
     },
   },
 }
@@ -258,6 +264,13 @@ function Data:Initialize()
   -- someone else's sync).
   if not self:GetMainAccountId() then
     self:SetMainAccount(self:EnsureDefaultAccount())
+  end
+
+  -- Horizontal character scrolling is now a permanent Main-window behavior.
+  -- Drop the retired opt-out key from older SavedVariables so the removed
+  -- setting cannot silently affect future layouts.
+  if self.db.global.liqui and self.db.global.liqui.windows and self.db.global.liqui.windows.Main then
+    self.db.global.liqui.windows.Main.horizontalScrollWhenScaled = nil
   end
 end
 
@@ -711,6 +724,9 @@ function Data:DeleteCharacter(characterOrGUID)
   if sync and sync.lastSentUpdate then
     sync.lastSentUpdate[GUID] = nil
   end
+  if sync and sync.lastConfirmedUpdate then
+    sync.lastConfirmedUpdate[GUID] = nil
+  end
 
   -- Comm.lua also keeps a few session-only per-GUID caches. They are not
   -- SavedVariables, but clearing them here keeps Remove Character semantically
@@ -1004,10 +1020,16 @@ function Data:GetSyncEligibleCharacters()
   local characters = self:GetCharacters(true)
   local mainAccountId = self:GetMainAccountId()
   local result = {}
+  local defaultAccountId = self:EnsureDefaultAccount()
   for _, character in ipairs(characters) do
-    local account = character.accountId and self.db.global.accounts[character.accountId]
+    -- Characters saved before WoW Account grouping existed may not have an
+    -- explicit accountId. Accounts & Characters already displays those under
+    -- the default account; Sync must resolve them the same way or a character
+    -- can look selected inside Main while still being reported as ineligible.
+    local characterAccountId = character.accountId or defaultAccountId
+    local account = self.db.global.accounts[characterAccountId]
     local accountEnabled = not account or account.enabled ~= false
-    local inMainAccount = not mainAccountId or character.accountId == mainAccountId
+    local inMainAccount = not mainAccountId or characterAccountId == mainAccountId
     if character.enabled ~= false and accountEnabled and inMainAccount then
       table.insert(result, character)
     end
@@ -1520,6 +1542,14 @@ function Data:MigrateDB()
         end
       end
       settings.checkBountifulDone = enabled
+    end
+    -- Track delivery-confirmed Sync state separately from merely-sent state.
+    -- Existing installations start empty and learn confirmations naturally as peers communicate.
+    if self.db.global.dbVersion == 43 then
+      local sync = self.db.global.sync
+      sync.lastConfirmedUpdate = sync.lastConfirmedUpdate or {}
+      sync.lastSuccessfulSyncAt = sync.lastSuccessfulSyncAt or 0
+      sync.lastSuccessfulSyncPeer = sync.lastSuccessfulSyncPeer or ""
     end
     self.db.global.dbVersion = self.db.global.dbVersion + 1
     self:MigrateDB()

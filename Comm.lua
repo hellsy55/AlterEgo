@@ -35,6 +35,44 @@ LibStub("AceComm-3.0"):Embed(addon.Core)
 local CTL = ChatThrottleLib
 
 local COMM_PREFIX = "AEv1"
+-- Presence/version negotiation uses a separate prefix so a multi-part HELLO cannot
+-- collide with a multi-part character record in AceComm's receive spool.
+local CONTROL_PREFIX = "AEv1Sync"
+
+-- Peer discovery/reconciliation is intentionally session-local. Nothing received from
+-- another player is ever re-broadcast as a relay: each client only advertises versions
+-- it knows and only sends characters that belong to its own Main WoW Account.
+local PEER_HEARTBEAT_SECONDS = 60
+local PEER_TIMEOUT_SECONDS = 150
+local HELLO_MIN_INTERVAL_SECONDS = 8
+local HELLO_RESPONSE_MIN_INTERVAL_SECONDS = 8
+local MANUAL_RECONCILE_WAIT_SECONDS = 3
+local ACK_TIMEOUT_SECONDS = 45
+local ACK_RETRY_MAX = 2
+local syncPeers = {} -- [sender] = {lastSeen, distribution, versions = { [GUID] = lastUpdate }}
+local catchupPendingGUIDs = {} -- own/Main characters a peer explicitly reported missing/stale
+local pendingConfirmations = {} -- [transmissionId] = {GUID, lastUpdate, manual, batchId}
+local confirmationRetryCounts = {} -- [GUID|lastUpdate] = number of automatic ACK-timeout retries this session
+local processedHelloIds = {} -- dedupe the same HELLO arriving over both GUILD and PARTY/RAID
+local processedAckTransmissionIds = {} -- dedupe the same transmission arriving over more than one channel while still allowing a retry to be ACK'd
+local helloResponseAt = {} -- [sender] = GetTime() of our last ordinary HELLO response
+local lastHelloAt = 0
+local syncSessionId = format("%d-%.6f", time(), GetTime())
+local syncSequence = 0
+
+local function NewSyncId(kind)
+  syncSequence = syncSequence + 1
+  return format("%s|%s|%d", kind, syncSessionId, syncSequence)
+end
+local syncHelloTimer = nil
+local syncHeartbeatTicker = nil
+local manualReconcileRequestId = nil
+local manualReconcileResponders = nil
+local manualReconcileTimer = nil
+
+local SendSyncHello
+local ScheduleSyncHello
+local QueueCatchUpFromPeerVersions
 
 -- Same control-byte protocol AceComm-3.0's own SendCommMessage uses for
 -- splitting a message across multiple ~255-byte addon messages -- kept
@@ -123,14 +161,16 @@ local broadcastPending = false
 -- exactly that scenario.
 local batchInProgress = false
 
--- Set when a manual "Sync Now" arrives while a batch is already running.
--- Checked at the top of each SendNext step: rather than an outright
--- refusal, the NEW request takes over the moment the CURRENTLY
--- transmitting character genuinely finishes (never mid-transmission --
--- that's what actually risks corrupting it, see batchInProgress above),
--- discarding whatever was left of the old list in favor of a completely
--- fresh one.
-local supersedeRequested = false
+-- If a manual "Sync Now" is interrupted, keep the exact GUIDs that still
+-- need to go out. Additional clicks while the batch is actively sending
+-- are intentionally ignored -- they do NOT create a second batch or reset
+-- progress. Once the current batch has stopped (for example because combat
+-- began), the next Sync Now resumes only these pending GUIDs. Successful
+-- characters are removed one-by-one after ChatThrottleLib confirms every
+-- chunk left this client, so already-sent characters are never repeated as
+-- part of the same manual sync attempt. Nil means there is no incomplete
+-- manual Sync Now to resume.
+local manualPendingGUIDs = nil
 
 -- The batchId of the Sync Now push currently going out (nil when none),
 -- and which senders have ack'd ANY character in it so far -- populated
@@ -140,6 +180,41 @@ local supersedeRequested = false
 -- sent" summary name who it actually reached, not just that it was sent.
 local activeBatchId = nil
 local activeBatchConfirmedBy = {}
+
+-- Automatic Sync never tries to push new character records while combat/encounter restrictions
+-- are active. If a background batch is interrupted (or an outgoing chunk is rejected), remember
+-- that work is still pending and resume it after the restriction clears. Because successful
+-- characters are marked individually only after their transmission really completes, the retry
+-- naturally contains only the failed/not-yet-started records instead of resending the whole batch.
+local automaticResumePending = false
+local automaticResumeTimer = nil
+
+local function ResumeAutomaticSyncIfPending()
+  if not automaticResumePending then return end
+  if not Data.db.global.sync.enabled then
+    automaticResumePending = false
+    return
+  end
+  if batchInProgress or InCombatLockdown() then return end
+
+  automaticResumePending = false
+  addon.Core:RequestSyncBroadcast()
+end
+
+local function QueueAutomaticResume()
+  if not Data.db.global.sync.enabled then return end
+  automaticResumePending = true
+
+  -- PLAYER_REGEN_ENABLED / ADDON_RESTRICTION_STATE_CHANGED are the normal resume triggers.
+  -- Keep one delayed fallback as well so a send that reports failure just AFTER the relevant
+  -- event fired cannot strand the pending data until some unrelated future character update.
+  if not automaticResumeTimer then
+    automaticResumeTimer = C_Timer.NewTimer(BROADCAST_MIN_INTERVAL_SECONDS, function()
+      automaticResumeTimer = nil
+      ResumeAutomaticSyncIfPending()
+    end)
+  end
+end
 
 
 ---Sends one already-chunkable string over one channel, using the exact
@@ -205,28 +280,99 @@ local function SendOnChannel(prefix, text, distribution, prio, callbackFn, callb
   CTL:SendAddonMessage(prio, prefix, MSG_MULTI_LAST .. chunk, distribution, target, queueName, ctlCallback, textlen)
 end
 
+---@param payload table
+---@return string
+local function EncodeSyncPayload(payload)
+  local serialized = LibSerialize:Serialize(payload)
+  local compressed = LibDeflate:CompressDeflate(serialized)
+  return LibDeflate:EncodeForWoWAddonChannel(compressed)
+end
+
+---@param prefix string
+---@param payload table
+---@param distribution string
+---@param priority string
+---@param target string?
+local function SendPayload(prefix, payload, distribution, priority, target)
+  SendOnChannel(prefix, EncodeSyncPayload(payload), distribution, priority or "NORMAL", nil, nil, target)
+end
+
+local function MarkSuccessfulSync(peer)
+  local sync = Data.db.global.sync
+  sync.lastSuccessfulSyncAt = time()
+  sync.lastSuccessfulSyncPeer = peer or ""
+end
+
+---@param sender string
+---@param distribution string?
+---@param versions table<string, number>?
+local function MarkPeerSeen(sender, distribution, versions)
+  if not sender or sender == "" then return end
+  local peer = syncPeers[sender] or { versions = {} }
+  syncPeers[sender] = peer
+  peer.lastSeen = GetTime()
+  if distribution then peer.distribution = distribution end
+  if type(versions) == "table" then
+    peer.versions = versions
+  elseif type(peer.versions) ~= "table" then
+    peer.versions = {}
+  end
+end
+
+local function GetActiveSyncPeers(filter)
+  local now = GetTime()
+  local active = {}
+  for sender, peer in pairs(syncPeers) do
+    if (not filter or filter[sender]) and peer.lastSeen and now - peer.lastSeen <= PEER_TIMEOUT_SECONDS then
+      active[sender] = peer
+    end
+  end
+  return active
+end
+
+---Session/persistent status for the tutorial checklist. Presence is session-only;
+---the most recent confirmed character sync is persisted in SavedVariables.
+function addon.Core:GetSyncPeerStatus()
+  local active = GetActiveSyncPeers()
+  local names = {}
+  local newestSeen = 0
+  for sender, peer in pairs(active) do
+    table.insert(names, sender)
+    newestSeen = math.max(newestSeen, peer.lastSeen or 0)
+  end
+  table.sort(names)
+  local sync = Data.db.global.sync
+  return {
+    count = #names,
+    names = names,
+    newestSeen = newestSeen,
+    lastSuccessfulSyncAt = sync.lastSuccessfulSyncAt or 0,
+    lastSuccessfulSyncPeer = sync.lastSuccessfulSyncPeer or "",
+  }
+end
+
 ---Serialize+compress+send one character record. Shared by the automatic
 ---per-change broadcast and the manual "Sync Now".
 ---@param character AE_Character
 ---@param password string
 ---@param channels string[] AceComm distributions to send on ("GUILD"/"PARTY"/"RAID"), one message per entry.
 ---@param forced boolean? True for a manual "Sync Now" push -- tells the receiver to apply this even if it's not strictly newer than what it already has (see OnCommReceived).
----@param batchId string? Shared by every character in the same manual "Sync Now" click -- lets the receiver group them and print its own "received" summary once they've all arrived. Nil for the automatic path.
----@param batchTotal number? How many characters are in this batchId's push -- how the receiver knows when it has them all.
+---@param batchId string? Shared by every character in one broadcast. Manual batches use it for the normal Sync Now summary; automatic batches use it only so the receiver can announce completion when that batch introduced at least one brand-new character.
+---@param batchTotal number? How many characters are in this batchId's push -- how the receiver knows when the whole broadcast has arrived.
 ---@param priority string? AceComm priority ("BULK"/"NORMAL"/"ALERT"). Defaults to "BULK".
+---@param transmissionId string? Unique id used for delivery ACK bookkeeping on both automatic and manual sends.
 ---@param onDone function? Called once every channel's LAST chunk has been dequeued by ChatThrottleLib -- i.e. once this character's transmission is truly finished going out on every channel, not just "some time has probably passed". Receives one argument: a list of channels where at least one chunk did NOT actually go out (empty if everything succeeded) -- see the comment below on why "reached the last chunk" and "actually delivered" aren't the same thing. PerformBroadcast's SendNext waits for this before starting the next character, instead of guessing a fixed delay -- see the comment on batchInProgress for why that matters: everyone's outgoing messages share the same AceComm sender identity (whichever character you're actually logged in on), so their multi-part reassembly streams share the exact same spool slot on the receiving end, and starting the next one before the last one's LAST chunk has gone out destroys it.
-local function SendCharacterRecord(character, password, channels, forced, batchId, batchTotal, priority, onDone)
+local function SendCharacterRecord(character, password, channels, forced, batchId, batchTotal, priority, transmissionId, onDone)
   local payload = {
     password = password,
     character = character,
     forced = forced or nil,
     batchId = batchId,
     batchTotal = batchTotal,
+    transmissionId = transmissionId,
   }
 
-  local serialized = LibSerialize:Serialize(payload)
-  local compressed = LibDeflate:CompressDeflate(serialized)
-  local encoded = LibDeflate:EncodeForWoWAddonChannel(compressed)
+  local encoded = EncodeSyncPayload(payload)
 
   local remainingChannels = #channels
   local doneFired = false
@@ -372,7 +518,9 @@ end
 ---@return boolean
 local function IsEligibleToSend(character)
   local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
-  return not mainAccountId or character.accountId == mainAccountId
+  if not mainAccountId then return true end
+  local characterAccountId = character.accountId or Data:EnsureDefaultAccount()
+  return characterAccountId == mainAccountId
 end
 
 ---True if this specific character's own checkbox is on (in the Characters
@@ -384,7 +532,8 @@ end
 ---@return boolean
 local function IsCharacterIndividuallyEnabled(character)
   if character.enabled == false then return false end
-  local account = character.accountId and Data.db.global.accounts[character.accountId]
+  local characterAccountId = character.accountId or Data:EnsureDefaultAccount()
+  local account = Data.db.global.accounts[characterAccountId]
   if account and account.enabled == false then return false end
   return true
 end
@@ -425,8 +574,198 @@ local function GetBroadcastCandidates()
   return candidates
 end
 
----@param verbose boolean? Deliberate manual "Sync Now": prints a summary, sends every eligible character (see GetBroadcastCandidates) regardless of whether it changed, and tells the receiver to apply it even if not newer. False/nil is the automatic background path: silent, and only sends characters that actually changed since the last time they were sent.
-local function PerformBroadcast(verbose)
+---Re-resolve and revalidate a queued character immediately before its turn to send.
+---This makes sharing changes live inside an already-running batch: disabling/moving a
+---character or changing the max-level filter skips it before any new chunks start.
+---@param GUID string
+---@return AE_Character?
+local function GetCurrentlyEligibleCharacter(GUID)
+  if not GUID or GUID == "" then return nil end
+  local character = Data.db.global.characters and Data.db.global.characters[GUID] or nil
+  if not character then
+    local current = Data:GetCharacter()
+    if current and current.GUID == GUID then
+      character = current
+    end
+  end
+  if not character then return nil end
+  if not IsEligibleToSend(character) or not IsCharacterIndividuallyEnabled(character) then return nil end
+  if OnlySyncMaxLevelCharacters() and not Data:IsMaxLevelCharacter(character) then return nil end
+  return character
+end
+
+local function BuildKnownCharacterVersions()
+  local versions = {}
+  for GUID, character in pairs(Data.db.global.characters or {}) do
+    if type(GUID) == "string" and type(character) == "table" and type(character.lastUpdate) == "number" then
+      versions[GUID] = character.lastUpdate
+    end
+  end
+  return versions
+end
+
+local function PeerNeedsCharacter(peer, character)
+  if not peer or type(peer.versions) ~= "table" then return true end
+  local remoteVersion = tonumber(peer.versions[character.GUID])
+  local localVersion = tonumber(character.lastUpdate) or 0
+  return remoteVersion == nil or remoteVersion < localVersion
+end
+
+---@param character AE_Character
+---@param peerFilter table<string, boolean>?
+---@return boolean needsCharacter
+---@return boolean hasPeer
+local function AnyActivePeerNeedsCharacter(character, peerFilter)
+  local hasPeer = false
+  for _, peer in pairs(GetActiveSyncPeers(peerFilter)) do
+    hasPeer = true
+    if PeerNeedsCharacter(peer, character) then
+      return true, true
+    end
+  end
+  return false, hasPeer
+end
+
+local function IsCharacterAwaitingConfirmation(character)
+  for _, confirmation in pairs(pendingConfirmations) do
+    if confirmation.GUID == character.GUID and confirmation.lastUpdate == character.lastUpdate then
+      return true
+    end
+  end
+  return false
+end
+
+local function ConfirmationRetryKey(GUID, lastUpdate)
+  return tostring(GUID) .. "|" .. tostring(lastUpdate or 0)
+end
+
+---Start the ACK deadline only after every chunk has actually left this client. Automatic
+---records get a small bounded retry budget if a live peer still reports the record missing.
+---@param transmissionId string
+local function ArmConfirmationTimeout(transmissionId)
+  local confirmation = pendingConfirmations[transmissionId]
+  if not confirmation or confirmation.timeoutArmed then return end
+  confirmation.timeoutArmed = true
+
+  C_Timer.After(ACK_TIMEOUT_SECONDS, function()
+    local current = pendingConfirmations[transmissionId]
+    if current ~= confirmation then return end
+    pendingConfirmations[transmissionId] = nil
+
+    if confirmation.manual or not Data.db.global.sync.enabled then return end
+    local character = GetCurrentlyEligibleCharacter(confirmation.GUID)
+    if not character or tonumber(character.lastUpdate) ~= tonumber(confirmation.lastUpdate) then return end
+
+    local needsCharacter, hasPeer = AnyActivePeerNeedsCharacter(character)
+    if not hasPeer or not needsCharacter then return end
+
+    local retryKey = ConfirmationRetryKey(confirmation.GUID, confirmation.lastUpdate)
+    local retries = confirmationRetryCounts[retryKey] or 0
+    if retries >= ACK_RETRY_MAX then return end
+
+    confirmationRetryCounts[retryKey] = retries + 1
+    catchupPendingGUIDs[confirmation.GUID] = true
+    addon.Core:RequestSyncBroadcast()
+  end)
+end
+
+QueueCatchUpFromPeerVersions = function(versions)
+  if type(versions) ~= "table" then return end
+  local queued = false
+  for _, character in ipairs(GetBroadcastCandidates()) do
+    local remoteVersion = tonumber(versions[character.GUID])
+    local localVersion = tonumber(character.lastUpdate) or 0
+    if remoteVersion == nil or remoteVersion < localVersion then
+      catchupPendingGUIDs[character.GUID] = true
+      queued = true
+    end
+  end
+  if queued then
+    addon.Core:RequestSyncBroadcast()
+  end
+end
+
+SendSyncHello = function(target, responseTo, requestId, force)
+  if not Data.db.global.sync.enabled or InCombatLockdown() then return false end
+  local password = Data.db.global.sync.password
+  if not password or password == "" then return false end
+
+  local now = GetTime()
+  if not target and not force and now - lastHelloAt < HELLO_MIN_INTERVAL_SECONDS then
+    return false
+  end
+
+  local payload = {
+    password = password,
+    hello = true,
+    helloId = NewSyncId("H"),
+    response = target ~= nil or nil,
+    responseTo = responseTo,
+    requestId = requestId,
+    versions = BuildKnownCharacterVersions(),
+  }
+
+  if target then
+    SendPayload(CONTROL_PREFIX, payload, "WHISPER", "ALERT", target)
+    return true
+  end
+
+  local channels = GetUsableChannels(false)
+  if #channels == 0 then return false end
+  lastHelloAt = now
+  for _, channel in ipairs(channels) do
+    SendPayload(CONTROL_PREFIX, payload, channel, "NORMAL")
+  end
+  return true
+end
+
+ScheduleSyncHello = function(delay, force)
+  if syncHelloTimer then
+    syncHelloTimer:Cancel()
+    syncHelloTimer = nil
+  end
+
+  local scheduledDelay = delay or 0.5
+  if not force then
+    local remaining = HELLO_MIN_INTERVAL_SECONDS - (GetTime() - lastHelloAt)
+    if remaining > scheduledDelay then
+      scheduledDelay = remaining + 0.05
+    end
+  end
+
+  syncHelloTimer = C_Timer.NewTimer(math.max(0, scheduledDelay), function()
+    syncHelloTimer = nil
+    SendSyncHello(nil, nil, nil, force)
+  end)
+end
+
+---Called when Enable Sync/password/channel/eligibility changes. Coalesce bursts and obey
+---the ordinary HELLO cooldown; a manual Sync Now reconciliation remains the only path that
+---intentionally bypasses this debounce.
+function addon.Core:AnnounceSyncPresence()
+  ScheduleSyncHello(0.25, false)
+end
+
+---Close a completed character batch with the actual number of records that went out. This
+---matters when sharing eligibility changes while the batch is running: receivers no longer
+---wait for characters that were deliberately skipped after the batch began.
+local function SendBatchDone(password, channels, batchId, sentCount, manual)
+  if not batchId then return end
+  local payload = {
+    password = password,
+    batchDone = true,
+    batchId = batchId,
+    batchTotal = sentCount or 0,
+    manual = manual or nil,
+  }
+  for _, channel in ipairs(channels) do
+    SendPayload(COMM_PREFIX, payload, channel, "NORMAL")
+  end
+end
+
+---@param verbose boolean? Deliberate manual "Sync Now": after a short peer/version reconciliation, sends only eligible characters that at least one responding peer is missing or has an older version of. False/nil is the automatic background path: silent, and sends changed records plus records explicitly requested by peer catch-up.
+---@param peerFilter table<string, boolean>? Manual reconciliation responders to target.
+local function PerformBroadcast(verbose, peerFilter)
   broadcastPending = false
 
   -- Never sync during actual combat -- checked first, before anything
@@ -438,30 +777,26 @@ local function PerformBroadcast(verbose)
   -- combat ends, since the person clicking it right this second is
   -- exactly the scenario worth avoiding: sending addon traffic mid-pull
   -- risks tainting the UI, and there's no good reason Sync can't just
-  -- wait until after the pull instead. The automatic path retries
-  -- quietly every few seconds until combat clears.
+  -- wait until after the pull instead. The automatic path remembers the
+  -- interrupted work and resumes quietly once combat/restrictions clear.
   if InCombatLockdown() then
     if verbose then
       addon.Core:Print("Sync: not sending, you're in combat -- Sync never runs during combat, even inside a raid or Mythic+ (being in the instance is fine; being in a pull isn't). Try again once combat ends.")
     else
-      C_Timer.After(BROADCAST_STAGGER_SECONDS, function()
-        addon.Core:RequestSyncBroadcast()
-      end)
+      QueueAutomaticResume()
     end
     return
   end
 
   -- Never let two broadcasts from this client overlap -- see the comment
   -- on batchInProgress above for why that's a correctness issue, not just
-  -- a pacing one. A manual click while one's already running doesn't get
-  -- refused -- it takes over as soon as it's safe to (see
-  -- supersedeRequested, checked in SendNext below). The automatic path
-  -- just quietly retries shortly instead.
+  -- a pacing one. Repeated Sync Now clicks while a manual batch is already
+  -- moving are deliberately a no-op: the existing batch simply continues
+  -- from its current character, so a double-click can never restart the
+  -- list and resend characters that already finished. The automatic path
+  -- still quietly retries shortly instead.
   if batchInProgress then
-    if verbose then
-      supersedeRequested = true
-      addon.Core:Print("Sync: a send is already in progress -- this Sync Now will take over as soon as the character currently sending finishes.")
-    else
+    if not verbose then
       C_Timer.After(BROADCAST_STAGGER_SECONDS, function()
         addon.Core:RequestSyncBroadcast()
       end)
@@ -486,22 +821,62 @@ local function PerformBroadcast(verbose)
     return
   end
 
-  -- Manual "Sync Now" (verbose) sends every eligible character regardless
-  -- of whether it changed. The automatic per-change broadcast stays silent
-  -- and only sends what actually changed, since it's routine background
-  -- chatter that can fire many times an hour.
+  -- A fresh manual Sync Now is a reconciliation, not a blind resend: only
+  -- characters at least one responding peer reports missing/stale are sent.
+  -- If an earlier manual batch was interrupted, resume its exact pending GUIDs
+  -- without re-negotiating or repeating characters that already completed.
   local toSend = {}
-  for _, character in ipairs(candidates) do
-    if verbose or HasCharacterChangedSinceLastSync(character) then
-      table.insert(toSend, character)
+  if verbose then
+    local resumingManualBatch = manualPendingGUIDs and next(manualPendingGUIDs) ~= nil
+    if resumingManualBatch then
+      local eligibleGUIDs = {}
+      for _, character in ipairs(candidates) do
+        eligibleGUIDs[character.GUID] = true
+        if manualPendingGUIDs[character.GUID] then
+          table.insert(toSend, character)
+        end
+      end
+
+      for GUID in pairs(manualPendingGUIDs) do
+        if not eligibleGUIDs[GUID] then
+          manualPendingGUIDs[GUID] = nil
+        end
+      end
+    else
+      for _, character in ipairs(candidates) do
+        local needsCharacter = AnyActivePeerNeedsCharacter(character, peerFilter)
+        if needsCharacter and not IsCharacterAwaitingConfirmation(character) then
+          table.insert(toSend, character)
+        end
+      end
+    end
+  else
+    for _, character in ipairs(candidates) do
+      if catchupPendingGUIDs[character.GUID] or HasCharacterChangedSinceLastSync(character) then
+        table.insert(toSend, character)
+      end
     end
   end
 
   lastBroadcastAt = now
 
   if #toSend == 0 then
-    if verbose then addon.Core:Print("Sync: nothing to send.") end
+    if verbose then
+      local activePeers = GetActiveSyncPeers(peerFilter)
+      if not next(activePeers) then
+        addon.Core:Print("Sync: no compatible Sync peer responded. Keep the other account online on the same Sync Channel and try again.")
+      else
+        addon.Core:Print("Sync: all detected peers are already up to date. Nothing to send.")
+      end
+    end
     return
+  end
+
+  if verbose then
+    manualPendingGUIDs = manualPendingGUIDs or {}
+    for _, character in ipairs(toSend) do
+      manualPendingGUIDs[character.GUID] = true
+    end
   end
 
   -- Send one character at a time, and don't start the next one until the
@@ -518,34 +893,19 @@ local function PerformBroadcast(verbose)
   local sentNames = {}
   local index = 0
   local startedAt = GetTime()
-  -- Unique per Sync Now click, not per character -- lets the RECEIVING
-  -- side (see the batch-tracking near OnCommReceived) group every
-  -- character from this one push together and print its own "received"
-  -- summary once they've all arrived, mirroring this side's "sent"
-  -- summary. Only set for a manual push (verbose); the automatic
-  -- background path stays silent on both ends, so it has no need for
-  -- this. GetTime() has plenty of resolution for this to be unique
-  -- across any two clicks a person could actually make.
-  local batchId = verbose and format("%.6f", GetTime()) or nil
+  -- Unique per broadcast, not per character. Manual Sync Now uses this
+  -- to print its normal receive summary. Automatic sync also carries a
+  -- batch id now, but remains silent unless the receiver actually learns
+  -- about at least one brand-new character; in that one case it prints a
+  -- single completion line after the whole automatic batch has been
+  -- processed. GetTime() has enough resolution for broadcasts here.
+  local batchId = NewSyncId(verbose and "M" or "A")
   if verbose then
     activeBatchId = batchId
     activeBatchConfirmedBy = {}
   end
   batchInProgress = true
   local function SendNext()
-    -- A newer "Sync Now" arrived while we were waiting on the last
-    -- character -- hand off to it now instead of continuing this old
-    -- list. Safe to do here specifically: the character that was
-    -- actually transmitting has just genuinely finished (that's why
-    -- we're in this callback at all), so there's nothing in flight for a
-    -- fresh send to collide with.
-    if supersedeRequested then
-      supersedeRequested = false
-      batchInProgress = false
-      PerformBroadcast(true)
-      return
-    end
-
     -- Re-check every step, not just once at the start -- unchecking
     -- "Enable Sync" mid-send should stop the rest of the batch right
     -- away instead of letting an in-flight multi-character send keep
@@ -556,22 +916,36 @@ local function PerformBroadcast(verbose)
     -- to ChatThrottleLib); this only stops the NEXT one from starting.
     if not Data.db.global.sync.enabled then
       if verbose then
-        addon.Core:Print(format("Sync: stopped -- Sync was disabled mid-send. %d of %d character(s) had already gone out: %s", #sentNames, #toSend, #sentNames > 0 and JoinWithAnd(sentNames) or "none"))
+        addon.Core:Print(format("Sync: stopped -- Sync was disabled mid-send. %d of %d character(s) had already gone out: %s. Sync Now will continue with only the remaining character(s) after Sync is enabled again.", #sentNames, #toSend, #sentNames > 0 and JoinWithAnd(sentNames) or "none"))
+      end
+      if verbose then
+        activeBatchId = nil
+        activeBatchConfirmedBy = {}
       end
       batchInProgress = false
       return
     end
     if InCombatLockdown() then
       if verbose then
-        addon.Core:Print(format("Sync: stopped -- you're in combat now. %d of %d character(s) had already gone out: %s", #sentNames, #toSend, #sentNames > 0 and JoinWithAnd(sentNames) or "none"))
+        addon.Core:Print(format("Sync: stopped -- you're in combat now. %d of %d character(s) had already gone out: %s. Sync Now will continue with only the remaining character(s) after combat.", #sentNames, #toSend, #sentNames > 0 and JoinWithAnd(sentNames) or "none"))
+      else
+        QueueAutomaticResume()
+      end
+      if verbose then
+        activeBatchId = nil
+        activeBatchConfirmedBy = {}
       end
       batchInProgress = false
       return
     end
 
     index = index + 1
-    local character = toSend[index]
-    if not character then
+    local queuedCharacter = toSend[index]
+    if not queuedCharacter then
+      -- Tell receivers the ACTUAL completed batch size. If sharing eligibility changed
+      -- mid-send, this closes the batch without making them wait for skipped records.
+      SendBatchDone(password, channels, batchId, #sentNames, verbose == true)
+
       if verbose then
         -- Who has confirmed receiving ANY character of this batch so
         -- far -- see activeBatchConfirmedBy above. Often non-empty by
@@ -584,25 +958,79 @@ local function PerformBroadcast(verbose)
           table.insert(confirmedBy, confirmedName)
         end
         local toClause = #confirmedBy > 0 and format(" to %s", JoinWithAnd(confirmedBy)) or ""
-        addon.Core:Print(format("Sync: |cff33ff99successfully|r sent %d character(s)%s over %s in %s: %s", #sentNames, toClause, JoinWithAnd(channels), FormatDuration(GetTime() - startedAt), JoinWithAnd(sentNames)))
+        local sentList = #sentNames > 0 and JoinWithAnd(sentNames) or "none"
+        addon.Core:Print(format("Sync: |cff33ff99successfully|r sent %d character(s)%s over %s in %s: %s", #sentNames, toClause, JoinWithAnd(channels), FormatDuration(GetTime() - startedAt), sentList))
+        if manualPendingGUIDs and next(manualPendingGUIDs) ~= nil then
+          local pendingCount = 0
+          for _ in pairs(manualPendingGUIDs) do pendingCount = pendingCount + 1 end
+          addon.Core:Print(format("Sync: %d character(s) still pending. Sync Now will continue with only those character(s).", pendingCount))
+        else
+          manualPendingGUIDs = nil
+        end
+        activeBatchId = nil
+        activeBatchConfirmedBy = {}
       end
       batchInProgress = false
       return
     end
+
+    -- Re-check this exact GUID at the moment its turn begins. A user can change
+    -- character/account sharing or the max-level filter while a long batch is running;
+    -- queued records that are no longer eligible are skipped before any chunks start.
+    local character = GetCurrentlyEligibleCharacter(queuedCharacter.GUID)
+    if not character then
+      catchupPendingGUIDs[queuedCharacter.GUID] = nil
+      if manualPendingGUIDs then
+        manualPendingGUIDs[queuedCharacter.GUID] = nil
+      end
+      C_Timer.After(0, SendNext)
+      return
+    end
+
     local name = format("%s-%s", character.info.name or "?", character.info.realm or "?")
     if verbose then
       addon.Core:Print(format("Sync: sending %d/%d -- %s...", index, #toSend, name))
     end
-    SendCharacterRecord(character, password, channels, verbose, batchId, #toSend, verbose and "NORMAL" or "BULK", function(failedChannels)
+    local transmissionId = NewSyncId("T")
+    pendingConfirmations[transmissionId] = {
+      GUID = character.GUID,
+      lastUpdate = character.lastUpdate,
+      manual = verbose == true,
+      batchId = batchId,
+    }
+
+    SendCharacterRecord(character, password, channels, verbose, batchId, #toSend, verbose and "NORMAL" or "BULK", transmissionId, function(failedChannels)
       -- A chunk permanently failing mid-transmission (not the throttle
       -- ChatThrottleLib retries on its own) means this character's data
       -- almost certainly did not arrive intact -- WoW: Midnight's
       -- restriction on outgoing addon messages during an active
       -- raid/M+ encounter is one realistic cause, alongside plain
       -- disconnects or being kicked from the group mid-send.
-      if verbose and #failedChannels > 0 then
-        addon.Core:Print(format("Sync: WARNING -- %s over %s did not fully send -- its data is likely incomplete on the other end. If you're in an active raid encounter or Mythic+ run, WoW itself may be restricting outgoing addon messages until it ends; try Sync Now again afterward.", name, JoinWithAnd(failedChannels)))
+      if #failedChannels > 0 then
+        pendingConfirmations[transmissionId] = nil
+        if verbose then
+          addon.Core:Print(format("Sync: WARNING -- %s over %s did not fully send -- its data is likely incomplete on the other end. If you're in an active raid encounter or Mythic+ run, WoW itself may be restricting outgoing addon messages until it ends; try Sync Now again afterward.", name, JoinWithAnd(failedChannels)))
+        else
+          -- Do not mark this character as synced and do not start another background record
+          -- while the transport is being rejected. PLAYER_REGEN_ENABLED or the addon-restriction
+          -- event below will retry this character plus anything that never started.
+          QueueAutomaticResume()
+          batchInProgress = false
+          return
+        end
+      else
+        -- Only record success once every channel's chunks really left this client. Marking the
+        -- character at queue time could make a combat-restricted transmission look complete and
+        -- suppress the retry until that character happened to change again.
+        MarkCharacterSynced(character)
+        catchupPendingGUIDs[character.GUID] = nil
+        if manualPendingGUIDs then
+          manualPendingGUIDs[character.GUID] = nil
+        end
+        table.insert(sentNames, name)
+        ArmConfirmationTimeout(transmissionId)
       end
+
       -- Confirmed done going out on every channel. Still wait a short,
       -- fixed buffer on top of that -- our confirmation only covers OUR
       -- own client handing the last chunk off; it says nothing about how
@@ -610,8 +1038,6 @@ local function PerformBroadcast(verbose)
       -- reassembling it, so a little slack here is cheap insurance.
       C_Timer.After(BROADCAST_STAGGER_SECONDS, SendNext)
     end)
-    MarkCharacterSynced(character)
-    table.insert(sentNames, name)
   end
   SendNext()
 end
@@ -624,7 +1050,19 @@ end
 ---that -- a genuinely slow send is waited out, not abandoned).
 function addon.Core:ResetSyncBatchGuard()
   batchInProgress = false
-  supersedeRequested = false
+  automaticResumePending = false
+  activeBatchId = nil
+  activeBatchConfirmedBy = {}
+  manualReconcileRequestId = nil
+  manualReconcileResponders = nil
+  if manualReconcileTimer then
+    manualReconcileTimer:Cancel()
+    manualReconcileTimer = nil
+  end
+  if automaticResumeTimer then
+    automaticResumeTimer:Cancel()
+    automaticResumeTimer = nil
+  end
 end
 
 ---Call this after anything that changed the logged-in character's data.
@@ -636,14 +1074,44 @@ function addon.Core:RequestSyncBroadcast()
   C_Timer.After(BROADCAST_DEBOUNCE_SECONDS, PerformBroadcast)
 end
 
----Send right now, ignoring the throttle and the "unchanged" skip -- sends
----EVERY eligible character (see GetBroadcastCandidates), not just the one
----you're logged in on, and tells the receiver to apply each one even if
----it's not strictly newer than what they already have. Prints exactly
----what happened -- for testing, so you don't have to wait for a real data
----change or the 20s window to see whether Sync is working.
+---Force a peer/version reconciliation right now. Matching peers answer with the
+---versions they already know; only eligible Main-account characters they report
+---missing/outdated are sent. Prints progress/results for manual testing.
 function addon.Core:ForceSyncBroadcast()
-  PerformBroadcast(true)
+  -- An interrupted manual batch already knows exactly which GUIDs remain; resume it
+  -- directly instead of starting a second reconciliation/request.
+  if manualPendingGUIDs and next(manualPendingGUIDs) ~= nil then
+    PerformBroadcast(true)
+    return
+  end
+  if batchInProgress or manualReconcileRequestId then return end
+
+  if InCombatLockdown() then
+    PerformBroadcast(true) -- preserve the existing explanatory chat message
+    return
+  end
+
+  local password = GetUsablePassword(true)
+  if not password then return end
+
+  manualReconcileRequestId = NewSyncId("R")
+  manualReconcileResponders = {}
+  addon.Core:Print("Sync: checking detected peers for missing or outdated characters...")
+
+  if not SendSyncHello(nil, nil, manualReconcileRequestId, true) then
+    manualReconcileRequestId = nil
+    manualReconcileResponders = nil
+    addon.Core:Print("Sync: couldn't send the reconciliation request on the selected Sync Channel.")
+    return
+  end
+
+  manualReconcileTimer = C_Timer.NewTimer(MANUAL_RECONCILE_WAIT_SECONDS, function()
+    manualReconcileTimer = nil
+    local responders = manualReconcileResponders or {}
+    manualReconcileRequestId = nil
+    manualReconcileResponders = nil
+    PerformBroadcast(true, responders)
+  end)
 end
 
 -- Which top-level Data.db.global keys are display/behavior PREFERENCES --
@@ -744,7 +1212,7 @@ end
 -- Render() rebuilds a decent chunk of UI, which is exactly the kind of
 -- thing that causes a hitch during a pull). Applied automatically the
 -- moment combat ends (PLAYER_REGEN_ENABLED, below).
-local pendingCombatApplies = {} -- [GUID] = {character = <AE_Character>, isNew = boolean}
+local pendingCombatApplies = {} -- [GUID] = {character, isNew, sender, distribution, payload}; auto-batch metadata is kept so completion waits until the queued record is actually applied
 
 -- Which senders we've already warned about an unreadable message --
 -- session-only. See where it's used in OnCommReceived for why.
@@ -770,6 +1238,15 @@ function addon.Core:ForgetSyncCharacterMetadata(GUID)
   if not GUID or GUID == "" then return end
 
   pendingCombatApplies[GUID] = nil
+  catchupPendingGUIDs[GUID] = nil
+  for transmissionId, confirmation in pairs(pendingConfirmations) do
+    if confirmation.GUID == GUID then
+      pendingConfirmations[transmissionId] = nil
+    end
+  end
+  for _, peer in pairs(syncPeers) do
+    if peer.versions then peer.versions[GUID] = nil end
+  end
 
   local prefix = GUID .. "|"
   for updateKey in pairs(processedUpdates) do
@@ -794,13 +1271,99 @@ local BATCH_RECEIVE_TIMEOUT_SECONDS = 120
 -- [key] = { total, names = {}, firstAt = GetTime() }
 local incomingBatches = {}
 
+-- Automatic batches stay silent for ordinary updates. If an automatic
+-- catch-up introduces one or more brand-new characters, remember those
+-- names per sender until an automatic batch from that sender fully
+-- completes. This survives a transport/combat interruption: the first
+-- partial batch can time out, the retry can contain only existing records,
+-- and the user still gets exactly one truthful "finished" notice once the
+-- catch-up actually reaches a complete batch.
+local incomingAutomaticBatches = {}
+local pendingAutomaticNewNotices = {} -- [sender] = { names = {}, seen = {}, channels = {}, firstAt = GetTime() }
+
+local function FinishIncomingAutomaticBatch(sender, key, batch)
+  if not batch or incomingAutomaticBatches[key] ~= batch then return end
+  incomingAutomaticBatches[key] = nil
+  local notice = pendingAutomaticNewNotices[sender]
+  if notice and #notice.names > 0 then
+    local channels = {}
+    for channel in pairs(notice.channels) do
+      table.insert(channels, channel)
+    end
+    table.sort(channels)
+    addon.Core:Print(format(
+      "Sync: |cff33ff99automatic sync finished successfully|r -- received %d new character(s) over %s in %s from %s: %s. Existing characters will continue updating silently; you'll only be notified again when new characters are received.",
+      #notice.names, JoinWithAnd(channels), FormatDuration(GetTime() - notice.firstAt), sender, JoinWithAnd(notice.names)
+    ))
+    pendingAutomaticNewNotices[sender] = nil
+  end
+end
+
+---@param sender string
+---@param distribution string
+---@param payload table
+---@param remote AE_Character
+---@param isNew boolean
+local function TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
+  if payload.forced or not payload.batchId or not payload.batchTotal then return end
+
+  local characterName = format("%s-%s", remote.info and remote.info.name or "?", remote.info and remote.info.realm or "?")
+  if isNew then
+    local notice = pendingAutomaticNewNotices[sender]
+    if not notice then
+      notice = { names = {}, seen = {}, channels = {}, firstAt = GetTime() }
+      pendingAutomaticNewNotices[sender] = notice
+    end
+    if not notice.seen[remote.GUID] then
+      notice.seen[remote.GUID] = true
+      table.insert(notice.names, characterName)
+    end
+  end
+
+  local notice = pendingAutomaticNewNotices[sender]
+  if notice then
+    notice.channels[distribution] = true
+  end
+
+  local key = sender .. "|" .. tostring(payload.batchId)
+  local batch = incomingAutomaticBatches[key]
+  if not batch then
+    batch = { total = payload.batchTotal, count = 0 }
+    incomingAutomaticBatches[key] = batch
+    C_Timer.After(BATCH_RECEIVE_TIMEOUT_SECONDS, function()
+      -- Never claim completion for an incomplete batch. Keep any pending
+      -- new-character notice so the retry can close it out later.
+      if incomingAutomaticBatches[key] == batch then
+        incomingAutomaticBatches[key] = nil
+      end
+    end)
+  end
+
+  batch.count = batch.count + 1
+  if batch.count >= batch.total then
+    FinishIncomingAutomaticBatch(sender, key, batch)
+  end
+end
+
 ---Called once per character arriving from a forced "Sync Now" push that
----carries batch info (payload.batchId/batchTotal -- absent on the
----automatic path, which has no summary to print here). Accumulates names
+---carries batch info (payload.batchId/batchTotal). Automatic batches also
+---carry these fields, but are handled separately above and only announce
+---completion when they introduced a new character. Accumulates names
 ---and channels for that batch and, once every character in it has
 ---arrived (or this batch goes quiet for BATCH_RECEIVE_TIMEOUT_SECONDS),
 ---prints one summary line mirroring the sender's own "successfully sent"
 ---one, colored the same way.
+local function FinishIncomingManualBatch(sender, key, batch)
+  if not batch or incomingBatches[key] ~= batch then return end
+  incomingBatches[key] = nil
+  local elapsed = FormatDuration(GetTime() - batch.firstAt)
+  if #batch.names >= batch.total then
+    addon.Core:Print(format("Sync: |cff33ff99successfully|r received %d character(s) over %s in %s from %s: %s", #batch.names, JoinWithAnd(batch.channels), elapsed, sender, JoinWithAnd(batch.names)))
+  else
+    addon.Core:Print(format("Sync: received %d of %d character(s) over %s in %s from %s (gave up waiting for the rest): %s", #batch.names, batch.total, JoinWithAnd(batch.channels), elapsed, sender, JoinWithAnd(batch.names)))
+  end
+end
+
 ---@param sender string
 ---@param distribution string
 ---@param payload table
@@ -826,21 +1389,39 @@ local function TrackBatchArrival(sender, distribution, payload, remote)
     table.insert(batch.channels, distribution)
   end
 
-  local function finishBatch()
-    if incomingBatches[key] ~= batch then return end -- already finished (or superseded) elsewhere
-    incomingBatches[key] = nil
-    local elapsed = FormatDuration(GetTime() - batch.firstAt)
-    if #batch.names >= batch.total then
-      addon.Core:Print(format("Sync: |cff33ff99successfully|r received %d character(s) over %s in %s from %s: %s", #batch.names, JoinWithAnd(batch.channels), elapsed, sender, JoinWithAnd(batch.names)))
-    else
-      addon.Core:Print(format("Sync: received %d of %d character(s) over %s in %s from %s (gave up waiting for the rest): %s", #batch.names, batch.total, JoinWithAnd(batch.channels), elapsed, sender, JoinWithAnd(batch.names)))
+  if #batch.names >= batch.total then
+    FinishIncomingManualBatch(sender, key, batch)
+  else
+    C_Timer.After(BATCH_RECEIVE_TIMEOUT_SECONDS, function()
+      FinishIncomingManualBatch(sender, key, batch)
+    end)
+  end
+end
+
+---A sender emits this after a batch fully finishes so receivers can reconcile the
+---actual sent count if sharing eligibility changed while the batch was in progress.
+local function TrackBatchDone(sender, distribution, payload)
+  if not payload.batchId or payload.batchTotal == nil then return end
+  local key = sender .. "|" .. tostring(payload.batchId)
+  local total = math.max(0, tonumber(payload.batchTotal) or 0)
+
+  if payload.manual then
+    local batch = incomingBatches[key]
+    if batch then
+      batch.total = total
+      if #batch.names >= batch.total then
+        FinishIncomingManualBatch(sender, key, batch)
+      end
     end
+    return
   end
 
-  if #batch.names >= batch.total then
-    finishBatch()
-  else
-    C_Timer.After(BATCH_RECEIVE_TIMEOUT_SECONDS, finishBatch)
+  local batch = incomingAutomaticBatches[key]
+  if batch then
+    batch.total = total
+    if batch.count >= batch.total then
+      FinishIncomingAutomaticBatch(sender, key, batch)
+    end
   end
 end
 
@@ -870,39 +1451,43 @@ end
 addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
   for _, pending in pairs(pendingCombatApplies) do
     ApplyReceivedCharacter(pending.character, pending.isNew)
+    TrackAutomaticBatchCompletion(pending.sender, pending.distribution, pending.payload, pending.character, pending.isNew)
   end
   wipe(pendingCombatApplies)
+  ResumeAutomaticSyncIfPending()
+  ScheduleSyncHello(0.5, false)
 end, true)
 
----Whispers a small delivery confirmation back to whoever just sent a
----manual "Sync Now" push (payload.forced) -- letting the SENDER's chat
----show that the other side actually got the message, without waiting on
----(or blocking) anything. Sent as a WHISPER regardless of which channel
----the original data came in on, since it only needs to reach that one
----specific character, not a whole guild/group. Fires right after the
----password and character shape check pass -- i.e. "I received and could
----read this", independent of whatever OnCommReceived does with the data
----next (applied, skipped as unchanged, or protected by Main): the sender
----mainly wants to know the message didn't vanish in transit, which this
----answers regardless of the outcome. Carries the original message's
----batchId back along with it so the sender can tell WHICH Sync Now push
----this confirms (see activeBatchConfirmedBy).
+-- Midnight can reject outgoing addon traffic for an encounter-specific restriction even when
+-- the normal combat check alone is not enough to describe why a chunk failed. Resume a pending
+-- automatic batch as soon as Blizzard reports that restriction becoming inactive.
+addon.Events:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED", function(_, _, _, state)
+  if state == Enum.AddOnRestrictionState.Inactive then
+    ResumeAutomaticSyncIfPending()
+  end
+end, true)
+
+---Whispers delivery confirmation back to whoever sent a character record.
+---Automatic ACKs are silent; manual Sync Now ACKs keep their existing chat feedback.
 ---@param remote AE_Character
 ---@param sender string
 ---@param password string
 ---@param batchId string?
-local function SendAck(remote, sender, password, batchId)
+---@param transmissionId string?
+---@param manual boolean?
+local function SendAck(remote, sender, password, batchId, transmissionId, manual)
   local payload = {
     password = password,
     ack = true,
+    GUID = remote.GUID,
+    lastUpdate = remote.lastUpdate,
     name = remote.info and remote.info.name,
     realm = remote.info and remote.info.realm,
     batchId = batchId,
+    transmissionId = transmissionId,
+    manual = manual or nil,
   }
-  local serialized = LibSerialize:Serialize(payload)
-  local compressed = LibDeflate:CompressDeflate(serialized)
-  local encoded = LibDeflate:EncodeForWoWAddonChannel(compressed)
-  SendOnChannel(COMM_PREFIX, encoded, "WHISPER", "ALERT", nil, nil, sender)
+  SendPayload(COMM_PREFIX, payload, "WHISPER", "ALERT", sender)
 end
 
 ---Same idea as SendAck, but for a "Sync Addon Settings" push -- whispers
@@ -916,14 +1501,11 @@ local function SendSettingsAck(sender, password)
     password = password,
     settingsAck = true,
   }
-  local serialized = LibSerialize:Serialize(payload)
-  local compressed = LibDeflate:CompressDeflate(serialized)
-  local encoded = LibDeflate:EncodeForWoWAddonChannel(compressed)
-  SendOnChannel(COMM_PREFIX, encoded, "WHISPER", "ALERT", nil, nil, sender)
+  SendPayload(COMM_PREFIX, payload, "WHISPER", "ALERT", sender)
 end
 
 function addon.Core:OnCommReceived(prefix, message, distribution, sender)
-  if prefix ~= COMM_PREFIX then return end
+  if prefix ~= COMM_PREFIX and prefix ~= CONTROL_PREFIX then return end
   if not Data.db.global.sync.enabled then return end
 
   -- WoW echoes your own outgoing GUILD/PARTY/RAID (and even WHISPER-to-
@@ -978,15 +1560,87 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     return
   end
 
+  MarkPeerSeen(sender, distribution, payload.versions)
+
+  -- Presence/version negotiation lives on its own prefix so it can never disturb
+  -- character reassembly. A HELLO never changes settings or character ownership; it
+  -- only causes each client to send its own Main-account records that the peer reports
+  -- missing/outdated. Responses are direct whispers and never relayed onward.
+  if prefix == CONTROL_PREFIX then
+    if payload.hello then
+      if payload.helloId then
+        local helloKey = tostring(sender) .. "|" .. tostring(payload.helloId)
+        if processedHelloIds[helloKey] then return end
+        processedHelloIds[helloKey] = true
+        C_Timer.After(300, function() processedHelloIds[helloKey] = nil end)
+      end
+      if payload.responseTo and manualReconcileRequestId and payload.responseTo == manualReconcileRequestId then
+        manualReconcileResponders = manualReconcileResponders or {}
+        manualReconcileResponders[sender] = true
+      end
+      QueueCatchUpFromPeerVersions(payload.versions)
+      if not payload.response then
+        local now = GetTime()
+        local lastResponse = helloResponseAt[sender] or 0
+        -- Explicit manual reconciliation requests always get a response. Ordinary
+        -- presence chatter is rate-limited per peer so roster-event bursts cannot
+        -- turn into a HELLO/response storm.
+        if payload.requestId or now - lastResponse >= HELLO_RESPONSE_MIN_INTERVAL_SECONDS then
+          if SendSyncHello(sender, payload.requestId, nil, true) then
+            helloResponseAt[sender] = now
+          end
+        end
+      end
+    end
+    return
+  end
+
   -- A delivery confirmation from a previous forced push, not character
   -- data -- print it and stop, nothing else to process. If it's for the
   -- Sync Now push currently going out, also remember who confirmed, so
   -- the final "successfully sent" summary can name them.
   if payload.ack then
-    addon.Core:Print(format("Sync: %s |cff33ff99confirmed|r receiving %s-%s.", tostring(sender), payload.name or "?", payload.realm or "?"))
-    if payload.batchId and payload.batchId == activeBatchId then
+    local confirmation = payload.transmissionId and pendingConfirmations[payload.transmissionId] or nil
+    -- A transmission id is unique to one batch. An ACK with a mismatched batch id is
+    -- still proof that an older record arrived, but it must never satisfy the current
+    -- attempt or produce current-batch chat feedback.
+    local matchesCurrentAttempt = confirmation ~= nil
+      and (not payload.batchId or not confirmation.batchId or payload.batchId == confirmation.batchId)
+    if matchesCurrentAttempt then
+      pendingConfirmations[payload.transmissionId] = nil
+    else
+      confirmation = nil
+    end
+
+    local GUID = payload.GUID or (confirmation and confirmation.GUID)
+    local confirmedUpdate = payload.lastUpdate or (confirmation and confirmation.lastUpdate)
+    if GUID and confirmedUpdate then
+      local sync = Data.db.global.sync
+      sync.lastConfirmedUpdate = sync.lastConfirmedUpdate or {}
+      local previous = tonumber(sync.lastConfirmedUpdate[GUID]) or 0
+      sync.lastConfirmedUpdate[GUID] = math.max(previous, tonumber(confirmedUpdate) or 0)
+      confirmationRetryCounts[ConfirmationRetryKey(GUID, confirmedUpdate)] = nil
+      local peer = syncPeers[sender]
+      if peer then
+        peer.versions = peer.versions or {}
+        peer.versions[GUID] = confirmedUpdate
+      end
+      MarkSuccessfulSync(sender)
+    end
+
+    -- Manual Sync Now keeps explicit chat confirmations only for the exact active
+    -- transmission. Automatic delivery ACKs and delayed ACKs from older attempts stay silent.
+    if confirmation and confirmation.manual then
+      addon.Core:Print(format("Sync: %s |cff33ff99confirmed|r receiving %s-%s.", tostring(sender), payload.name or "?", payload.realm or "?"))
+    end
+    if confirmation and payload.batchId and payload.batchId == activeBatchId then
       activeBatchConfirmedBy[sender] = true
     end
+    return
+  end
+
+  if payload.batchDone then
+    TrackBatchDone(sender, distribution, payload)
     return
   end
 
@@ -1018,14 +1672,40 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   -- broadcast.
   local updateKey = remote.GUID .. "|" .. tostring(remote.lastUpdate)
   if processedUpdates[updateKey] then
+    -- If the original ACK was lost, a retry carries a NEW transmission id. Re-ACK
+    -- that retry without reapplying the same character. Copies of the same transmission
+    -- arriving over Both/Guild+Party are still handled only once.
+    if payload.transmissionId and not processedAckTransmissionIds[payload.transmissionId] then
+      local transmissionId = payload.transmissionId
+      processedAckTransmissionIds[transmissionId] = true
+      C_Timer.After(600, function() processedAckTransmissionIds[transmissionId] = nil end)
+      SendAck(remote, sender, password, payload.batchId, transmissionId, payload.forced)
+      if payload.forced then
+        TrackBatchArrival(sender, distribution, payload, remote)
+      else
+        TrackAutomaticBatchCompletion(sender, distribution, payload, remote, false)
+      end
+    end
     return
   end
   processedUpdates[updateKey] = true
+  if payload.transmissionId then
+    local transmissionId = payload.transmissionId
+    processedAckTransmissionIds[transmissionId] = true
+    C_Timer.After(600, function() processedAckTransmissionIds[transmissionId] = nil end)
+  end
 
-  -- Confirm delivery back to a manual "Sync Now" push -- see SendAck for
-  -- why this fires here regardless of what happens to the data below.
+  local peer = syncPeers[sender]
+  if peer then
+    peer.versions = peer.versions or {}
+    peer.versions[remote.GUID] = remote.lastUpdate
+  end
+
+  -- ACK every readable character record, automatic or manual. The sender uses this
+  -- to distinguish "left my client" from "another Sync peer actually received it".
+  SendAck(remote, sender, password, payload.batchId, payload.transmissionId, payload.forced)
+  MarkSuccessfulSync(sender)
   if payload.forced then
-    SendAck(remote, sender, password, payload.batchId)
     TrackBatchArrival(sender, distribution, payload, remote)
   end
 
@@ -1040,6 +1720,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   -- end): that's a deliberate "make sure we're both fully caught up" action,
   -- so it applies even when the record isn't strictly newer.
   if not payload.forced and existing and existing.lastUpdate and remote.lastUpdate and remote.lastUpdate <= existing.lastUpdate then
+    TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
     return
   end
 
@@ -1050,6 +1731,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     -- not something worth a chat line every time it does its job.
     local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
     if mainAccountId and existing.accountId == mainAccountId then
+      TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
       return
     end
 
@@ -1091,11 +1773,37 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   end
 
   if InCombatLockdown() then
-    pendingCombatApplies[remote.GUID] = { character = remote, isNew = isNew }
+    pendingCombatApplies[remote.GUID] = {
+      character = remote,
+      isNew = isNew,
+      sender = sender,
+      distribution = distribution,
+      payload = payload,
+    }
     return
   end
 
   ApplyReceivedCharacter(remote, isNew)
+  TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
+end
+
+-- Advertise presence/version state when this client becomes reachable on a relevant
+-- transport. The short debounce coalesces the burst of roster/guild events that commonly
+-- fire together on login. A low-rate heartbeat keeps peer presence fresh without chat noise.
+addon.Events:RegisterEvent({
+  "PLAYER_ENTERING_WORLD",
+  "GROUP_ROSTER_UPDATE",
+  "GUILD_ROSTER_UPDATE",
+  "PLAYER_GUILD_UPDATE",
+}, function()
+  ScheduleSyncHello(1.5, false)
+end, true)
+
+if not syncHeartbeatTicker then
+  syncHeartbeatTicker = C_Timer.NewTicker(PEER_HEARTBEAT_SECONDS, function()
+    SendSyncHello(nil, nil, nil, false)
+  end)
 end
 
 addon.Core:RegisterComm(COMM_PREFIX)
+addon.Core:RegisterComm(CONTROL_PREFIX)

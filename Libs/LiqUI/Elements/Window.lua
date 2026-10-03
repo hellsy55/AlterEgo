@@ -408,6 +408,9 @@ local function createWindow(options)
     window.db.scale = scalePercent
     window.options.windowScale = scalePercent
     applyWindowPosition(window.db, window)
+    if window.options.onScaleChanged then
+      window.options.onScaleChanged(window, scalePercent)
+    end
   end
 
   ---@return ColorTable?
@@ -509,9 +512,17 @@ local function createWindow(options)
           if onRefresh then
             onRefresh()
           end
+          return MenuResponse.Refresh
         end,
         scalePercent
       )
+    end
+
+    -- Window-specific options that conceptually belong directly below Scaling
+    -- can be inserted here without forcing the consumer to duplicate the
+    -- generic LiqUI window menu.
+    if window.options.onWindowOptionsAfterScaling then
+      window.options.onWindowOptionsAfterScaling(window, rootMenu)
     end
 
     local windowColor = window:GetWindowColor()
@@ -571,8 +582,15 @@ local function createWindow(options)
         if onRefresh then
           onRefresh()
         end
+        return MenuResponse.Refresh
       end
     )
+
+    -- Window-specific options that belong directly after the generic border
+    -- toggle can be inserted here without duplicating the LiqUI menu.
+    if window.options.onWindowOptionsAfterBorder then
+      window.options.onWindowOptionsAfterBorder(window, rootMenu)
+    end
   end
 
   if window.options.border > 0 then

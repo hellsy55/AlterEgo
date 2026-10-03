@@ -650,6 +650,7 @@ function Module:Render()
   local tooltipDataBySlot = {}
   local embellishmentInfoBySlot = {}
   local equippedEmbellishmentCount = 0
+  local hasCraftedEquipment = false
 
   -- Resolve embellishments for the whole equipped set first. The Missing state
   -- is character-wide: crafted slots only need a warning while fewer than two
@@ -674,6 +675,9 @@ function Module:Render()
     tooltipDataBySlot[item.itemSlotID] = tooltipData
     local embellishmentInfo = Data:GetEquipmentEmbellishmentInfo(item.itemLink, tooltipData, item)
     embellishmentInfoBySlot[item.itemSlotID] = embellishmentInfo
+    if embellishmentInfo.isCrafted then
+      hasCraftedEquipment = true
+    end
     if embellishmentInfo.hasEmbellishment then
       equippedEmbellishmentCount = equippedEmbellishmentCount + 1
     end
@@ -686,11 +690,11 @@ function Module:Render()
   -- not reduce this count.
   local missingEmbellishmentCount = math.max(0, 2 - equippedEmbellishmentCount)
 
-  -- When there are no real embellishments equipped, the title communicates the
-  -- 0/2 state and the per-item Embellishment column is unnecessary. Keep the
-  -- column available as soon as at least one tracked embellishment is equipped.
+  -- Keep the Embellishment column visible whenever any crafted equipment is
+  -- equipped, even at 0/2 real embellishments, so crafted host items can show
+  -- their per-slot Missing state. Hide it only when there is no crafted gear.
   if self.dataTable.db and self.dataTable.db.hiddenColumns then
-    self.dataTable.db.hiddenColumns.embellishment = equippedEmbellishmentCount == 0 and true or nil
+    self.dataTable.db.hiddenColumns.embellishment = not hasCraftedEquipment and true or nil
   end
 
   TableForEach(character.equipment, function(item)
