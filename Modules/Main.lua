@@ -4356,6 +4356,17 @@ function Module:RenderNow()
     -- character viewport as well so off-screen columns never leak outside the
     -- visible Main-window character area.
     local characterScrollArea = self.window.body.content.scrollArea
+    -- The horizontal bar is retained internally so ScrollBox can calculate its
+    -- range, but Main is intentionally wheel/edge-arrow only. Suppress it here
+    -- as well as in LiqUI so Blizzard cannot flash it back on during relayout.
+    if characterScrollArea.horizontalScrollBar then
+      characterScrollArea.horizontalScrollBar:SetAlpha(0)
+      characterScrollArea.horizontalScrollBar:EnableMouse(false)
+      if characterScrollArea.horizontalScrollBar.SetMouseMotionEnabled then
+        characterScrollArea.horizontalScrollBar:SetMouseMotionEnabled(false)
+      end
+      characterScrollArea.horizontalScrollBar:Hide()
+    end
     if characterScrollArea.container.SetClipsChildren then
       characterScrollArea.container:SetClipsChildren(true)
     end

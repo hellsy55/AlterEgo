@@ -568,7 +568,19 @@ local function updateScrollAreaLayout(scrollArea, contentWidth, contentHeight)
   end
 
   if scrollArea.horizontalScrollBar then
-    scrollArea.horizontalScrollBar:SetShown(showHorizontal)
+    if scrollArea.hideHorizontalScrollBar then
+      -- ScrollUtil can re-show its registered scrollbar when the scroll range
+      -- changes. Keep the bar registered for range calculations, but never
+      -- render or interact with it in wheel-only mode.
+      scrollArea.horizontalScrollBar:SetAlpha(0)
+      scrollArea.horizontalScrollBar:EnableMouse(false)
+      if scrollArea.horizontalScrollBar.SetMouseMotionEnabled then
+        scrollArea.horizontalScrollBar:SetMouseMotionEnabled(false)
+      end
+      scrollArea.horizontalScrollBar:Hide()
+    else
+      scrollArea.horizontalScrollBar:SetShown(showHorizontal)
+    end
     scrollArea.horizontalScrollBar:SetHideIfUnscrollable(true)
     scrollArea.horizontalScrollBar:SetHeight(LiqUI.Constants.layout.sizes.scrollbar.thickness)
     scrollArea.horizontalScrollBar:ClearAllPoints()
@@ -657,6 +669,7 @@ function Utils.CreateScrollArea(parent, options)
     content = contentFrame,
     horizontal = horizontal,
     vertical = vertical,
+    hideHorizontalScrollBar = options and options.hideHorizontalScrollBar or false,
     verticalScrollBox = verticalScrollBox,
     verticalScrollBar = verticalScrollBar,
     horizontalScrollBox = horizontalScrollBox,
@@ -725,6 +738,32 @@ function Utils.CreateScrollArea(parent, options)
   if wheelScrollBox then
     applyOuterWheelPanExtent(wheelScrollBox, wheelPanExtent)
     Utils.BindScrollBoxMouseWheel(containerFrame, wheelScrollBox)
+  end
+
+  if horizontalScrollBar and scrollArea.hideHorizontalScrollBar then
+    -- InitScrollBoxWithScrollBar owns the bar's visibility and may call Show()
+    -- whenever its range changes. Keep it registered for range calculations,
+    -- but make every visual/input layer permanently inert in wheel-only mode.
+    local function SuppressHorizontalScrollBar(scrollBar)
+      scrollBar:SetAlpha(0)
+      scrollBar:EnableMouse(false)
+      if scrollBar.SetMouseMotionEnabled then
+        scrollBar:SetMouseMotionEnabled(false)
+      end
+      for _, region in ipairs({ scrollBar:GetRegions() }) do
+        if region.SetAlpha then region:SetAlpha(0) end
+        if region.EnableMouse then region:EnableMouse(false) end
+      end
+      for _, child in ipairs({ scrollBar:GetChildren() }) do
+        if child.SetAlpha then child:SetAlpha(0) end
+        if child.EnableMouse then child:EnableMouse(false) end
+        if child.SetMouseMotionEnabled then child:SetMouseMotionEnabled(false) end
+      end
+      scrollBar:Hide()
+    end
+
+    SuppressHorizontalScrollBar(horizontalScrollBar)
+    horizontalScrollBar:HookScript("OnShow", SuppressHorizontalScrollBar)
   end
 
   if verticalScrollBar then
