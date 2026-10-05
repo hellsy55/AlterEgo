@@ -52,7 +52,41 @@ if ! command -v svn >/dev/null 2>&1; then
     cat > /home/agent/.local/bin/svn <<'EOF'
 #!/bin/sh
 export LD_LIBRARY_PATH="/home/agent/.local/opt/subversion/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec /home/agent/.local/opt/subversion/usr/bin/svn "$@"
+exec python3 -c '
+import os
+import sys
+from urllib.parse import urlsplit
+
+svn = "/home/agent/.local/opt/subversion/usr/bin/svn"
+options = []
+proxy = next((os.environ[name] for name in
+              ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+              if os.environ.get(name)), None)
+if proxy:
+    try:
+        if any(char.isspace() or ord(char) < 32 or ord(char) == 127
+               for char in proxy):
+            raise ValueError
+        parsed = urlsplit(proxy)
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError
+        host = parsed.hostname
+        port = parsed.port
+        if (parsed.scheme not in ("http", "https") or not host
+                or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+                or any(char in proxy for char in ("\\", "%", "?", "#"))
+                or parsed.netloc.endswith(":")):
+            raise ValueError
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except ValueError:
+        sys.exit("SVN proxy error: expected a valid HTTP(S) proxy URL without credentials.")
+    options = ["--config-option", f"servers:global:http-proxy-host={host}",
+               "--config-option", f"servers:global:http-proxy-port={port}"]
+os.execv(svn, [svn, *options, *sys.argv[1:]])
+' "$@"
 EOF
 
     chmod 755 /home/agent/.local/bin/svn
