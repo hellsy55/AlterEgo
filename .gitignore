@@ -7,3 +7,6 @@ CLAUDE_PATTERNS.md
 
 # Developer scripts
 *.ps1
+
+# Python maintenance bytecode
+__pycache__/

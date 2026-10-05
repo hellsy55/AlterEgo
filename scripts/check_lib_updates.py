@@ -231,9 +231,19 @@ def load_lockfile() -> dict:
 
 
 def save_lockfile(data: dict) -> None:
-    with open(LOCKFILE_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # Replace only a complete file; preserve the previous lock on write failure.
+    directory = os.path.dirname(os.path.abspath(LOCKFILE_PATH))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                         delete=False) as f:
+            temporary = f.name
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(temporary, LOCKFILE_PATH)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 # --------------------------------------------------------------------------
@@ -291,7 +301,10 @@ def main():
 
     for path, entry in externals.items():
         name = short_name(path)
-        resolved = resolve_upstream_version(entry)
+        try:
+            resolved = resolve_upstream_version(entry)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"Version lookup failed for {name}: {error}") from error
 
         if resolved is None:
             unknown += 1
@@ -330,15 +343,18 @@ def main():
         for name in orphans:
             print(f"  - Libs/{name}")
 
+    if args.apply and unknown:
+        raise RuntimeError('Cannot vendor libraries while upstream lookups are unresolved; lockfile unchanged')
+
     if not pending:
-        return
+        return 1 if unknown else 0
 
     if not args.apply:
         print(
             "\nRode de novo com --apply <nome> (ou --apply all) para vendorizar "
             "uma das libs acima."
         )
-        return
+        return 1 if unknown else 0
 
     targets = list(pending.keys()) if args.apply == "all" else [
         p for p, info in pending.items() if info["name"] == args.apply
@@ -355,6 +371,7 @@ def main():
 
     save_lockfile(lock)
     print(f"\n{LOCKFILE_PATH} atualizado. Revise o diff com `git diff` antes de commitar.")
+    return 1 if unknown else 0
 
 
 def vendor_lib(path: str, info: dict) -> None:
@@ -371,20 +388,26 @@ def vendor_lib(path: str, info: dict) -> None:
         if kind == "svn-tag":
             result = run(["svn", "export", "--force", export_url, final])
             if result.returncode != 0:
-                print(f"[erro] falha ao baixar {name}: {result.stderr}", file=sys.stderr)
-                return
+                raise RuntimeError(f"SVN export failed for {name}: {result.stderr.strip()}")
         else:
             clone_dir = os.path.join(tmp, "_clone")
             ref_args = ["--branch", info["new"]] if kind == "git-tag" else []
             result = run(["git", "clone", "--depth", "1", *ref_args, export_url, clone_dir])
             if result.returncode != 0:
                 # fallback: clone default e faz checkout manual (tag ou commit)
+                if os.path.exists(clone_dir):
+                    shutil.rmtree(clone_dir)
                 result = run(["git", "clone", export_url, clone_dir])
-                if result.returncode == 0:
-                    run(["git", "checkout", info["new"]], cwd=clone_dir)
             if result.returncode != 0:
-                print(f"[erro] falha ao baixar {name}: {result.stderr}", file=sys.stderr)
-                return
+                raise RuntimeError(f"Git clone failed for {name}: {result.stderr.strip()}")
+            # Commit pins need checkout even after a successful shallow clone.
+            result = run(["git", "checkout", info["new"]], cwd=clone_dir)
+            if result.returncode != 0 and kind == "git-commit":
+                result = run(["git", "fetch", "--unshallow"], cwd=clone_dir)
+                if result.returncode == 0:
+                    result = run(["git", "checkout", info["new"]], cwd=clone_dir)
+            if result.returncode != 0:
+                raise RuntimeError(f"Git checkout failed for {name}: {result.stderr.strip()}")
             shutil.copytree(clone_dir, final, ignore=shutil.ignore_patterns(".git"))
 
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -402,4 +425,8 @@ def vendor_lib(path: str, info: dict) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(1)

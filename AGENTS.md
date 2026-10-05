@@ -14,9 +14,9 @@ This repository is the fork at https://github.com/hellsy55/AlterEgo of https://g
 ## Branch and workflow invariants
 
 - `new-features` is the development, library-check, PR-implementation, and installation branch. Its committed `Libs/` makes the GitHub ZIP installable. Never ignore or remove its committed `Libs/`.
-- `main` is the fork default and carries no fork-specific commits. Sync `main` and `new-features` independently from `upstream/main`; never merge them into each other. Return to `new-features` after syncing `main`.
+- `new-features` is the intended GitHub default branch. `main` is the upstream mirror and carries no fork-specific commits. Sync `main` and `new-features` independently from `upstream/main`; never merge them into each other. Return to `new-features` after syncing `main`.
 - Stop at a real merge conflict. Explain each side's practical effect and interaction, offer incoming/local/combine/abort, recommend exactly one based on the actual conflict, and wait for the user's choice. Show marked conflict code only when requested. Read the conflict reference only when needed.
-- Never install without the install-menu choice. Selecting the install option is the confirmation; do not ask again. Installation uses a fresh GitHub ZIP of `new-features`, never the working tree, and runs in the current session without a separate window.
+- Physical WoW installation is local Windows only; on Cloud/Linux, report it as a local step and offer no install option. Never install without the install-menu choice. Selecting the install option is the confirmation; do not ask again. Installation uses a fresh GitHub ZIP of `new-features`, never the working tree, and runs in the current session without a separate window.
 - The remote ZIP requirement never authorizes publishing an unapproved local commit or merge. A locally created commit must pass the staged-list, staged-stat, complete-staged-diff, and explicit-approval checkpoint before commit; pre-existing unpublished history requires review and explicit publication approval before push.
 - Never apply an upstream PR before explaining what is gained, lost, and unchanged and receiving the user's explicit choice.
 
@@ -24,7 +24,7 @@ This repository is the fork at https://github.com/hellsy55/AlterEgo of https://g
 
 Match commands case-insensitively and accept close variants, including "update alterego" and "atualizar o addon". Users do not need to name skills.
 
-- `update`, `atualizar`, `update AlterEgo`, `atualizar AlterEgo`: read [.agents/skills/alterego-update/SKILL.md](.agents/skills/alterego-update/SKILL.md). Classify the pending upstream library range during independent branch sync, then offer the install menu. Do not load the library skill, run its checker, ask about libraries, or mention libraries unless the user explicitly requests a check or the exact incoming upstream range touches `Libs/` or recognized library metadata.
+- `update`, `atualizar`, `update AlterEgo`, `atualizar AlterEgo`: read [.agents/skills/alterego-update/SKILL.md](.agents/skills/alterego-update/SKILL.md). Classify the pending upstream library range during independent branch sync, then offer the install menu on local Windows. Do not load the library skill, run its checker, ask about libraries, or mention libraries unless the user explicitly requests a check or the exact incoming upstream range touches `Libs/` or recognized library metadata.
 - `update com libs`, `update and check libs`, and unambiguous equivalents: run the normal update and the explicit library check.
 - `check libs`, `verificar libs`: read [.agents/skills/alterego-libs/SKILL.md](.agents/skills/alterego-libs/SKILL.md). Run only the library version check; do not sync or install.
 - `implement PR <upstream URL>`, `implementar PR <upstream URL>`, or a request to apply, port, or evaluate an upstream PR: read [.agents/skills/alterego-implement-pr/SKILL.md](.agents/skills/alterego-implement-pr/SKILL.md). Inspect compact PR metadata and changed paths first. Run the library check only on explicit request or after a PR library-change choice, then analyze the PR and stop for the implementation choice.

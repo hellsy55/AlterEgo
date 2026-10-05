@@ -1,6 +1,6 @@
 # Installation mechanics and invariants
 
-The session normally runs as Administrator. The existing PowerShell script lives outside the repository at `C:\Users\jonat\Desktop\AlterEgo\atualizar-alterego.ps1`. Retail's AddOns directory is `C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns`. Run the script directly in the current session and wait; a separate window has previously hung.
+This mechanism applies only to the local Windows host with the existing installer and WoW AddOns directory. Cloud/Linux cannot perform physical installation and must not invoke this script. Do not assume Administrator privileges. The existing PowerShell script lives outside the repository at `C:\Users\jonat\Desktop\AlterEgo\atualizar-alterego.ps1`. Retail's AddOns directory is `C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns`. Run the script directly in the current session and wait; a separate window has previously hung.
 
 The script must:
 

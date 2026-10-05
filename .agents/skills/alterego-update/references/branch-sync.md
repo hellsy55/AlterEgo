@@ -4,15 +4,28 @@ Run these stages sequentially. `main` and `new-features` each sync independently
 
 ## Preflight and compact gate
 
-Check the current branch and working tree once. Stop on an unexpected branch or dirty tree; preserve existing changes. Fetch `upstream` once and `origin` once, reusing their remote-tracking refs. Fetch only the branches needed (`upstream/main`, `origin/new-features`, `origin/main`); do not run `pull`, which fetches again. Verify each fetch exit code before using the refs. Do not refetch the same remote during this update.
+Complete [maintenance preflight](../../../references/maintenance-runtime.md) before branch setup, checkout or merge. Reuse its absolute Python executable for the entire update, including any triggered library workflow.
 
-Before any checkout or merge, compare ancestry and hashes:
+Check the current branch and working tree once through `<PYTHON> scripts/prepare_update.py`. Only when the host is positively identified as Codex Cloud and its isolated checkout is `work`, pass `--cloud-work`. A Linux host or branch name alone is not proof of Cloud; local Windows must retain the normal `new-features` branch gate, and the helper explicitly rejects `--cloud-work` on Windows. Read [initial setup](initial-setup.md) for Cloud or missing branches/remotes.
+
+The helper stops on a dirty index/worktree before any fetch or branch change, verifies the remotes, adds the canonical `upstream` if absent, then performs exactly one fetch per remote with explicit destination refspecs:
+
+```text
+git fetch --quiet --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
+git fetch --quiet --no-tags origin +refs/heads/new-features:refs/remotes/origin/new-features +refs/heads/main:refs/remotes/origin/main
+```
+
+It validates the fetched commit refs and mirror ancestry, creates only missing local branches from their corresponding origin refs, and explicitly configures tracking without changing `remote.origin.fetch`. It preserves every existing local branch tip. A verified Cloud `work` must be an ancestor of `origin/new-features` before fetching when that tracking ref exists, and always after fetching; unpublished or divergent `work` commits stop for review. Preserve `work` and never merge or publish it as a project branch. Only after these checks may the helper switch Cloud `work` to the real `new-features`. The helper never merges, resets, commits or pushes.
+
+Retain its compact result, including which branches were created, and continue the ancestry/publication gates below for all pre-existing real branches. Reuse these fetched refs for the entire update; do not fetch again or run `pull`. A failed helper is an error/pending decision, not a no-op. On an ordinary local no-op it does not check out either branch.
+
+After preparation, before any further checkout or merge, compare ancestry and hashes:
 
 - `git merge-base --is-ancestor upstream/main new-features` means no incoming upstream commits for `new-features`. Otherwise record `git merge-base new-features upstream/main` and count `git rev-list --count <base>..upstream/main`. This exact pending upstream range is the library and overlap gate; retain it before merging.
 - Compare `new-features` with `origin/new-features`. If local is behind, fast-forward it; if divergent, stop for the merge-commit or conflict checkpoint before upstream work. If local is ahead before this update, stop before merging or pushing and review its unpublished commits; do not publish them automatically. If origin advancement changes the upstream merge base, recompute the pending upstream range before classifying or merging.
-- Verify that `origin/main` is an ancestor of `upstream/main` before advancing `main`; otherwise stop because the fork default may contain fork-specific commits. Compare local `main` with both refs by ancestry. Divergence that prevents fast-forward is an error requiring a decision; never create a merge commit on `main`.
+- Verify that `origin/main` is an ancestor of `upstream/main` before advancing `main`; otherwise stop because the upstream mirror may contain fork-specific commits. Compare local `main` with both refs by ancestry. Divergence that prevents fast-forward is an error requiring a decision; never create a merge commit on `main`.
 
-Only call the update a no-op when both local branches equal their origin refs and already contain `upstream/main`. Then do not checkout either branch, merge, push, rerun status, or load the library skill. Report both branches current and proceed to the install choice. A pre-existing local-ahead branch is not a no-op: stop for review of its unpublished history and an explicit publication decision before any push. After a fast-forward or merge, obtain the changed branch's result once; do not repeat full status when no operation could have changed the worktree.
+Only call the update a no-op when both local branches equal their origin refs and already contain `upstream/main`. Then do not checkout either branch, merge, push, rerun status, or load the library skill. Report both branches current and proceed to the environment-aware install stage. A pre-existing local-ahead branch is not a no-op: stop for review of its unpublished history and an explicit publication decision before any push. After a fast-forward or merge, obtain the changed branch's result once; do not repeat full status when no operation could have changed the worktree.
 
 ## Developed branch
 
@@ -24,7 +37,7 @@ When incoming upstream commits exist, first list their changed paths/modules wit
 
 After the gates, merge `upstream/main` only if it is not already an ancestor of `new-features`, using `git merge --no-commit upstream/main`. This keeps the established non-fast-forward merge semantics. If a clean merge requires a commit, show its staged file list, staged stat, and complete staged diff and wait for explicit approval before committing. Do not automatically commit a merge. Push `new-features` only after all locally created commits in its unpublished range have passed their required checkpoints; a pre-existing local-ahead range requires separate review and explicit publication approval. Fast-forwarding published upstream commits creates no local commit and needs no commit checkpoint. Verify the approved result is on `origin/new-features` before offering installation; never push an unapproved merge merely to make its ZIP available.
 
-## Fork default branch
+## Upstream mirror branch
 
 After the developed branch, stop before advancing `main` if it was already ahead of `origin/main` at preflight; review that unpublished history and obtain explicit publication approval. Otherwise checkout `main` only if it needs a fast-forward. Fast-forward from `origin/main` if needed, then from `upstream/main` if needed. Stop if either step cannot fast-forward. Push an upstream fast-forward to `main` after verifying its ancestry. Return to `new-features` after any `main` checkout. Do not checkout `main` at all when it is already current.
 
