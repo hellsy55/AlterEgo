@@ -22,6 +22,8 @@ This repository is the fork at https://github.com/hellsy55/AlterEgo of https://g
 
 ## Command routing
 
+On Cloud/Linux, if `svn` is missing and a workflow requires it, follow [.agents/references/cloud-environment.md](.agents/references/cloud-environment.md) to provision it rootlessly before starting that workflow.
+
 Match commands case-insensitively and accept close variants, including "update alterego" and "atualizar o addon". Users do not need to name skills.
 
 - `update`, `atualizar`, `update AlterEgo`, `atualizar AlterEgo`: read [.agents/skills/alterego-update/SKILL.md](.agents/skills/alterego-update/SKILL.md). Classify the pending upstream library range during independent branch sync, then offer the install menu on local Windows. Do not load the library skill, run its checker, ask about libraries, or mention libraries unless the user explicitly requests a check or the exact incoming upstream range touches `Libs/` or recognized library metadata.
