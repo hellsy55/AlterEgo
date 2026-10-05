@@ -49,7 +49,10 @@ def prepare(cloud_work=False, mode='update'):
         raise RuntimeError('Unexpected branch; maintenance requires new-features or verified Cloud work')
     verify_remote('origin', ORIGIN)
     if is_cloud_work:
-        if exists('refs/remotes/origin/new-features') and not ancestor('work', 'origin/new-features'):
+        # Refresh only the required tracking ref before judging Cloud work.
+        # A stale local ref cannot establish whether work is unpublished.
+        git('fetch', '--quiet', '--no-tags', 'origin', *ORIGIN_REFS[:1])
+        if not ancestor('work', 'origin/new-features'):
             raise RuntimeError('Cloud work has unpublished/divergent commits; preserve it and stop for review')
 
     if mode == 'update':
@@ -65,8 +68,11 @@ def prepare(cloud_work=False, mode='update'):
         git('fetch', '--quiet', '--no-tags', 'upstream', *UPSTREAM_REFS)
         refs = ['upstream/main', 'origin/new-features', 'origin/main']
         branches = ('new-features', 'main')
-    git('fetch', '--quiet', '--no-tags', 'origin',
-        *(ORIGIN_REFS if mode == 'update' else ORIGIN_REFS[:1]))
+    origin_refs = ORIGIN_REFS if mode == 'update' else ORIGIN_REFS[:1]
+    if is_cloud_work:
+        origin_refs = origin_refs[1:]
+    if origin_refs:
+        git('fetch', '--quiet', '--no-tags', 'origin', *origin_refs)
     for ref in refs:
         git('cat-file', '-e', ref + '^{commit}')
     if is_cloud_work and not ancestor('work', 'origin/new-features'):

@@ -91,7 +91,11 @@ class CloudCheckoutTests(unittest.TestCase):
         self.assertEqual(self.git('config', '--get', 'branch.main.remote'), 'origin')
         self.assertEqual(self.git('config', '--get', 'branch.main.merge'), 'refs/heads/main')
         fetches = [call.args for call in calls.call_args_list if call.args[0] == 'fetch']
-        self.assertEqual(len(fetches), 2)
+        self.assertEqual(fetches, [
+            ('fetch', '--quiet', '--no-tags', 'origin', self.narrow),
+            ('fetch', '--quiet', '--no-tags', 'upstream', *preparation.UPSTREAM_REFS),
+            ('fetch', '--quiet', '--no-tags', 'origin', preparation.ORIGIN_REFS[1]),
+        ])
         self.assertEqual(result['created'], ['new-features', 'main'])
         self.assertTrue(result['work_preserved'])
         self.assertFalse(any(call.args[0] in ('push', 'reset', 'merge') for call in calls.call_args_list))
@@ -136,18 +140,59 @@ class CloudCheckoutTests(unittest.TestCase):
 
     def test_upstream_rewrite_cannot_silently_abandon_work(self):
         self.command(self.fork, 'update-ref', 'refs/heads/new-features', self.base)
-        with self.assertRaisesRegex(RuntimeError, 'no longer contains work'):
+        with self.assertRaisesRegex(RuntimeError, 'unpublished/divergent'):
             preparation.prepare(cloud_work=True)
         self.assertEqual(self.git('rev-parse', 'work'), self.fork_head)
         self.assertEqual(self.git('branch', '--format=%(refname:short)'), 'work')
 
     def test_unpublished_work_commits_preserved_and_stop(self):
         head = self.commit(self.repo, 'work-only.txt', 'Unpublished work')
-        with self.assertRaisesRegex(RuntimeError, 'unpublished/divergent'):
-            preparation.prepare(cloud_work=True)
+        self.git('update-ref', 'refs/remotes/origin/new-features', self.base)
+        with patch.object(preparation, 'git', wraps=preparation.git) as calls:
+            with self.assertRaisesRegex(RuntimeError, 'unpublished/divergent'):
+                preparation.prepare(cloud_work=True)
+        self.assertEqual(self.git('rev-parse', 'origin/new-features'), self.fork_head)
+        fetches = [call.args for call in calls.call_args_list if call.args[0] == 'fetch']
+        self.assertEqual(fetches, [('fetch', '--quiet', '--no-tags', 'origin', self.narrow)])
         self.assertEqual(self.git('rev-parse', 'work'), head)
         self.assertEqual(self.git('branch', '--show-current'), 'work')
         self.assertEqual(self.git('remote'), 'origin')
+
+    def test_stale_tracking_ref_accepts_published_work(self):
+        for mode in ('development', 'update'):
+            with self.subTest(mode=mode):
+                # The fixture server already contains work; only the local ref is stale.
+                self.git('update-ref', 'refs/remotes/origin/new-features', self.base)
+                self.git('checkout', '-q', 'work')
+                with patch.object(preparation, 'git', wraps=preparation.git) as calls:
+                    result = preparation.prepare(cloud_work=True, mode=mode)
+                self.assertEqual(self.git('rev-parse', 'origin/new-features'), self.fork_head)
+                self.assertEqual(self.git('rev-parse', 'work'), self.fork_head)
+                self.assertEqual(self.git('branch', '--show-current'), 'new-features')
+                self.assertTrue(result['work_preserved'])
+                operations = [call.args for call in calls.call_args_list]
+                refresh = ('fetch', '--quiet', '--no-tags', 'origin', self.narrow)
+                check = ('merge-base', '--is-ancestor', 'work', 'origin/new-features')
+                self.assertLess(operations.index(('status', '--porcelain')), operations.index(refresh))
+                self.assertLess(operations.index(refresh), operations.index(check))
+
+    def test_divergent_work_stops_after_refresh(self):
+        head = self.commit(self.repo, 'work-only.txt', 'Divergent work')
+        self.command(self.seed, 'checkout', '-q', 'new-features')
+        remote_head = self.commit(self.seed, 'remote-only.txt', 'Divergent remote')
+        self.command(self.seed, 'push', '-q', str(self.fork), 'HEAD:refs/heads/new-features')
+        for mode in ('development', 'update'):
+            with self.subTest(mode=mode):
+                self.git('update-ref', 'refs/remotes/origin/new-features', self.base)
+                with patch.object(preparation, 'git', wraps=preparation.git) as calls:
+                    with self.assertRaisesRegex(RuntimeError, 'unpublished/divergent'):
+                        preparation.prepare(cloud_work=True, mode=mode)
+                self.assertEqual(self.git('rev-parse', 'origin/new-features'), remote_head)
+                self.assertEqual(self.git('rev-parse', 'work'), head)
+                self.assertEqual(self.git('branch', '--format=%(refname:short)'), 'work')
+                fetches = [call.args for call in calls.call_args_list if call.args[0] == 'fetch']
+                self.assertEqual(fetches, [('fetch', '--quiet', '--no-tags', 'origin', self.narrow)])
+                self.assertEqual(self.git('remote'), 'origin')
 
     def test_existing_real_branches_keep_local_commits(self):
         self.git('checkout', '-qb', 'new-features')
@@ -254,18 +299,22 @@ class CloudCheckoutTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in calls.call_args_list], ['status'])
         self.assertEqual(self.git('branch', '--show-current'), 'work')
 
-    def test_development_unpublished_work_stops_before_fetch(self):
+    def test_development_unpublished_work_stops_after_fetch(self):
         head = self.commit(self.repo, 'local.txt', 'Unpublished work')
+        self.git('update-ref', 'refs/remotes/origin/new-features', self.base)
         with patch.object(preparation, 'git', wraps=preparation.git) as calls:
             with self.assertRaisesRegex(RuntimeError, 'unpublished/divergent'):
                 preparation.prepare(cloud_work=True, mode='development')
-        self.assertFalse(any(call.args[0] in ('fetch', 'checkout', 'push', 'reset', 'merge') for call in calls.call_args_list))
+        fetches = [call.args for call in calls.call_args_list if call.args[0] == 'fetch']
+        self.assertEqual(fetches, [('fetch', '--quiet', '--no-tags', 'origin', self.narrow)])
+        self.assertEqual(self.git('rev-parse', 'origin/new-features'), self.fork_head)
+        self.assertFalse(any(call.args[0] in ('checkout', 'push', 'reset', 'merge') for call in calls.call_args_list))
         self.assertEqual(self.git('rev-parse', 'work'), head)
         self.assertEqual(self.git('branch', '--show-current'), 'work')
 
     def test_development_rewritten_remote_preserves_work(self):
         self.command(self.fork, 'update-ref', 'refs/heads/new-features', self.base)
-        with self.assertRaisesRegex(RuntimeError, 'no longer contains work'):
+        with self.assertRaisesRegex(RuntimeError, 'unpublished/divergent'):
             preparation.prepare(cloud_work=True, mode='development')
         self.assertEqual(self.git('rev-parse', 'work'), self.fork_head)
         self.assertEqual(self.git('branch', '--format=%(refname:short)'), 'work')
