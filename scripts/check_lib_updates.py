@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 PKGMETA_PATH = ".pkgmeta"
 LOCKFILE_PATH = ".pkgmeta-lock.json"
@@ -160,9 +161,14 @@ def latest_git_commit(url: str, branch: str = "HEAD"):
 
 
 def version_key(tagname: str):
-    """Extrai números do nome da tag pra comparar (Release-r1377 -> (1377,), v1.3.0 -> (1,3,0))."""
-    nums = tuple(int(n) for n in re.findall(r"\d+", tagname))
-    return nums if nums else (tagname,)
+    """Return a stable release family and numeric version, or None."""
+    revision = re.fullmatch(r"(?:Release-)?r(\d+)(?:-release)?", tagname)
+    if revision:
+        return ("revision", (int(revision.group(1)),))
+    version = re.fullmatch(r"v?(\d+(?:\.\d+)*(?:-\d+)?)", tagname)
+    if version:
+        return ("version", tuple(int(n) for n in re.findall(r"\d+", version.group(1))))
+    return None
 
 
 def split_trunk_url(url: str):
@@ -174,18 +180,35 @@ def split_trunk_url(url: str):
 
 
 def latest_svn_tag(repo_root: str):
-    """Lista o diretório tags/ do repo SVN e retorna o nome da tag mais recente, ou None."""
-    result = run(["svn", "ls", f"{repo_root}/tags/"])
+    """Compare stable tags numerically; order different families by SVN history."""
+    result = run(["svn", "ls", "--xml", f"{repo_root}/tags/"])
     if result.returncode != 0:
         return None
-    names = [line.strip().rstrip("/") for line in result.stdout.splitlines() if line.strip()]
-    if not names:
-        return None
     try:
-        names.sort(key=version_key)
-    except TypeError:
-        names.sort()
-    return names[-1]
+        entries = ET.fromstring(result.stdout).findall("./list/entry")
+        families = {}
+        for entry in entries:
+            if entry.get("kind") != "dir":
+                continue
+            name = entry.findtext("name", "")
+            key = version_key(name)
+            if key is None:
+                continue  # Ignore moving Alpha/Beta aliases and prereleases.
+            family, numbers = key
+            commit = entry.find("commit")
+            if commit is None:
+                return None
+            revision = int(commit.attrib["revision"])
+            candidate = (numbers, revision, name)
+            if family not in families or candidate > families[family]:
+                families[family] = candidate
+        if not families:
+            return None
+        # Revision numbers and semantic versions are not comparable numerically.
+        # SVN's tag history establishes which release family is more recent.
+        return max(families.values(), key=lambda item: (item[1], item[2]))[2]
+    except (ET.ParseError, KeyError, ValueError):
+        return None
 
 
 def resolve_upstream_version(entry: dict):
@@ -313,10 +336,16 @@ def main():
 
         kind, upstream_version, export_url = resolved
         locked = lock.get(path, {})
-        locked_version = locked.get("value")
+        locked_version = locked.get("value") or entry.get("tag") or entry.get("commit")
 
         if locked_version == upstream_version:
             continue
+        if kind.endswith("-tag") and locked_version:
+            current_key = version_key(locked_version)
+            upstream_key = version_key(upstream_version)
+            if (current_key and upstream_key and current_key[0] == upstream_key[0]
+                    and upstream_key[1] <= current_key[1]):
+                continue
 
         pending[path] = {
             "name": name,
@@ -327,7 +356,7 @@ def main():
             "export_url": export_url,
         }
         old_display = locked_version or entry.get("tag") or entry.get("commit") or "(desconhecida)"
-        print(f"[!] {name}: atualização disponível")
+        print(f"[!] {name}: version available (content not compared)")
         print(f"    atual : {old_display}")
         print(f"    nova  : {upstream_version}")
 
