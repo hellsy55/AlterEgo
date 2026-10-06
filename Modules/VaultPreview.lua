@@ -14,6 +14,7 @@ local LABEL_COLUMN_WIDTH = 90
 local SLOT_COLUMN_WIDTH = 76
 local ROW_HEIGHT = 30
 local NO_DATA_TEXT = "This character hasn't logged in yet this week, so there's no Great Vault data to show.\nLog in on them to refresh it."
+local pendingItemData = {}
 
 ---Find the cached vault slot (activity) for a specific type+index, if any.
 ---@param character AE_Character
@@ -97,6 +98,13 @@ local function buildSlotCell(character, vaultType, index, useSnapshot)
   local itemLink = activity.exampleRewardLink
   local _, _, _, _, icon = C_Item.GetItemInfoInstant(itemLink)
   local itemLevel = C_Item.GetDetailedItemLevelInfo(itemLink)
+  if not itemLevel then
+    local itemID = C_Item.GetItemIDForItemInfo(itemLink)
+    if itemID and not pendingItemData[itemID] then
+      pendingItemData[itemID] = true
+      C_Item.RequestLoadItemDataByID(itemID)
+    end
+  end
 
   local text = icon and format("|T%d:%d|t", icon, ICON_SIZE) or ""
   if itemLevel then
@@ -139,6 +147,16 @@ end
 
 function Module:OnInitialize()
   self:Render()
+end
+
+function Module:OnEnable()
+  addon.Events:RegisterEvent("ITEM_DATA_LOAD_RESULT", function(_, _, itemID, success)
+    if not itemID or not pendingItemData[itemID] then return end
+    pendingItemData[itemID] = nil
+    if success and self.window and self.window:IsVisible() then
+      self:Render()
+    end
+  end, true)
 end
 
 ---Open the Great Vault preview for a specific character. Clicking the same
