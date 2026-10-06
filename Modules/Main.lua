@@ -223,7 +223,7 @@ end
 do
   local dialogName = "ALTEREGO_SYNC_PASSWORD"
   StaticPopupDialogs[dialogName] = {
-    text = "Shared with your other WoW accounts to sync characters, and optionally addon settings, between them. It's not tied to your Battle.net login. It's a word/phrase you set the same way on every account you want to sync with.\n\nMust match exactly on every account you want to sync with.",
+    text = "Shared with your other WoW accounts to sync characters, and optionally addon settings, between them. It's not tied to your Battle.net login. It's a word/phrase you set the same way on every account you want to sync with.\n\nMust match exactly on every account you want to sync with.\n\n|cffffcc55Warning:|r Avoid generic passwords such as \"123\". You can use your own nickname if you prefer.",
     button1 = ACCEPT,
     button2 = CANCEL,
     hasEditBox = true,
@@ -372,7 +372,7 @@ local SYNC_TUTORIAL_STEPS = {
   },
   {
     title = "Set the Same Password Everywhere",
-    text = "Use Set Password and enter the exact same word or phrase on every WoW account you want to sync. This is only an AlterEgo Sync password, never your Battle.net password. Incoming data is accepted only when the password matches.",
+    text = "Use Set Password and enter the exact same word or phrase on every WoW account you want to sync. This is only an AlterEgo Sync password, never your Battle.net password. Incoming data is accepted only when the password matches.\n\n|cffffcc55Warning:|r Avoid generic passwords such as \"123\". You can use your own nickname if you prefer.",
     target = "setPassword",
     location = "Settings > Multi-Account Sync > Set Password",
   },
@@ -3897,6 +3897,7 @@ function Module:RenderNow()
             setPasswordButton:SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Must be identical on every account you want to sync with.", nil, nil, nil, true)
+              tooltip:AddLine("Avoid generic passwords such as \"123\". You can use your own nickname if you prefer.", 1, 0.82, 0, true)
               tooltip:AddLine("Also used to name the WoW Account that characters synced in from this password land under (e.g. \"2 (yourpassword)\") -- unless one already exists with a matching name, in which case that one's reused instead.", nil, nil, nil, true)
             end)
             local syncChannelNames = { BOTH = "Both", GUILD = "Guild", PARTY = "Party/Raid" }
