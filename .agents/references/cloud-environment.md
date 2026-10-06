@@ -4,6 +4,16 @@ Open this repository on `new-features`. After review, commit and push, manually 
 
 Python 3 and Git are required; library checking/vendoring also requires SVN for current `.pkgmeta` sources. No pip packages, Lua or PowerShell are needed. The supported upstream PR workflow also requires authenticated `gh`; provision it with the other tools, but never embed credentials in this script. Network failures remain errors/unknown results.
 
+## Checkout preparation
+
+Reuse the root and environment context from [maintenance preflight](maintenance-runtime.md); complete its deferred runtime gate before invoking preparation, then retain the runtime. Strictly read-only PR URL validation, compact metadata and changed paths may precede this adapter. `--cloud-work` is permitted only for positively identified Codex Cloud on isolated `work`, never from Linux or the branch name alone; the helper also rejects it on Windows.
+
+For update, run `<PYTHON> scripts/prepare_update.py --cloud-work` once as branch sync's normal preparation. It fetches upstream and both origin branches with explicit destinations and preserves existing tips. Validate `work` ancestry to `origin/new-features` before fetching when that ref exists, and always after fetching. Dirty, unpublished or divergent `work` stops for review. Preserve `work`; never reset, merge or publish it as a project branch. Only eligible `work` switches to real `new-features`.
+
+For a direct library or PR entrypoint on `work`, run `<PYTHON> scripts/prepare_update.py --mode development --cloud-work` once and require success and real `new-features` before checker/apply or PR comparison against the development checkout/application/commit. It fetches only `origin/new-features`, creates only its missing tracking branch, and leaves `main` and `upstream` untouched. It preserves `work`, rejects dirty or unpublished/divergent work before switching, and never resets, merges, commits or pushes. Compare existing `new-features` with `origin/new-features`: stop on divergence; review pre-existing unpublished commits and obtain explicit publication approval before any eventual push. A report-only check does not authorize publication.
+
+If already prepared on `new-features`, reuse the parent result without preparing or fetching again. Existing real branches retain core ancestry, overlap, conflict, commit and publication gates.
+
 ## Rootless SVN bootstrap
 
 This checkout contains the startup instructions; an external Start skill configured in the environment editor is not required. On Cloud/Linux, when SVN is missing and a workflow requires it, complete this bootstrap before starting the maintenance workflow. Provisioning is a separate setup step, never an installation performed by maintenance scripts.

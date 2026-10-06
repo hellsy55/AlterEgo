@@ -22,7 +22,7 @@ This repository is the fork at https://github.com/hellsy55/AlterEgo of https://g
 
 ## Command routing
 
-On Cloud/Linux, if `svn` is missing and a workflow requires it, follow [.agents/references/cloud-environment.md](.agents/references/cloud-environment.md) to provision it rootlessly before starting that workflow.
+Resolve or reuse the workflow context once through [.agents/references/maintenance-runtime.md](.agents/references/maintenance-runtime.md). Child skills reuse the root, environment, runtime and checked capabilities. Load environment adapters only for the resolved environment and needed capability. On Cloud/Linux, if required SVN is missing, follow [.agents/references/cloud-environment.md](.agents/references/cloud-environment.md) for rootless setup; do not load that bootstrap for routine local Windows work.
 
 Match commands case-insensitively and accept close variants, including "update alterego" and "atualizar o addon". Users do not need to name skills.
 
