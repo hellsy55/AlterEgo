@@ -23,7 +23,7 @@ Data.currencies = {
   {seasonID = 18, seasonDisplayID = 2, id = 3445, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Hero Mistcrest
   {seasonID = 18, seasonDisplayID = 2, id = 3446, useTotalEarnedForMaxQty = true,  currencyType = "crest"},                                                                                                                                           -- Myth Mistcrest
   {seasonID = 18, seasonDisplayID = 2, id = 3465, useTotalEarnedForMaxQty = true,  currencyType = "catalyst"},																																	  -- Venomblight Manaflux
-  {seasonID = 18, seasonDisplayID = 2, id = 3418, useTotalEarnedForMaxQty = true,  currencyType = "bonusroll"},                                                                                                                                       -- Nebulous Voidcore
+  {seasonID = 18, seasonDisplayID = 2, id = 3418, useTotalEarnedForMaxQty = true,  currencyType = "bonusroll", tooltipNote = "One additional Nebulous Voidcore can be obtained each week from Orin Straylight in Silvermoon."},                                                                                                                                       -- Nebulous Voidcore
   {seasonID = 18, seasonDisplayID = 2, id = 3509, useTotalEarnedForMaxQty = true,  currencyType = "spark"},                                                                                                                                           -- Tidal Spark Dust
   {seasonID = 18, seasonDisplayID = 2, id = 3310, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Coffer Key Shards
   {seasonID = 18, seasonDisplayID = 2, id = 3028, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Restored Coffer key
@@ -34,9 +34,9 @@ Data.currencies = {
   {id = "gildedStash", currencyType = "gildedStash", name = "Gilded Stash", spellID = 7591, iconFileID = 5872049, category = "weekly"},
   {seasonID = 17, seasonDisplayID = 1, id = 265714, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1254631, category = "weekly"},
   {seasonID = 18, seasonDisplayID = 2, id = 274374, useTotalEarnedForMaxQty = false, currencyType = "delveMap", name = "Trovehunter's Bounty", questID = 86371, spellID = 1293799, category = "weekly"},
-  {id = 95520, currencyType = "quest", resets = "weekly",  name = "Purging the Vaults",  questID = 95520, iconFileID = 7966624, category = "weekly", description = "Weekly quest."},
-  {id = 98172, currencyType = "quest", resets = "weekly",  name = "Trailing Xal'atath", questID = 98172, iconFileID = 7501330, category = "weekly", description = "Weekly quest."},
-  {id = 93744, currencyType = "quest", resets = "weekly",  name = "Unity Against the Void", questID = 93744, iconFileID = 133403, category = "weekly", description = "Weekly quest."},
+  {id = 95520, currencyType = "quest", resets = "weekly",  name = "Purging the Vaults",  questID = 95520, iconFileID = 7966624, category = "weekly", description = "Weekly delve map quest."},
+  {id = 98172, currencyType = "quest", resets = "weekly",  name = "Trailing Xal'atath", questID = 98172, iconFileID = 7501330, category = "weekly", description = "Weekly spark quest."},
+  {id = 93744, currencyType = "quest", resets = "weekly",  name = "Unity Against the Void", questID = 93744, iconFileID = 133403, category = "weekly", description = "Weekly spark quest."},
 
   -- Seasonal Chores (fixed display order: Azta'rec, Cracked Keystone)
   {id = 97913, currencyType = "quest", resets = "character", name = "Azta'rec", questID = 97913, iconFileID = 8032873, category = "seasonalChore", description = "One-time delve event. Can only be completed once per character."},
