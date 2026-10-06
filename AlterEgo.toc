@@ -1,4 +1,4 @@
-## Interface: 120100
+## Interface: 120100, 120105
 ## Title: AlterEgo
 ## Notes: Mythic Plus tracker for all of your characters
 ## Version: local-20260920
