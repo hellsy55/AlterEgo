@@ -10,15 +10,16 @@ local LibLiqUI = addon.Libs.LiqUI
 local SetBackgroundColor = LibLiqUI.Utils.SetBackgroundColor
 local SetHighlightColor = LibLiqUI.Utils.SetHighlightColor
 
-local LEFT_WIDTH = 350 -- width of the Loot side; the window grows by one column per difficulty/keystone used
+local LEFT_WIDTH = 350 -- minimum width of the Loot side; content can expand it dynamically
 local MIN_WINDOW_HEIGHT = 130
-local MAX_WINDOW_HEIGHT = 520
 local HEADER_HEIGHT = 24
 local FOOTER_HEIGHT = 20
 local ROW_HEIGHT = 22
 local DIFFICULTY_COLUMN_WIDTH = 60
 local MAX_COLUMNS = 5 -- LFR, Normal, Heroic, Mythic + keystone
 local ICON_SIZE = 18
+local TEXT_RIGHT_RESERVE = 44 -- space between row text and the difficulty columns (spec/roll-count area + padding)
+local WINDOW_EDGE_MARGIN = 80 -- keep dynamically sized windows inside the usable screen width when possible
 
 local INDENT = {header = 8, instance = 16, boss = 30, item = 44}
 local CHECK_MARKUP = CreateAtlasMarkup("common-icon-checkmark", 14, 14)
@@ -508,9 +509,60 @@ end
 -- Window
 ---------------------------------------------------------------------------
 
+local getItemDisplay
+local measureFont
+
+---@param text any
+---@param fontObject string
+---@return number
+local function measureRowText(text, fontObject)
+  if text == nil or text == "" then return 0 end
+  if not measureFont then
+    measureFont = UIParent:CreateFontString(nil, "OVERLAY", "GameFontHighlight_NoShadow")
+    measureFont:SetWordWrap(false)
+  end
+  measureFont:SetFontObject(fontObject)
+  measureFont:SetText(tostring(text))
+  return math.ceil(measureFont:GetStringWidth() or 0)
+end
+
+---@param rows table[]
+---@return number leftWidth
+local function calculateLeftWidth(rows)
+  local required = LEFT_WIDTH
+  for _, data in ipairs(rows) do
+    local text, indent, fontObject, leadingWidth
+    leadingWidth = 0
+    if data.type == "header" then
+      text = (data.collapsible and "- " or "") .. (data.text or "")
+      indent = INDENT.header
+      fontObject = "GameFontNormal"
+    elseif data.type == "instance" then
+      text = (data.collapsible and "- " or "") .. (data.text or "")
+      indent = INDENT.instance
+      fontObject = "GameFontHighlight_NoShadow"
+    elseif data.type == "boss" then
+      text = data.text or ""
+      indent = INDENT.boss
+      fontObject = "GameFontHighlight_NoShadow"
+    elseif data.type == "item" then
+      local name = getItemDisplay(data.item.itemID)
+      text = name or ""
+      indent = data.indent or INDENT.item
+      leadingWidth = ICON_SIZE + 6
+      fontObject = "GameFontHighlight_NoShadow"
+    end
+    if text then
+      local rowWidth = indent + leadingWidth + measureRowText(text, fontObject) + TEXT_RIGHT_RESERVE + 10
+      required = math.max(required, rowWidth)
+    end
+  end
+  return math.ceil(required)
+end
+
 ---@param itemID number
 ---@return string name, string? icon, table? color
-local function getItemDisplay(itemID)
+getItemDisplay = function(itemID)
   local name = C_Item.GetItemNameByID(itemID)
   local icon = select(5, C_Item.GetItemInfoInstant(itemID))
   local quality = C_Item.GetItemQualityByID(itemID)
@@ -807,19 +859,15 @@ function Module:CreateWindow()
   self.footer:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", -8, 4)
   self.footer:SetJustifyH("LEFT")
 
-  -- Scrolling list
+  -- Content list. The window grows vertically with the rows instead of using
+  -- vertical scrolling, per the Bonus Roll window's intentionally unbounded list.
   self.scroll = CreateFrame("ScrollFrame", "$parentScroll", body)
   self.scroll:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 0, 0)
   self.scroll:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", 0, FOOTER_HEIGHT)
   self.content = CreateFrame("Frame", "$parentContent", self.scroll)
   self.content:SetSize(LEFT_WIDTH, 1)
   self.scroll:SetScrollChild(self.content)
-  self.scroll:EnableMouseWheel(true)
-  self.scroll:SetScript("OnMouseWheel", function(scroll, delta)
-    local maxScroll = math.max(0, self.content:GetHeight() - scroll:GetHeight())
-    local target = scroll:GetVerticalScroll() - delta * ROW_HEIGHT * 3
-    scroll:SetVerticalScroll(math.max(0, math.min(maxScroll, target)))
-  end)
+  self.scroll:EnableMouseWheel(false)
 
   self.empty = self.scroll:CreateFontString(nil, "OVERLAY")
   self.empty:SetFontObject("GameFontDisable")
@@ -947,7 +995,18 @@ function Module:Render()
   local columns, columnIndex = self:BuildColumns(allRows)
   local numColumns = #columns
   local columnsWidth = numColumns * DIFFICULTY_COLUMN_WIDTH
-  local width = LEFT_WIDTH + columnsWidth
+
+  -- Recalculate the Loot side from the actual content so long raid, boss, dungeon,
+  -- and item names expand the window instead of escaping the body or colliding with
+  -- Difficulty/Rolls. Keep a minimum width, but cap growth to the usable screen width.
+  -- The text FontStrings remain bounded by their LEFT/RIGHT anchors, so even at the
+  -- screen cap they cannot render outside the window or over the fixed columns.
+  local desiredLeftWidth = calculateLeftWidth(allRows)
+  local screenWidth = UIParent and UIParent:GetWidth() or (LEFT_WIDTH + columnsWidth + WINDOW_EDGE_MARGIN)
+  local maxBodyWidth = math.max(LEFT_WIDTH + columnsWidth, screenWidth - WINDOW_EDGE_MARGIN)
+  local maxLeftWidth = math.max(LEFT_WIDTH, maxBodyWidth - columnsWidth)
+  local leftWidth = math.min(desiredLeftWidth, maxLeftWidth)
+  local width = leftWidth + columnsWidth
 
   -- Hide the Loot header until this character has saved Bonus Roll data.
   -- This keeps the first-time empty state visually clean.
@@ -972,7 +1031,7 @@ function Module:Render()
   end
 
   local specOffset = columnsWidth + 12
-  local textRight = -(specOffset + ICON_SIZE + 6)
+  local textRight = -(columnsWidth + TEXT_RIGHT_RESERVE)
   local totalHeight = 0
   for index, data in ipairs(rows) do
     local row = self.rows[index]
@@ -1110,17 +1169,14 @@ function Module:Render()
   end
   self.footer:SetText(footer)
 
-  -- Window size follows the content: wider with each column, taller with each row (then it scrolls).
+  -- Width follows the measured content; height follows every visible row. No vertical
+  -- scroll is used, so a long Bonus Roll history simply produces a taller window.
   local contentHeight = HEADER_HEIGHT + totalHeight + FOOTER_HEIGHT
   if #rows == 0 then contentHeight = MIN_WINDOW_HEIGHT end
-  local height = math.max(MIN_WINDOW_HEIGHT, math.min(MAX_WINDOW_HEIGHT, contentHeight))
+  local height = math.max(MIN_WINDOW_HEIGHT, contentHeight)
   self.window:SetBodySize(width, height)
   self.content:SetSize(width, math.max(1, totalHeight))
-  local visibleHeight = height - HEADER_HEIGHT - FOOTER_HEIGHT
-  local maxScroll = math.max(0, totalHeight - visibleHeight)
-  if self.scroll:GetVerticalScroll() > maxScroll then
-    self.scroll:SetVerticalScroll(maxScroll)
-  end
+  self.scroll:SetVerticalScroll(0)
 end
 
 ---@return table[]

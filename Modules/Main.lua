@@ -33,8 +33,175 @@ local function CategoryHasIconCurrencies(currencies, category)
   return false
 end
 
+local NEBULOUS_VOIDCORE_CURRENCY_ID = 3418
+local nebulousVoidcoreAlertWindow
+local nebulousVoidcoreLastRaidKey
+
+local function IsNebulousVoidcoreEntranceCheckEnabled()
+  return Data.db.global.currencies.nebulousVoidcoreRaidEntranceAlert ~= false
+end
+
+local function GetCurrentNebulousVoidcoreInfo()
+  for _, currency in ipairs(Data:GetCurrencies() or {}) do
+    if currency.id == NEBULOUS_VOIDCORE_CURRENCY_ID and currency.currencyType == "bonusroll" then
+      return currency
+    end
+  end
+  return nil
+end
+
+local function GetNebulousVoidcoreAlertDefaultPoint()
+  return "TOPLEFT", "TOPLEFT", (UIParent:GetWidth() - 440) / 2, -(UIParent:GetHeight() * 0.08)
+end
+
+local function ResetNebulousVoidcoreAlertPosition(window)
+  local point, relativePoint, x, y = GetNebulousVoidcoreAlertDefaultPoint()
+  local storage = window and window.db
+  if storage then
+    storage.point = {point, relativePoint, x, y}
+  end
+  if window then
+    window:ClearAllPoints()
+    window:SetPoint(point, UIParent, relativePoint, x, y)
+  end
+end
+
+local function EnsureNebulousVoidcoreAlertWindow()
+  if nebulousVoidcoreAlertWindow then return nebulousVoidcoreAlertWindow end
+
+  local windows = Data.db.global.liqui.windows
+  windows.NebulousVoidcoreAlert = windows.NebulousVoidcoreAlert or {}
+  local storage = windows.NebulousVoidcoreAlert
+
+  local point, relativePoint, defaultX, defaultY = GetNebulousVoidcoreAlertDefaultPoint()
+  storage.point = {point, relativePoint, defaultX, defaultY}
+
+  local window = LibLiqUI:NewElement("Window", {
+    name = addon.name .. "NebulousVoidcoreAlert",
+    title = "Nebulous Voidcore",
+    width = 440,
+    height = 112,
+    storage = storage,
+  })
+  window:SetFrameStrata("HIGH")
+  window:SetToplevel(true)
+  window:SetClampedToScreen(true)
+
+  if window.titlebar and window.titlebar.title then
+    window.titlebar.title:ClearAllPoints()
+    window.titlebar.title:SetPoint("CENTER", window.titlebar, "CENTER", 0, 0)
+    window.titlebar.title:SetJustifyH("CENTER")
+  end
+
+  local body = window.body
+
+  window.headlineGroup = CreateFrame("Frame", nil, body)
+  window.headlineGroup:SetPoint("TOP", body, "TOP", 0, -18)
+  window.headlineGroup:SetHeight(32)
+
+  window.currencyIcon = window.headlineGroup:CreateTexture(nil, "ARTWORK")
+  window.currencyIcon:SetSize(32, 32)
+  window.currencyIcon:SetPoint("LEFT", window.headlineGroup, "LEFT", 0, 0)
+
+  window.message = window.headlineGroup:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  window.message:SetText("You're " .. RED_FONT_COLOR:WrapTextInColorCode("not capped") .. " on Nebulous Voidcores")
+  local messageWidth = math.ceil(window.message:GetStringWidth())
+  window.message:SetSize(messageWidth + 2, 32)
+  window.message:SetPoint("LEFT", window.currencyIcon, "RIGHT", 10, 0)
+  window.message:SetJustifyH("LEFT")
+  window.message:SetJustifyV("MIDDLE")
+  window.headlineGroup:SetWidth(32 + 10 + messageWidth + 2)
+
+  window.details = body:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  window.details:SetPoint("TOPLEFT", body, "TOPLEFT", 24, -64)
+  window.details:SetPoint("TOPRIGHT", body, "TOPRIGHT", -24, -64)
+  window.details:SetJustifyH("CENTER")
+  window.details:SetText("Get additional bonus rolls from Orin Straylight in Silvermoon.")
+  window.details:SetTextColor(LIGHTGRAY_FONT_COLOR.r, LIGHTGRAY_FONT_COLOR.g, LIGHTGRAY_FONT_COLOR.b)
+
+  window:SetBodySize(440, 96)
+  nebulousVoidcoreAlertWindow = window
+  return window
+end
+
+function Module:ShowNebulousVoidcoreEntranceAlert(currencyInfo)
+  if not currencyInfo then return end
+
+  local window = EnsureNebulousVoidcoreAlertWindow()
+  local maximum = tonumber(currencyInfo.maxQuantity) or 0
+  local totalEarned = tonumber(currencyInfo.totalEarned) or 0
+  local isCapped = maximum > 0 and totalEarned >= maximum
+  local messageText = isCapped
+    and ("You're " .. GREEN_FONT_COLOR:WrapTextInColorCode("capped") .. " on Nebulous Voidcores")
+    or ("You're " .. RED_FONT_COLOR:WrapTextInColorCode("not capped") .. " on Nebulous Voidcores")
+
+  window.currencyIcon:SetTexture(currencyInfo.iconFileID or [[Interface\Icons\INV_Misc_QuestionMark]])
+  window.message:SetText(messageText)
+  local messageWidth = math.ceil(window.message:GetStringWidth())
+  window.message:SetSize(messageWidth + 2, 32)
+  window.headlineGroup:SetWidth(32 + 10 + messageWidth + 2)
+
+  window.headlineGroup:ClearAllPoints()
+  if isCapped then
+    window.headlineGroup:SetPoint("CENTER", window.body, "CENTER", 0, 0)
+    window.details:Hide()
+  else
+    window.headlineGroup:SetPoint("TOP", window.body, "TOP", 0, -18)
+    window.details:Show()
+  end
+
+  if not window:IsShown() then
+    ResetNebulousVoidcoreAlertPosition(window)
+  end
+  window:Show()
+  window:Raise()
+end
+
+function Module:CheckNebulousVoidcoreRaidEntrance(suppressCurrent)
+  local inInstance, instanceType = IsInInstance()
+  if not inInstance or instanceType ~= "raid" then
+    nebulousVoidcoreLastRaidKey = nil
+    return
+  end
+
+  local _, _, difficultyID, _, _, _, _, instanceID = GetInstanceInfo()
+  local key = tostring(instanceID or 0) .. ":" .. tostring(difficultyID or 0)
+  if nebulousVoidcoreLastRaidKey == key then return end
+  nebulousVoidcoreLastRaidKey = key
+
+  if suppressCurrent or not IsNebulousVoidcoreEntranceCheckEnabled() then return end
+
+  C_Timer.After(2, function()
+    local stillInInstance, stillInstanceType = IsInInstance()
+    if not stillInInstance or stillInstanceType ~= "raid" then return end
+
+    local _, _, stillDifficultyID, _, _, _, _, stillInstanceID = GetInstanceInfo()
+    local stillKey = tostring(stillInstanceID or 0) .. ":" .. tostring(stillDifficultyID or 0)
+    if stillKey ~= key then return end
+
+    local currencyInfo = GetCurrentNebulousVoidcoreInfo()
+    if not currencyInfo then return end
+
+    local maximum = tonumber(currencyInfo.maxQuantity) or 0
+    local totalEarned = tonumber(currencyInfo.totalEarned) or 0
+    if maximum <= 0 or totalEarned >= maximum then return end
+
+    Module:ShowNebulousVoidcoreEntranceAlert(currencyInfo)
+  end)
+end
+
 function Module:OnInitialize()
   self:Render()
+end
+
+function Module:OnEnable()
+  addon.Events:RegisterEvent("PLAYER_ENTERING_WORLD", function(_, _, isInitialLogin, isReloadingUi)
+    local suppressCurrent = isInitialLogin == true or isReloadingUi == true
+    Module:CheckNebulousVoidcoreRaidEntrance(suppressCurrent)
+    if not suppressCurrent then
+      C_Timer.After(2, function() Module:CheckNebulousVoidcoreRaidEntrance() end)
+    end
+  end, true)
 end
 
 do
@@ -3626,6 +3793,17 @@ function Module:RenderNow()
             ):SetTooltip(function(tooltip, elm)
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("They really do this, huh?", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
+              "Nebulous Voidcore Check on Raid Entrance",
+              function() return IsNebulousVoidcoreEntranceCheckEnabled() end,
+              function()
+                Data.db.global.currencies.nebulousVoidcoreRaidEntranceAlert = not IsNebulousVoidcoreEntranceCheckEnabled()
+                return MenuResponse.Refresh
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Shows a reminder when entering a raid if the current character has not reached the Nebulous Voidcore maximum earned cap.", nil, nil, nil, true)
             end)
             local enabledCurrenciesOption = menu:CreateButton(
               "Currencies"

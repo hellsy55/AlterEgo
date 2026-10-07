@@ -1053,6 +1053,22 @@ local ALERT_COLUMN_GAP = 18
 local alertWindow
 local alertLines = {}
 
+local function getRaidLockoutAlertDefaultPoint()
+  return "TOPLEFT", "TOPLEFT", (UIParent:GetWidth() - ALERT_MIN_WIDTH) / 2, -(UIParent:GetHeight() * 0.22)
+end
+
+local function resetRaidLockoutAlertPosition(window)
+  local point, relativePoint, x, y = getRaidLockoutAlertDefaultPoint()
+  local storage = window and window.db
+  if storage then
+    storage.point = {point, relativePoint, x, y}
+  end
+  if window then
+    window:ClearAllPoints()
+    window:SetPoint(point, UIParent, relativePoint, x, y)
+  end
+end
+
 local function refreshVisibleAlertLayout(window)
   if window and window.currentRaid and window.currentDifficultyID then
     Module:ShowInstanceAlert(window.currentRaid, window.currentDifficultyID)
@@ -1069,16 +1085,10 @@ local function ensureAlertWindow()
     storage.bossListLayout = "single"
   end
 
-  -- First run only: open near the top-center of the screen. Once moved, LiqUI
-  -- persists the user's position like it does for the other addon windows.
-  if type(storage.point) ~= "table" then
-    storage.point = {
-      "TOPLEFT",
-      "TOPLEFT",
-      (UIParent:GetWidth() - ALERT_MIN_WIDTH) / 2,
-      -(UIParent:GetHeight() * 0.22),
-    }
-  end
+  -- Entrance alerts always reopen at their default position so the Raid
+  -- Lockout and Nebulous Voidcore checks keep their intended separation.
+  local point, relativePoint, x, y = getRaidLockoutAlertDefaultPoint()
+  storage.point = {point, relativePoint, x, y}
 
   alertWindow = LibLiqUI:NewElement("Window", {
     name = addon.name .. "RaidLockoutAlert",
@@ -1122,7 +1132,7 @@ local function ensureAlertWindow()
 
   alertWindow.subtitle = body:CreateFontString(nil, "OVERLAY", "GameFontNormal")
   alertWindow.subtitle:SetJustifyH("CENTER")
-  alertWindow.subtitle:SetTextColor(1, 1, 1, 0.72)
+  alertWindow.subtitle:SetTextColor(1, 1, 1, 1)
 
   alertWindow.footer = body:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   alertWindow.footer:SetJustifyH("CENTER")
@@ -1170,6 +1180,7 @@ end
 
 function Module:ShowInstanceAlert(raid, difficultyID)
   local window = ensureAlertWindow()
+  local wasShown = window:IsShown()
   local character = Data:GetCharacter()
   if not character then return end
 
@@ -1299,6 +1310,9 @@ function Module:ShowInstanceAlert(raid, difficultyID)
   y = y + window.accept:GetHeight() + 16
 
   window:SetBodySize(frameWidth, y)
+  if not wasShown then
+    resetRaidLockoutAlertPosition(window)
+  end
   window:Show()
   window:Raise()
 end
