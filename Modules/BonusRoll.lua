@@ -1,9 +1,9 @@
 ---@class AE_Addon
 local addon = select(2, ...)
 
----@class AE_Module_BonusRolls
-local Module = addon.Core:NewModule("BonusRolls", "AceConsole-3.0")
-addon.Module_BonusRolls = Module
+---@class AE_Module_BonusRoll
+local Module = addon.Core:NewModule("BonusRoll", "AceConsole-3.0")
+addon.Module_BonusRoll = Module
 
 local Data = addon.Data
 local LibLiqUI = addon.Libs.LiqUI
@@ -101,6 +101,11 @@ end
 ---Remember the source/context before the bonus-roll result arrives so the exact
 ---won item hyperlink can be associated with the same entry SimulationCraft exports.
 function Module:SPELL_CONFIRMATION_PROMPT(_, spellID)
+  local character = Data:GetCharacter()
+  if not character or not Data:IsMaxLevelCharacter(character) then
+    self.pendingBonusRoll = nil
+    return
+  end
   local prompts = GetSpellConfirmationPromptsInfo and GetSpellConfirmationPromptsInfo()
   if not prompts then return end
   for _, prompt in ipairs(prompts) do
@@ -119,6 +124,11 @@ end
 ---Capture the exact item hyperlink before its bonus IDs / tertiary information is
 ---lost by SimulationCraft's compact bonus_roll_items export.
 function Module:BONUS_ROLL_RESULT(_, typeIdentifier, itemLink, _, specID)
+  local character = Data:GetCharacter()
+  if not character or not Data:IsMaxLevelCharacter(character) then
+    self.pendingBonusRoll = nil
+    return
+  end
   if typeIdentifier ~= "item" or type(itemLink) ~= "string" then return end
   local itemID = tonumber(itemLink:match("|Hitem:(%d+):")) or tonumber(itemLink:match("item:(%d+):"))
   if not itemID then return end
@@ -130,12 +140,11 @@ function Module:BONUS_ROLL_RESULT(_, typeIdentifier, itemLink, _, specID)
   local keyLevel = pending.keyLevel or 0
   specID = resolveLootSpecID(specID)
 
-  local character = Data:GetCharacter()
   if character then
-    local saved = character.bonusRolls
+    local saved = character.bonusRoll
     if not saved then
       saved = {raw = "", entries = {}, updatedAt = time(), exactItems = {}}
-      character.bonusRolls = saved
+      character.bonusRoll = saved
     end
     saved.exactItems = saved.exactItems or {}
     saved.exactItems[getEntryKeyValues(currencyID, sourceID, contextID, keyLevel, itemID, specID)] = itemLink
@@ -179,15 +188,22 @@ end
 ---@param character AE_Character
 ---@return string? err
 function Module:UpdateCharacter(character)
+  if not Data:IsMaxLevelCharacter(character) then return nil end
   local raw, err = fetchRaw()
   if raw == nil then
     return err
   end
-  local saved = character.bonusRolls
+  local saved = character.bonusRoll
   if saved and saved.raw == raw and type(saved.entries) == "table" then
-    return nil -- nothing changed, keep what we already have
+    -- A successful check is still an update even when the roll history itself
+    -- did not change. Keep the footer meaningful after the automatic login check.
+    saved.updatedAt = time()
+    if Data.MarkCharacterSyncChanged then
+      Data:MarkCharacterSyncChanged(character)
+    end
+    return nil
   end
-  character.bonusRolls = {
+  character.bonusRoll = {
     raw = raw,
     entries = parseRaw(raw),
     updatedAt = time(),
@@ -197,6 +213,50 @@ function Module:UpdateCharacter(character)
     Data:MarkCharacterSyncChanged(character)
   end
   return nil
+end
+
+---Refresh Bonus Roll once on the character's initial login so saved data does
+---not depend on opening the Bonus Roll window. The short retries cover startup
+---ordering where SimulationCraft or the character info cache is not ready yet.
+function Module:RefreshOnInitialLogin()
+  local guid = UnitGUID("player")
+  if not guid or self.loginRefreshGUID == guid then return end
+  self.loginRefreshGUID = guid
+
+  local retryDelays = {1, 3, 6}
+  local attempt = 0
+
+  local function tryRefresh()
+    if UnitGUID("player") ~= guid then return end
+
+    local character = Data:GetCharacter(guid)
+    if not character then return end
+
+    -- Character info can lag slightly behind PLAYER_ENTERING_WORLD on a fresh
+    -- login. Refresh it before deciding whether this character is max level.
+    if not Data:IsMaxLevelCharacter(character) and Data.UpdateCharacterInfo then
+      Data:UpdateCharacterInfo()
+      character = Data:GetCharacter(guid)
+    end
+
+    if not Data:IsMaxLevelCharacter(character) then return end
+
+    local err = self:UpdateCharacter(character)
+    if not err then
+      if self.window and self.window:IsVisible() and self.character and self.character.GUID == guid then
+        self:Render()
+      end
+      return
+    end
+
+    attempt = attempt + 1
+    local delay = retryDelays[attempt]
+    if delay then
+      C_Timer.After(delay, tryRefresh)
+    end
+  end
+
+  tryRefresh()
 end
 
 ---------------------------------------------------------------------------
@@ -357,7 +417,7 @@ local function getInstanceTooltipLines(instance)
       end
     end
     table.sort(levels, function(a, b) return a > b end)
-    table.insert(lines, {format("Bonus rolls used: %d", instance.count), 1, 1, 1})
+    table.insert(lines, {format("Rolls used: %d", instance.count), 1, 1, 1})
     for _, level in ipairs(levels) do
       table.insert(lines, {format("+%d: %d", level, perLevel[level]), 0.8, 0.8, 0.8})
     end
@@ -369,7 +429,7 @@ local function getInstanceTooltipLines(instance)
         perDifficulty[id] = (perDifficulty[id] or 0) + 1
       end
     end
-    table.insert(lines, {format("Bonus rolls used: %d", instance.count), 1, 1, 1})
+    table.insert(lines, {format("Rolls used: %d", instance.count), 1, 1, 1})
     local difficulties = {}
     for _, difficulty in ipairs(Data.raidDifficulties) do
       table.insert(difficulties, difficulty)
@@ -490,7 +550,7 @@ end
 ---@param entry table
 ---@return string?
 local function getExactItemLink(entry)
-  local saved = Module.character and Module.character.bonusRolls
+  local saved = Module.character and Module.character.bonusRoll
   local exactItems = saved and saved.exactItems
   return exactItems and exactItems[getEntryKey(entry)] or nil
 end
@@ -708,11 +768,11 @@ end
 function Module:CreateWindow()
   if self.window then return end
   local windows = Data.db.global.liqui.windows
-  windows.BonusRolls = windows.BonusRolls or {}
+  windows.BonusRoll = windows.BonusRoll or {}
   self.window = LibLiqUI:NewElement("Window", {
-    name = addon.name .. "BonusRolls",
-    storage = windows.BonusRolls,
-    title = "Bonus Rolls",
+    name = addon.name .. "BonusRoll",
+    storage = windows.BonusRoll,
+    title = "Bonus Roll",
     onShow = function()
       Module:ResetCollapsedRows()
       Module:Refresh()
@@ -780,7 +840,7 @@ local function getTitle(character)
   if classColor then
     name = classColor:WrapTextInColorCode(name)
   end
-  return "Bonus Rolls - " .. name
+  return "Bonus Roll - " .. name
 end
 
 local ERROR_TEXT = {
@@ -795,7 +855,7 @@ function Module:Refresh()
   if not self.window or not self.character then return end
   local character = self.character
   self.updateError = nil
-  if character.GUID == UnitGUID("player") then
+  if Data:IsMaxLevelCharacter(character) and character.GUID == UnitGUID("player") then
     self.updateError = self:UpdateCharacter(character)
   end
   self:Render()
@@ -855,7 +915,29 @@ function Module:Render()
   local character = self.character
   self.window:SetTitle(getTitle(character))
 
-  local saved = character.bonusRolls
+  if not Data:IsMaxLevelCharacter(character) then
+    self.header.loot:Hide()
+    self.header.difficulty:Hide()
+    for _, row in ipairs(self.rows) do
+      row:Hide()
+      row.data = nil
+    end
+    local maxLevel = Data.GetCurrentMaxLevel and Data:GetCurrentMaxLevel()
+    if maxLevel then
+      self.empty:SetText(format("Bonus Roll is only available for max-level characters.\n\nThis character must reach level %d before Bonus Roll can be checked.", maxLevel))
+    else
+      self.empty:SetText("Bonus Roll is only available for max-level characters.")
+    end
+    self.empty:SetWidth(LEFT_WIDTH - 40)
+    self.empty:Show()
+    self.footer:SetText("")
+    self.scroll:SetVerticalScroll(0)
+    self.window:SetBodySize(LEFT_WIDTH, MIN_WINDOW_HEIGHT)
+    self.content:SetSize(LEFT_WIDTH, 1)
+    return
+  end
+
+  local saved = character.bonusRoll
   local entries = saved and saved.entries or {}
   local sections = buildSections(entries)
   -- Keep the difficulty/spec columns stable while groups are collapsed so the
@@ -867,7 +949,7 @@ function Module:Render()
   local columnsWidth = numColumns * DIFFICULTY_COLUMN_WIDTH
   local width = LEFT_WIDTH + columnsWidth
 
-  -- Hide the Loot header until this character has saved Bonus Rolls data.
+  -- Hide the Loot header until this character has saved Bonus Roll data.
   -- This keeps the first-time empty state visually clean.
   if saved then
     self.header.loot:Show()
@@ -1004,7 +1086,7 @@ function Module:Render()
   -- Empty / status messages
   if #rows == 0 then
     if saved then
-      self.empty:SetText("No bonus rolls used yet.")
+      self.empty:SetText("No rolls used yet.")
     elseif character.GUID == UnitGUID("player") then
       self.empty:SetText("No bonus roll data yet.\n\nMake sure the SimulationCraft addon is enabled.")
     else
@@ -1020,7 +1102,7 @@ function Module:Render()
   if self.updateError then
     footer = RED_FONT_COLOR:WrapTextInColorCode(ERROR_TEXT[self.updateError] or "Could not update.")
   elseif saved and saved.updatedAt then
-    -- Having saved Bonus Rolls data is proof this character was successfully
+    -- Having saved Bonus Roll data is proof this character was successfully
     -- checked at least once; do not keep asking the user to log in again.
     footer = format("Updated on: %s", date("%d/%m - %H:%M", saved.updatedAt))
   else
@@ -1080,6 +1162,11 @@ function Module:OnInitialize()
   self:RegisterChatCommand("bonus", function()
     Module:OpenCurrentCharacter()
   end)
+  addon.Events:RegisterEvent("PLAYER_ENTERING_WORLD", function(_, _, isInitialLogin)
+    if isInitialLogin == true then
+      Module:RefreshOnInitialLogin()
+    end
+  end, true)
   addon.Events:RegisterEvent("SPELL_CONFIRMATION_PROMPT", function(_, _, spellID)
     Module:SPELL_CONFIRMATION_PROMPT(nil, spellID)
   end, true)

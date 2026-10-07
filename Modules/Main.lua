@@ -129,6 +129,17 @@ do
 end
 
 do
+  local dialogName = "ALTEREGO_MAIN_ACCOUNT_REQUIRED"
+  StaticPopupDialogs[dialogName] = {
+    text = "Main WoW Account Required\n\nYou can't unset your only WoW Account as Main. AlterEgo must always have one WoW Account set as Main.",
+    button1 = OKAY,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+  }
+end
+
+do
   local dialogName = "ALTEREGO_CONFIRM_CHANGE_MAIN_ACCOUNT"
   StaticPopupDialogs[dialogName] = {
     text = "Change Main WoW Account?\n\n%s is currently Main.\nSet %s as the new Main WoW Account?\n\nSync will send characters from the new Main account and protect them from incoming sync data.",
@@ -1740,7 +1751,7 @@ function Module:GetCharacterInfo(unfiltered)
   local dungeons = Data:GetDungeons()
   local _, seasonDisplayID = Data:GetCurrentSeason()
   local equipmentModule = addon.Core:GetModule("Equipment", true)
-  local bonusRollsModule = addon.Core:GetModule("BonusRolls", true)
+  local bonusRollModule = addon.Core:GetModule("BonusRoll", true)
   local vaultPreviewModule = addon.Core:GetModule("VaultPreview", true)
 
   ---@type AE_CharacterRows[]
@@ -1814,14 +1825,14 @@ function Module:GetCharacterInfo(unfiltered)
           GameTooltip:AddLine(" ")
           GameTooltip:AddLine(format("Last update:\n|cffffffff%s|r", date("%d/%m - %H:%M", character.lastUpdate)), NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
         end
-        if (type(character.equipment) == "table" and equipmentModule) or bonusRollsModule then
+        if (type(character.equipment) == "table" and equipmentModule) or bonusRollModule then
           GameTooltip:AddLine(" ")
         end
         if type(character.equipment) == "table" and equipmentModule then
           GameTooltip:AddLine("<Left-click to View Equipment>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
         end
-        if bonusRollsModule then
-          GameTooltip:AddLine("<Right-click to View Bonus Rolls>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+        if bonusRollModule then
+          GameTooltip:AddLine("<Right-click to View Bonus Roll>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
         end
         GameTooltip:Show()
       end,
@@ -1833,8 +1844,8 @@ function Module:GetCharacterInfo(unfiltered)
         equipmentModule:OpenCharacter(character)
       end,
       onRightClick = function(infoFrame, character)
-        if not bonusRollsModule then return end
-        bonusRollsModule:OpenCharacter(character)
+        if not bonusRollModule then return end
+        bonusRollModule:OpenCharacter(character)
       end,
       enabled = true,
     },
@@ -4138,6 +4149,10 @@ function Module:RenderNow()
                   isMainAccount and "Unset as Main WoW Account" or "Set as Main WoW Account",
                   function()
                     if isMainAccount then
+                      if TableCount(Data.db.global.accounts) <= 1 then
+                        StaticPopup_Show("ALTEREGO_MAIN_ACCOUNT_REQUIRED")
+                        return
+                      end
                       Data:SetMainAccount(nil)
                       if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
                       self:Render()

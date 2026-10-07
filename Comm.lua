@@ -479,7 +479,7 @@ end
 ---Has this character actually changed since the last time we told anyone
 ---about it (via ANY sync path)? Sync uses its own monotonic revision instead
 ---of the user-facing lastUpdate timestamp, because currencies, Vault, M+,
----equipment, Bonus Rolls and other slices can change without a character-info refresh.
+---equipment, Bonus Roll and other slices can change without a character-info refresh.
 ---@param character AE_Character
 ---@return boolean
 local function HasCharacterChangedSinceLastSync(character)

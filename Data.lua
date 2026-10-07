@@ -14,7 +14,7 @@ local TableFind = addon.Libs.LiqUI.Utils.TableFind
 local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
 local TableGet = addon.Libs.LiqUI.Utils.TableGet
 
-Data.dbVersion = 45
+Data.dbVersion = 46
 
 Data.defaultDB = {
   ---@type AE_Global
@@ -126,7 +126,7 @@ Data.defaultDB = {
         Equipment = {},
         VaultPreview = {},
         RaidLockouts = {},
-        BonusRolls = {},
+        BonusRoll = {},
       },
       tables = {
         Affixes = { hiddenColumns = {} },
@@ -1626,6 +1626,29 @@ function Data:MigrateDB()
         end
         if sync.lastConfirmedRevision[GUID] == nil and sync.lastConfirmedUpdate then
           sync.lastConfirmedRevision[GUID] = tonumber(sync.lastConfirmedUpdate[GUID])
+        end
+      end
+    end
+    -- Rename the Bonus Roll feature's technical storage from the old plural
+    -- identifiers while preserving every existing character history and window setting.
+    if self.db.global.dbVersion == 45 then
+      local windows = self.db.global.liqui and self.db.global.liqui.windows
+      if windows then
+        if windows.BonusRoll == nil and windows.BonusRolls ~= nil then
+          windows.BonusRoll = windows.BonusRolls
+        end
+        windows.BonusRolls = nil
+      end
+      for _, character in pairs(self.db.global.characters or {}) do
+        local old = character.bonusRolls
+        local current = character.bonusRoll
+        if old ~= nil then
+          local oldUpdated = type(old) == "table" and tonumber(old.updatedAt) or 0
+          local currentUpdated = type(current) == "table" and tonumber(current.updatedAt) or 0
+          if current == nil or oldUpdated > currentUpdated then
+            character.bonusRoll = old
+          end
+          character.bonusRolls = nil
         end
       end
     end
