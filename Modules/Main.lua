@@ -4490,6 +4490,14 @@ function Module:RenderNow()
       sidebarToggleButton:SetPoint("CENTER", self.window.titlebar.icon, "CENTER", 0, 0)
     end
 
+    -- LayoutMainTitlebarButtons reparents the individual affix buttons onto the titlebar or
+    -- an overflow row. They therefore no longer inherit visibility from window.affixes. Hide
+    -- every previously rendered button up front so disabling Show Weekly Affixes (or a shorter
+    -- affix list) cannot leave stale buttons visible after the next layout pass.
+    TableForEach(self.window.affixes.buttons, function(affixFrame)
+      affixFrame:Hide()
+    end)
+
     if currentAffixes and TableCount(currentAffixes) > 0 and Data.db.global.showAffixHeader then
       -- The titlebar layout now wraps the right-side controls into as many rows as needed,
       -- so Weekly Affixes no longer has to disappear just because only one character column
@@ -4509,6 +4517,7 @@ function Module:RenderNow()
           self.window.affixes.buttons[affixIndex] = affixFrame
         end
 
+        affixFrame:Show()
         affixFrame:ClearAllPoints()
         affixFrame:SetSize(20, 20)
         affixFrame:SetNormalTexture(fileDataID)
