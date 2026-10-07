@@ -34,6 +34,16 @@ Module (type): item; item. Module2 (type): item
 
 Group the same module/type with `; `, separate different groups with `. `, and omit the final period. Be concise without omitting relevant functional changes. If no functional changes remain, state that in English in the code block without inventing a change. If there are no eligible added or modified addon files, do not fabricate an empty installer; report that no incremental ZIP is needed and list any removals separately.
 
+## Google Drive delivery
+
+Apply this shared post-generation rule to every final ZIP produced by a workflow that loads this reference. Preserve normal Codex artifact delivery and use the exact same completed file; never regenerate a second version for Drive. Upload only after validating the archive integrity, its eligible final contents, and that it contains files and has a nonzero byte size. If no valid nonempty ZIP is generated, skip Drive upload; the existing deletion and no-installer rules still apply.
+
+Use only the official connected Google Drive plugin, following its Google Drive skill. The fixed destination is `Codex Artifacts/AlterEgo`, folder ID `1jCguR4JmMM-MzCDUOqxb17040RmRzSUo`; identify the destination by ID, not a name search. Use the connector's `get_file_metadata` to verify the destination folder, then `upload_file` with the final artifact's supported file reference, unchanged filename, MIME type `application/zip`, and `parent_folder_id` set to that ID. Do not introduce rclone, manual OAuth, API keys, secrets, or external dependencies.
+
+After each completed upload, use the returned file ID for a fresh `get_file_metadata` readback requesting `id,name,parents,size,webViewLink`. Confirm the file exists, has the exact final filename/title, and has the destination folder ID in its parents; when size is available, require it to match the local byte size. Verify the returned link/ID when available. Do not require `trashed`, which may be absent from the connector's normalized response. An upload response alone is never success. Only mark `Google Drive: OK` after readback passes; an upload/readback error or metadata mismatch is a delivery failure. Continue attempting the remaining valid final ZIPs independently.
+
+Drive is an additional artifact delivery channel, never a prerequisite for merge, update, commit, or push. If the connector is unavailable or delivery fails, preserve the completed main workflow and normal Codex delivery without rollback or invalidation. Report the main workflow's actual status separately from the Drive failure, including the actual connector error or failed verification; never imply that Drive delivery succeeded.
+
 ## Final report
 
 Report in Portuguese for the `new-features` target:
@@ -41,6 +51,7 @@ Report in Portuguese for the `new-features` target:
 - Initial version when available, initial subject and short SHA.
 - Final version when available, final subject and short SHA, and `initial -> final`.
 - ZIP filename and number of files, or why no ZIP is needed.
+- For each ZIP attempted on Drive: filename, local byte size, local SHA-256 (reuse an existing hash or calculate it with available tooling), `Google Drive: OK` or the actual delivery error, and the link/ID returned by Drive when available. If no valid ZIP was generated, state that Drive upload was skipped.
 - Required manual removals, or none.
 - Whether `Libs/` actually changed, distinguishing runtime content from metadata when relevant.
 - Confirmation that the ZIP contains only the final net difference and that no files were installed into the WoW folder.
