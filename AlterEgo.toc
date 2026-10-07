@@ -38,6 +38,7 @@ Boot.lua
 Constants.lua
 Events.lua
 Data.lua
+Data\BonusRolls.lua
 Data\Currencies.lua
 Data\Inventory.lua
 Data\MythicPlus.lua
@@ -56,4 +57,5 @@ Modules\DailyDelves.lua
 Modules\Equipment.lua
 Modules\VaultPreview.lua
 Modules\RaidLockouts.lua
+Modules\BonusRolls.lua
 

@@ -228,14 +228,20 @@ function Module:Render()
   -- from the right edge and don't make room for a growing title. The date
   -- lives in the body instead (self.note below), where we control the
   -- layout completely.
-  self.window:SetTitle(format("Great Vault - %s (%s)", character.info.name, character.info.realm))
+  local characterName = character.info and character.info.name or "?"
+  local classFile = character.info and character.info.class and character.info.class.file
+  local classColor = classFile and classFile ~= "" and C_ClassColor.GetClassColor(classFile)
+  if classColor then
+    characterName = classColor:WrapTextInColorCode(characterName)
+  end
+  self.window:SetTitle(format("Great Vault - %s (%s)", characterName, character.info.realm))
 
   local updatedAt = useSnapshot
     and character.vault and character.vault.lastSnapshot and character.vault.lastSnapshot.capturedAt
     or character.vault and character.vault.lastUpdatedAt
   if updatedAt and updatedAt > 0 then
     local weekNumber = Data.GetSeasonWeekNumber and Data:GetSeasonWeekNumber()
-    local text = format("Updated on: %s", date("%d/%m/%y - %H:%M", updatedAt))
+    local text = format("Updated on: %s", date("%d/%m - %H:%M", updatedAt))
     if weekNumber then
       text = text .. format(" - Week %d", weekNumber)
     end
@@ -244,7 +250,6 @@ function Module:Render()
         text = text .. " (Last Known -- vault has since reset)"
         self.note:SetText(ORANGE_FONT_COLOR:WrapTextInColorCode(text))
       else
-        text = text .. " (Reward History)"
         self.note:SetText(LIGHTGRAY_FONT_COLOR:WrapTextInColorCode(text))
       end
     else

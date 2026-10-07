@@ -1740,6 +1740,7 @@ function Module:GetCharacterInfo(unfiltered)
   local dungeons = Data:GetDungeons()
   local _, seasonDisplayID = Data:GetCurrentSeason()
   local equipmentModule = addon.Core:GetModule("Equipment", true)
+  local bonusRollsModule = addon.Core:GetModule("BonusRolls", true)
   local vaultPreviewModule = addon.Core:GetModule("VaultPreview", true)
 
   ---@type AE_CharacterRows[]
@@ -1811,11 +1812,16 @@ function Module:GetCharacterInfo(unfiltered)
         end
         if character.lastUpdate ~= nil then
           GameTooltip:AddLine(" ")
-          GameTooltip:AddLine(format("Last update:\n|cffffffff%s|r", date("%c", character.lastUpdate)), NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+          GameTooltip:AddLine(format("Last update:\n|cffffffff%s|r", date("%d/%m - %H:%M", character.lastUpdate)), NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+        end
+        if (type(character.equipment) == "table" and equipmentModule) or bonusRollsModule then
+          GameTooltip:AddLine(" ")
         end
         if type(character.equipment) == "table" and equipmentModule then
-          GameTooltip:AddLine(" ")
-          GameTooltip:AddLine("<Click to View Equipment>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+          GameTooltip:AddLine("<Left-click to View Equipment>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+        end
+        if bonusRollsModule then
+          GameTooltip:AddLine("<Right-click to View Bonus Rolls>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
         end
         GameTooltip:Show()
       end,
@@ -1825,6 +1831,10 @@ function Module:GetCharacterInfo(unfiltered)
       onClick = function(infoFrame, character)
         if not equipmentModule then return end
         equipmentModule:OpenCharacter(character)
+      end,
+      onRightClick = function(infoFrame, character)
+        if not bonusRollsModule then return end
+        bonusRollsModule:OpenCharacter(character)
       end,
       enabled = true,
     },
@@ -5499,8 +5509,13 @@ function Module:RenderNow()
             end
           end)
 
-          infoFrame:SetScript("OnClick", function()
-            if info.onClick then
+          infoFrame:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+          infoFrame:SetScript("OnClick", function(_, mouseButton)
+            if mouseButton == "RightButton" then
+              if info.onRightClick then
+                info.onRightClick(infoFrame, character)
+              end
+            elseif info.onClick then
               info.onClick(infoFrame, character)
             end
           end)

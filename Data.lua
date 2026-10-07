@@ -14,7 +14,7 @@ local TableFind = addon.Libs.LiqUI.Utils.TableFind
 local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
 local TableGet = addon.Libs.LiqUI.Utils.TableGet
 
-Data.dbVersion = 44
+Data.dbVersion = 45
 
 Data.defaultDB = {
   ---@type AE_Global
@@ -126,6 +126,7 @@ Data.defaultDB = {
         Equipment = {},
         VaultPreview = {},
         RaidLockouts = {},
+        BonusRolls = {},
       },
       tables = {
         Affixes = { hiddenColumns = {} },
@@ -140,8 +141,8 @@ Data.defaultDB = {
       password = "",
       channel = "GUILD", ---@type "BOTH"|"GUILD"|"PARTY" Which distribution(s) to send on when more than one is available. "GUILD" (default) restricts sends to the guild channel; "PARTY" restricts to party/raid; "BOTH" sends on every channel that applies (see Comm.lua's GetUsableChannels).
       passwordAccounts = {}, ---@type table<string, string> Which WoW Account each password's synced characters land in
-      lastSentUpdate = {}, ---@type table<string, number> Per-character GUID -> the character.lastUpdate value we last actually broadcast, so unchanged characters aren't resent
-      lastConfirmedUpdate = {}, ---@type table<string, number> Per-character GUID -> lastUpdate most recently confirmed by another Sync peer via ACK
+      lastSentRevision = {}, ---@type table<string, number> Per-character GUID -> sync revision last fully broadcast, so unchanged characters are not resent
+      lastConfirmedRevision = {}, ---@type table<string, number> Per-character GUID -> sync revision most recently confirmed by another Sync peer via ACK
       lastSuccessfulSyncAt = 0, ---@type number Epoch timestamp of the most recent character sync confirmed by a peer (sent or received)
       lastSuccessfulSyncPeer = "", ---@type string Last peer character name involved in a confirmed character sync
     },
@@ -152,6 +153,7 @@ Data.defaultDB = {
 Data.defaultCharacter = {
   GUID = "",
   lastUpdate = 0,
+  syncRevision = 0, ---@type number Monotonic version used only by Multi-Account Sync; independent from the user-facing lastUpdate timestamp
   currentSeason = 0,
   enabled = true,
   order = 0,
@@ -704,9 +706,57 @@ function Data:GetCharacter(playerGUID)
     self.db.global.characters[playerGUID].accountId = self:EnsureDefaultAccount()
   end
 
-  self.db.global.characters[playerGUID].GUID = playerGUID
+  local character = self.db.global.characters[playerGUID]
+  character.GUID = playerGUID
+  if type(character.syncRevision) ~= "number" then
+    character.syncRevision = tonumber(character.lastUpdate) or 0
+  end
 
-  return self.db.global.characters[playerGUID]
+  return character
+end
+
+---Return the monotonic version used to compare this character over Multi-Account Sync.
+---Older records created before syncRevision existed fall back to lastUpdate so mixed/legacy
+---SavedVariables remain comparable until that character changes locally again.
+---@param character AE_Character?
+---@return number
+function Data:GetCharacterSyncRevision(character)
+  if type(character) ~= "table" then return 0 end
+  return tonumber(character.syncRevision) or tonumber(character.lastUpdate) or 0
+end
+
+---Whether this installation is authoritative for a character's Sync version.
+---The actively logged-in character is always local. For offline records, a configured Main
+---WoW Account is the authority boundary; installations that never configured Main preserve
+---the addon's legacy behavior where all locally-tracked characters are considered sendable.
+---@param character AE_Character?
+---@return boolean
+function Data:IsCharacterSyncAuthoritative(character)
+  if type(character) ~= "table" then return false end
+  if character.GUID and character.GUID == UnitGUID("player") then return true end
+  local mainAccountId = self:GetMainAccountId()
+  if not mainAccountId then return true end
+  local characterAccountId = character.accountId or self:EnsureDefaultAccount()
+  return characterAccountId == mainAccountId
+end
+
+---Advance a character's dedicated Sync revision after its syncable data changes and queue
+---the normal debounced broadcast. This deliberately does NOT modify lastUpdate: that field
+---continues to mean "last character-info refresh" in the UI instead of doubling as transport state.
+---@param character AE_Character?
+---@return boolean changedRevision
+function Data:MarkCharacterSyncChanged(character)
+  character = character or self:GetCharacter()
+  if not character or not self:IsCharacterSyncAuthoritative(character) then return false end
+
+  local current = math.max(self:GetCharacterSyncRevision(character), tonumber(character.lastUpdate) or 0)
+  local serverNow = type(GetServerTime) == "function" and tonumber(GetServerTime()) or tonumber(time()) or 0
+  character.syncRevision = math.max(current + 1, serverNow)
+
+  if addon.Core and addon.Core.RequestSyncBroadcast then
+    addon.Core:RequestSyncBroadcast()
+  end
+  return true
 end
 
 ---Remove a character from the addon. No undo; log in on that character again to reintroduce.
@@ -721,12 +771,15 @@ function Data:DeleteCharacter(characterOrGUID)
   -- character record so deleting a character does not leave orphaned GUID
   -- metadata behind in SavedVariables.
   local sync = self.db.global.sync
-  if sync and sync.lastSentUpdate then
-    sync.lastSentUpdate[GUID] = nil
+  if sync and sync.lastSentRevision then
+    sync.lastSentRevision[GUID] = nil
   end
-  if sync and sync.lastConfirmedUpdate then
-    sync.lastConfirmedUpdate[GUID] = nil
+  if sync and sync.lastConfirmedRevision then
+    sync.lastConfirmedRevision[GUID] = nil
   end
+  -- Clean legacy bookkeeping too if it still exists in an upgraded SavedVariables file.
+  if sync and sync.lastSentUpdate then sync.lastSentUpdate[GUID] = nil end
+  if sync and sync.lastConfirmedUpdate then sync.lastConfirmedUpdate[GUID] = nil end
 
   -- Comm.lua also keeps a few session-only per-GUID caches. They are not
   -- SavedVariables, but clearing them here keeps Remove Character semantically
@@ -1551,6 +1604,31 @@ function Data:MigrateDB()
       sync.lastSuccessfulSyncAt = sync.lastSuccessfulSyncAt or 0
       sync.lastSuccessfulSyncPeer = sync.lastSuccessfulSyncPeer or ""
     end
+    -- Give character records a dedicated monotonic Sync revision. Seed it from the old
+    -- lastUpdate-based bookkeeping, then advance OWN/Main-account characters once so the
+    -- first post-upgrade reconciliation repairs any stale equal-lastUpdate snapshots created
+    -- by the old scheme. Synced-in/non-Main characters keep their received version unchanged.
+    if self.db.global.dbVersion == 44 then
+      local sync = self.db.global.sync
+      local mainAccountId = self:GetMainAccountId()
+      local defaultAccountId = self:EnsureDefaultAccount()
+      sync.lastSentRevision = sync.lastSentRevision or {}
+      sync.lastConfirmedRevision = sync.lastConfirmedRevision or {}
+      for GUID, character in pairs(self.db.global.characters or {}) do
+        local baseRevision = tonumber(character.syncRevision) or tonumber(character.lastUpdate) or 0
+        local characterAccountId = character.accountId or defaultAccountId
+        character.syncRevision = baseRevision
+        if mainAccountId and characterAccountId == mainAccountId then
+          character.syncRevision = baseRevision + 1
+        end
+        if sync.lastSentRevision[GUID] == nil and sync.lastSentUpdate then
+          sync.lastSentRevision[GUID] = tonumber(sync.lastSentUpdate[GUID])
+        end
+        if sync.lastConfirmedRevision[GUID] == nil and sync.lastConfirmedUpdate then
+          sync.lastConfirmedRevision[GUID] = tonumber(sync.lastConfirmedUpdate[GUID])
+        end
+      end
+    end
     self.db.global.dbVersion = self.db.global.dbVersion + 1
     self:MigrateDB()
   end
@@ -1592,6 +1670,7 @@ function Data:TaskWeeklyReset()
           characterCurrency.questCompleted = false
         end
       end)
+      self:MarkCharacterSyncChanged(character)
     end)
   end
   self.db.global.weeklyReset = time() + C_DateAndTime.GetSecondsUntilWeeklyReset()
@@ -1609,6 +1688,7 @@ function Data:TaskSeasonReset()
         character.mythicplus.rating = 0
         character.currentSeason = seasonID
         character.currentSeasonID = seasonID
+        self:MarkCharacterSyncChanged(character)
       end
     end)
   end
@@ -1828,7 +1908,7 @@ function Data:UpdateRaidInstances()
     character.raids.savedInstances[savedInstanceIndex] = savedInstance
   end
   addon.Core:Render()
-  addon.Core:RequestSyncBroadcast()
+  self:MarkCharacterSyncChanged(character)
 end
 
 function Data:UpdatePreyProgress()
@@ -1839,6 +1919,7 @@ function Data:UpdatePreyProgress()
   TableForEach(self.preyQuests, function(quest)
     character.prey.questsCompleted[quest.questID] = C_QuestLog.IsQuestFlaggedCompleted(quest.questID)
   end)
+  self:MarkCharacterSyncChanged(character)
 end
 
 ---Compute the character's equipped item level and its "including bags" counterpart using the same
@@ -1981,8 +2062,8 @@ function Data:UpdateCharacterInfo()
   character.info.guild.isInGuild = isInGuild
 
   character.lastUpdate = GetServerTime()
+  self:MarkCharacterSyncChanged(character)
   addon.Core:Render()
-  addon.Core:RequestSyncBroadcast()
 end
 
 ---Store the current zone so the character tooltip can show where this
@@ -1997,7 +2078,10 @@ function Data:UpdateCharacterLocation()
   end
   if not zoneName or zoneName == "" then return end
 
-  character.info.lastLocation = zoneName
+  if character.info.lastLocation ~= zoneName then
+    character.info.lastLocation = zoneName
+    self:MarkCharacterSyncChanged(character)
+  end
 end
 
 ---Refresh character money from the API
@@ -2008,7 +2092,10 @@ function Data:UpdateMoney()
   local money = GetMoney()
   if not money then return end
 
-  character.money = money
+  if character.money ~= money then
+    character.money = money
+    self:MarkCharacterSyncChanged(character)
+  end
 end
 
 ---Refresh currencies from the API
@@ -2118,6 +2205,7 @@ function Data:UpdateCurrencies()
     end
     table.insert(character.currencies, currency)
   end)
+  self:MarkCharacterSyncChanged(character)
 end
 
 local EMBELLISHED_ITEM_BONUS_ID = 8960
@@ -2637,6 +2725,7 @@ function Data:UpdateEquipment()
     }
     table.insert(character.equipment, equipment)
   end)
+  self:MarkCharacterSyncChanged(character)
 end
 
 local function isKeystoneAnnounceBlocked()
@@ -2780,7 +2869,7 @@ function Data:UpdateKeystoneItem()
   end
 
   addon.Core:Render()
-  addon.Core:RequestSyncBroadcast()
+  self:MarkCharacterSyncChanged(character)
 end
 
 ---Record that the player actually opened the native Great Vault for this
@@ -2789,7 +2878,11 @@ end
 function Data:MarkVaultOpened()
   local character = self:GetCharacter()
   if not character or not character.vault then return end
-  character.vault.openedForReset = self.db.global.weeklyReset or 0
+  local reset = self.db.global.weeklyReset or 0
+  if character.vault.openedForReset ~= reset then
+    character.vault.openedForReset = reset
+    self:MarkCharacterSyncChanged(character)
+  end
 end
 
 ---Refresh `character.vault.lastSnapshot` using only concrete rewards that
@@ -2837,7 +2930,10 @@ function Data:MarkVaultRewardClaimed(activityId)
   local character = self:GetCharacter()
   if not character or not character.vault.lastSnapshot then return end
   character.vault.lastSnapshot.claimed = character.vault.lastSnapshot.claimed or {}
-  character.vault.lastSnapshot.claimed[tostring(activityId)] = true
+  if character.vault.lastSnapshot.claimed[tostring(activityId)] ~= true then
+    character.vault.lastSnapshot.claimed[tostring(activityId)] = true
+    self:MarkCharacterSyncChanged(character)
+  end
 end
 
 ---True if this character has a remembered Great Vault snapshot with at
@@ -3006,7 +3102,7 @@ function Data:UpdateVault()
     character.vault.lastSnapshot = nil
   end
   addon.Core:Render()
-  addon.Core:RequestSyncBroadcast()
+  self:MarkCharacterSyncChanged(character)
 end
 
 ---Refresh Mythic+ data from the API
@@ -3071,7 +3167,7 @@ function Data:UpdateMythicPlus()
     table.insert(character.mythicplus.dungeons, dungeon)
   end
   addon.Core:Render()
-  addon.Core:RequestSyncBroadcast()
+  self:MarkCharacterSyncChanged(character)
 end
 
 -- function Data:GetClasses()

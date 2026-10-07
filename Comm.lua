@@ -49,10 +49,10 @@ local HELLO_RESPONSE_MIN_INTERVAL_SECONDS = 8
 local MANUAL_RECONCILE_WAIT_SECONDS = 3
 local ACK_TIMEOUT_SECONDS = 45
 local ACK_RETRY_MAX = 2
-local syncPeers = {} -- [sender] = {lastSeen, distribution, versions = { [GUID] = lastUpdate }}
+local syncPeers = {} -- [sender] = {lastSeen, distribution, versions = { [GUID] = syncRevision }}
 local catchupPendingGUIDs = {} -- own/Main characters a peer explicitly reported missing/stale
-local pendingConfirmations = {} -- [transmissionId] = {GUID, lastUpdate, manual, batchId}
-local confirmationRetryCounts = {} -- [GUID|lastUpdate] = number of automatic ACK-timeout retries this session
+local pendingConfirmations = {} -- [transmissionId] = {GUID, revision, manual, batchId}
+local confirmationRetryCounts = {} -- [GUID|syncRevision] = number of automatic ACK-timeout retries this session
 local processedHelloIds = {} -- dedupe the same HELLO arriving over both GUILD and PARTY/RAID
 local processedAckTransmissionIds = {} -- dedupe the same transmission arriving over more than one channel while still allowing a retry to be ACK'd
 local helloResponseAt = {} -- [sender] = GetTime() of our last ordinary HELLO response
@@ -356,7 +356,7 @@ end
 ---@param character AE_Character
 ---@param password string
 ---@param channels string[] AceComm distributions to send on ("GUILD"/"PARTY"/"RAID"), one message per entry.
----@param forced boolean? True for a manual "Sync Now" push -- tells the receiver to apply this even if it's not strictly newer than what it already has (see OnCommReceived).
+---@param forced boolean? True for a manual "Sync Now" push -- allows the receiver to reapply an equal revision, but never an older one (see OnCommReceived).
 ---@param batchId string? Shared by every character in one broadcast. Manual batches use it for the normal Sync Now summary; automatic batches use it only so the receiver can announce completion when that batch introduced at least one brand-new character.
 ---@param batchTotal number? How many characters are in this batchId's push -- how the receiver knows when the whole broadcast has arrived.
 ---@param priority string? AceComm priority ("BULK"/"NORMAL"/"ALERT"). Defaults to "BULK".
@@ -436,7 +436,7 @@ end
 ---now is a party) -- so it sends on every channel that currently applies:
 ---GUILD if you're in a guild, and RAID or PARTY if you're grouped.
 ---Sending on more than one channel is cheap and harmless -- the receiving
----side already dedupes by lastUpdate, so a duplicate arriving on a second
+---side already dedupes by syncRevision, so a duplicate arriving on a second
 ---channel is just silently ignored. Setting it to GUILD or PARTY
 ---specifically restricts it to just that one, e.g. for testing one
 ---channel in isolation.
@@ -465,24 +465,37 @@ local function GetUsableChannels(verbose)
   return channels
 end
 
+---Dedicated transport version for character reconciliation. New records carry
+---syncRevision; legacy records fall back to lastUpdate until they are changed locally.
+---@param character AE_Character?
+---@return number
+local function GetCharacterRevision(character)
+  if Data.GetCharacterSyncRevision then
+    return Data:GetCharacterSyncRevision(character)
+  end
+  return type(character) == "table" and (tonumber(character.syncRevision) or tonumber(character.lastUpdate) or 0) or 0
+end
+
 ---Has this character actually changed since the last time we told anyone
----about it (via ANY sync path)? Compares against `lastUpdate`, the same
----timestamp `Data:UpdateCharacterInfo()` already stamps on every full
----refresh -- so a character that hasn't been refreshed since its last
----broadcast is, by definition, unchanged.
+---about it (via ANY sync path)? Sync uses its own monotonic revision instead
+---of the user-facing lastUpdate timestamp, because currencies, Vault, M+,
+---equipment, Bonus Rolls and other slices can change without a character-info refresh.
 ---@param character AE_Character
 ---@return boolean
 local function HasCharacterChangedSinceLastSync(character)
-  local lastSent = Data.db.global.sync.lastSentUpdate[character.GUID]
-  return lastSent == nil or lastSent ~= character.lastUpdate
+  Data.db.global.sync.lastSentRevision = Data.db.global.sync.lastSentRevision or {}
+  local lastSent = tonumber(Data.db.global.sync.lastSentRevision[character.GUID])
+  return lastSent == nil or lastSent ~= GetCharacterRevision(character)
 end
 
 ---Record that we just sent this character's current state, so the next
 ---check of the same (unchanged) data knows to skip it.
 ---@param character AE_Character
-local function MarkCharacterSynced(character)
-  Data.db.global.sync.lastSentUpdate = Data.db.global.sync.lastSentUpdate or {}
-  Data.db.global.sync.lastSentUpdate[character.GUID] = character.lastUpdate
+---@param revision number? Exact revision serialized into the transmission. Passing the captured
+---value matters if live data changes while a multi-part record is still leaving this client.
+local function MarkCharacterSynced(character, revision)
+  Data.db.global.sync.lastSentRevision = Data.db.global.sync.lastSentRevision or {}
+  Data.db.global.sync.lastSentRevision[character.GUID] = tonumber(revision) or GetCharacterRevision(character)
 end
 
 ---Checks Sync is actually usable right now (enabled, password set, and at
@@ -597,8 +610,8 @@ end
 local function BuildKnownCharacterVersions()
   local versions = {}
   for GUID, character in pairs(Data.db.global.characters or {}) do
-    if type(GUID) == "string" and type(character) == "table" and type(character.lastUpdate) == "number" then
-      versions[GUID] = character.lastUpdate
+    if type(GUID) == "string" and type(character) == "table" then
+      versions[GUID] = GetCharacterRevision(character)
     end
   end
   return versions
@@ -607,7 +620,7 @@ end
 local function PeerNeedsCharacter(peer, character)
   if not peer or type(peer.versions) ~= "table" then return true end
   local remoteVersion = tonumber(peer.versions[character.GUID])
-  local localVersion = tonumber(character.lastUpdate) or 0
+  local localVersion = GetCharacterRevision(character)
   return remoteVersion == nil or remoteVersion < localVersion
 end
 
@@ -627,16 +640,17 @@ local function AnyActivePeerNeedsCharacter(character, peerFilter)
 end
 
 local function IsCharacterAwaitingConfirmation(character)
+  local revision = GetCharacterRevision(character)
   for _, confirmation in pairs(pendingConfirmations) do
-    if confirmation.GUID == character.GUID and confirmation.lastUpdate == character.lastUpdate then
+    if confirmation.GUID == character.GUID and tonumber(confirmation.revision) == revision then
       return true
     end
   end
   return false
 end
 
-local function ConfirmationRetryKey(GUID, lastUpdate)
-  return tostring(GUID) .. "|" .. tostring(lastUpdate or 0)
+local function ConfirmationRetryKey(GUID, revision)
+  return tostring(GUID) .. "|" .. tostring(revision or 0)
 end
 
 ---Start the ACK deadline only after every chunk has actually left this client. Automatic
@@ -654,12 +668,12 @@ local function ArmConfirmationTimeout(transmissionId)
 
     if confirmation.manual or not Data.db.global.sync.enabled then return end
     local character = GetCurrentlyEligibleCharacter(confirmation.GUID)
-    if not character or tonumber(character.lastUpdate) ~= tonumber(confirmation.lastUpdate) then return end
+    if not character or GetCharacterRevision(character) ~= tonumber(confirmation.revision) then return end
 
     local needsCharacter, hasPeer = AnyActivePeerNeedsCharacter(character)
     if not hasPeer or not needsCharacter then return end
 
-    local retryKey = ConfirmationRetryKey(confirmation.GUID, confirmation.lastUpdate)
+    local retryKey = ConfirmationRetryKey(confirmation.GUID, confirmation.revision)
     local retries = confirmationRetryCounts[retryKey] or 0
     if retries >= ACK_RETRY_MAX then return end
 
@@ -674,7 +688,7 @@ QueueCatchUpFromPeerVersions = function(versions)
   local queued = false
   for _, character in ipairs(GetBroadcastCandidates()) do
     local remoteVersion = tonumber(versions[character.GUID])
-    local localVersion = tonumber(character.lastUpdate) or 0
+    local localVersion = GetCharacterRevision(character)
     if remoteVersion == nil or remoteVersion < localVersion then
       catchupPendingGUIDs[character.GUID] = true
       queued = true
@@ -992,9 +1006,10 @@ local function PerformBroadcast(verbose, peerFilter)
       addon.Core:Print(format("Sync: sending %d/%d -- %s...", index, #toSend, name))
     end
     local transmissionId = NewSyncId("T")
+    local sentRevision = GetCharacterRevision(character)
     pendingConfirmations[transmissionId] = {
       GUID = character.GUID,
-      lastUpdate = character.lastUpdate,
+      revision = sentRevision,
       manual = verbose == true,
       batchId = batchId,
     }
@@ -1022,7 +1037,7 @@ local function PerformBroadcast(verbose, peerFilter)
         -- Only record success once every channel's chunks really left this client. Marking the
         -- character at queue time could make a combat-restricted transmission look complete and
         -- suppress the retry until that character happened to change again.
-        MarkCharacterSynced(character)
+        MarkCharacterSynced(character, sentRevision)
         catchupPendingGUIDs[character.GUID] = nil
         if manualPendingGUIDs then
           manualPendingGUIDs[character.GUID] = nil
@@ -1225,13 +1240,13 @@ local warnedCorrupted = {}
 -- corrupted by the other -- see the header comment on batchInProgress in
 -- the sending code). Without this, the SAME update would get applied and
 -- Render()'d twice, and -- for a forced "Sync Now" push -- ack'd back to
--- the sender twice. Keyed by GUID + the character's own lastUpdate stamp,
+-- the sender twice. Keyed by GUID + the character's own Sync revision,
 -- so a genuinely NEWER update for the same character (a real, separate
 -- change) is never mistaken for a duplicate.
 local processedUpdates = {}
 
 ---Clear session-only Sync bookkeeping tied to a character that was explicitly
----removed from AlterEgo. Persistent lastSentUpdate metadata is cleared by
+---removed from AlterEgo. Persistent lastSentRevision metadata is cleared by
 ---Data:DeleteCharacter itself.
 ---@param GUID string
 function addon.Core:ForgetSyncCharacterMetadata(GUID)
@@ -1480,7 +1495,8 @@ local function SendAck(remote, sender, password, batchId, transmissionId, manual
     password = password,
     ack = true,
     GUID = remote.GUID,
-    lastUpdate = remote.lastUpdate,
+    syncRevision = GetCharacterRevision(remote),
+    lastUpdate = remote.lastUpdate, -- kept for compatibility with older peers
     name = remote.info and remote.info.name,
     realm = remote.info and remote.info.realm,
     batchId = batchId,
@@ -1613,17 +1629,17 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     end
 
     local GUID = payload.GUID or (confirmation and confirmation.GUID)
-    local confirmedUpdate = payload.lastUpdate or (confirmation and confirmation.lastUpdate)
-    if GUID and confirmedUpdate then
+    local confirmedRevision = payload.syncRevision or payload.lastUpdate or (confirmation and confirmation.revision)
+    if GUID and confirmedRevision then
       local sync = Data.db.global.sync
-      sync.lastConfirmedUpdate = sync.lastConfirmedUpdate or {}
-      local previous = tonumber(sync.lastConfirmedUpdate[GUID]) or 0
-      sync.lastConfirmedUpdate[GUID] = math.max(previous, tonumber(confirmedUpdate) or 0)
-      confirmationRetryCounts[ConfirmationRetryKey(GUID, confirmedUpdate)] = nil
+      sync.lastConfirmedRevision = sync.lastConfirmedRevision or {}
+      local previous = tonumber(sync.lastConfirmedRevision[GUID]) or 0
+      sync.lastConfirmedRevision[GUID] = math.max(previous, tonumber(confirmedRevision) or 0)
+      confirmationRetryCounts[ConfirmationRetryKey(GUID, confirmedRevision)] = nil
       local peer = syncPeers[sender]
       if peer then
         peer.versions = peer.versions or {}
-        peer.versions[GUID] = confirmedUpdate
+        peer.versions[GUID] = confirmedRevision
       end
       MarkSuccessfulSync(sender)
     end
@@ -1670,7 +1686,8 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   -- processedUpdates above) -- stop here, before the ack and before
   -- touching the character data, so neither happens twice for the one
   -- broadcast.
-  local updateKey = remote.GUID .. "|" .. tostring(remote.lastUpdate)
+  local remoteRevision = GetCharacterRevision(remote)
+  local updateKey = remote.GUID .. "|" .. tostring(remoteRevision)
   if processedUpdates[updateKey] then
     -- If the original ACK was lost, a retry carries a NEW transmission id. Re-ACK
     -- that retry without reapplying the same character. Copies of the same transmission
@@ -1698,7 +1715,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   local peer = syncPeers[sender]
   if peer then
     peer.versions = peer.versions or {}
-    peer.versions[remote.GUID] = remote.lastUpdate
+    peer.versions[remote.GUID] = remoteRevision
   end
 
   -- ACK every readable character record, automatic or manual. The sender uses this
@@ -1712,16 +1729,18 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   local existing = Data.db.global.characters[remote.GUID]
   local isNew = existing == nil
 
-  -- Only accept if it's actually newer than what we already know -- keeps a
-  -- stale record (an account that hasn't played in a while, relayed back
-  -- around) from ever stomping fresher data, no matter which client sent it.
-  -- Silent: this is the routine "nothing to do" case, not a problem.
-  -- Skipped entirely for a forced push (manual "Sync Now" on the sender's
-  -- end): that's a deliberate "make sure we're both fully caught up" action,
-  -- so it applies even when the record isn't strictly newer.
-  if not payload.forced and existing and existing.lastUpdate and remote.lastUpdate and remote.lastUpdate <= existing.lastUpdate then
-    TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
-    return
+  -- A remote record may never roll a character back to an older Sync revision.
+  -- Manual Sync Now may reapply an EQUAL revision as an explicit reconciliation,
+  -- but "forced" no longer means "accept stale data". Automatic sync still ignores
+  -- equal revisions because there is nothing newer to apply.
+  if existing then
+    local existingRevision = GetCharacterRevision(existing)
+    local isOlder = remoteRevision < existingRevision
+    local isSameAutomatic = not payload.forced and remoteRevision <= existingRevision
+    if isOlder or isSameAutomatic then
+      TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
+      return
+    end
   end
 
   if existing then

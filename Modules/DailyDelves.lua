@@ -207,15 +207,29 @@ local function prepareBountifulTracking(settings, character, resetAt)
   end
 
   if not character then return end
-  if type(character.dailyDelves) ~= "table" then character.dailyDelves = {} end
+  local changed = false
+  if type(character.dailyDelves) ~= "table" then
+    character.dailyDelves = {}
+    changed = true
+  end
   local state = character.dailyDelves
-  if type(state.bountifulSeen) ~= "table" then state.bountifulSeen = {} end
-  if type(state.bountifulDone) ~= "table" then state.bountifulDone = {} end
+  if type(state.bountifulSeen) ~= "table" then
+    state.bountifulSeen = {}
+    changed = true
+  end
+  if type(state.bountifulDone) ~= "table" then
+    state.bountifulDone = {}
+    changed = true
+  end
   if state.bountifulResetAt ~= resetAt then
     state.bountifulResetAt = resetAt
     wipe(state.bountifulSeen)
     wipe(state.bountifulDone)
     state.activeBountifulRun = nil
+    changed = true
+  end
+  if changed and Data.MarkCharacterSyncChanged then
+    Data:MarkCharacterSyncChanged(character)
   end
 end
 
@@ -240,8 +254,15 @@ local function buildAllDelves(liveDelves, settings, character)
   local tracking = settings.checkBountifulDone == true and character ~= nil
   if tracking then
     local state = character.dailyDelves
+    local changed = false
     for delveName in pairs(liveBountiful) do
-      state.bountifulSeen[delveName] = true
+      if state.bountifulSeen[delveName] ~= true then
+        state.bountifulSeen[delveName] = true
+        changed = true
+      end
+    end
+    if changed and Data.MarkCharacterSyncChanged then
+      Data:MarkCharacterSyncChanged(character)
     end
   end
 
@@ -378,9 +399,13 @@ local function markBountifulDone(delveName)
   local resetAt = getDailyResetStamp()
   prepareBountifulTracking(settings, character, resetAt)
   local state = character.dailyDelves
+  local changed = state.bountifulSeen[delveName] ~= true or state.bountifulDone[delveName] ~= true
   state.bountifulSeen[delveName] = true
   state.bountifulDone[delveName] = true
   settings.bountifulRotation[delveName] = true
+  if changed and Data.MarkCharacterSyncChanged then
+    Data:MarkCharacterSyncChanged(character)
+  end
   if Module.window and Module.window:IsVisible() then Module:Render() end
 end
 
@@ -425,7 +450,12 @@ local function captureCurrentBountifulRun()
   end
 
   if isBountiful then
-    state.bountifulSeen[delveName] = true
+    if state.bountifulSeen[delveName] ~= true then
+      state.bountifulSeen[delveName] = true
+      if Data.MarkCharacterSyncChanged then
+        Data:MarkCharacterSyncChanged(character)
+      end
+    end
     state.activeBountifulRun = delveName
   elseif state.activeBountifulRun and state.activeBountifulRun ~= delveName then
     state.activeBountifulRun = nil
