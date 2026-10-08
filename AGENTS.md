@@ -2,6 +2,7 @@
 
 This repository is the fork at https://github.com/hellsy55/AlterEgo of https://github.com/DennisRas/AlterEgo. Treat these instructions as the routing and safety rules for its maintenance workflows.
 
+- Before reading whole code files, locate relevant files and symbols with `rg --files` and `rg -n`; read relevant sections first and expand as needed, without skipping required workflow steps or reviews.
 ## Language and commits
 
 - Speak to the user in Portuguese, including explanations, options, and completion reports. Write everything saved to files or GitHub in English, including code comments, documentation, Git-generated messages, commits, pull requests, and tags.
