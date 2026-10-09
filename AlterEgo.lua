@@ -107,7 +107,7 @@ function Core:OnInitialize()
       Data:MarkVaultRewardClaimed(activityId)
     end)
   end
-  self:Render()
+  self:RenderNow()
 end
 
 ---Toggle the main window
@@ -145,12 +145,92 @@ function Core:ToggleEquipment()
   module:OpenCharacter(character)
 end
 
----Render all modules
-function Core:Render()
-  for _, module in addon.Core:IterateModules() do
+---Render all modules immediately (needed during initial UI setup).
+function Core:RenderNow()
+  for _, module in self:IterateModules() do
     if module.Render ~= nil then
       module:Render()
     end
+  end
+end
+
+---Coalesce multiple render requests into one pass on the next frame.
+function Core:Render()
+  if self.renderQueued then return end
+  self.renderQueued = true
+  C_Timer.After(0, function()
+    self.renderQueued = false
+    self:RenderNow()
+  end)
+end
+
+---Data updates may be requested by several events in the same frame.
+---Keep the equipment module's enchant-aware refresh/retry implementation.
+local updaters = {
+  UpdateCharacterInfo = function() Data:UpdateCharacterInfo() end,
+  UpdatePreyProgress = function() Data:UpdatePreyProgress() end,
+  UpdateEquipment = function()
+    local equipment = addon.Core:GetModule("Equipment", true)
+    if equipment then
+      equipment:RefreshEquipment()
+    else
+      Data:UpdateEquipment()
+    end
+  end,
+  UpdateMoney = function() Data:UpdateMoney() end,
+  UpdateCurrencies = function()
+    Data:UpdateCurrencies()
+    addon.Core:Render()
+  end,
+  UpdateKeystoneItem = function() Data:UpdateKeystoneItem() end,
+  UpdateRaidInstances = function() Data:UpdateRaidInstances() end,
+  UpdateVault = function() Data:UpdateVault() end,
+  UpdateMythicPlus = function() Data:UpdateMythicPlus() end,
+  RequestSyncBroadcast = function() addon.Core:RequestSyncBroadcast() end,
+}
+
+local updateQueue, updateQueued, updateQueueRunning = {}, {}, false
+
+local function processUpdateQueue()
+  local name = table.remove(updateQueue, 1)
+  if name then
+    updateQueued[name] = nil
+    updaters[name]()
+  end
+  if #updateQueue > 0 then
+    C_Timer.After(0, processUpdateQueue)
+  else
+    updateQueueRunning = false
+  end
+end
+
+---Run at most one distinct queued update per frame.
+---@param name string
+function Core:QueueUpdate(name)
+  if not updaters[name] or updateQueued[name] then return end
+  updateQueued[name] = true
+  updateQueue[#updateQueue + 1] = name
+  if not updateQueueRunning then
+    updateQueueRunning = true
+    C_Timer.After(0, processUpdateQueue)
+  end
+end
+
+---Match Data:UpdateDB's dependency order, including custom sync broadcast.
+function Core:QueueAllUpdates()
+  for _, name in ipairs({
+    "UpdateCharacterInfo",
+    "UpdatePreyProgress",
+    "UpdateEquipment",
+    "UpdateMoney",
+    "UpdateCurrencies",
+    "UpdateKeystoneItem",
+    "UpdateRaidInstances",
+    "UpdateVault",
+    "UpdateMythicPlus",
+    "RequestSyncBroadcast",
+  }) do
+    self:QueueUpdate(name)
   end
 end
 
@@ -161,25 +241,24 @@ function Core:OnEnable()
       "PLAYER_EQUIPMENT_CHANGED",
       "UNIT_INVENTORY_CHANGED",
     }, function()
-      Data:UpdateCharacterInfo()
-      Data:UpdateEquipment()
+      -- Equipment scans and enchant retries belong to Equipment:OnEnable.
+      self:QueueUpdate("UpdateCharacterInfo")
     end
   )
   addon.Events:RegisterEvent(
     {
       "QUEST_LOG_UPDATE",
     }, function()
-      Data:UpdatePreyProgress()
-      Data:UpdateCurrencies()
-      self:Render()
+      self:QueueUpdate("UpdatePreyProgress")
+      self:QueueUpdate("UpdateCurrencies")
     end
   )
   addon.Events:RegisterEvent(
     {
       "GUILD_ROSTER_UPDATE",
       "PLAYER_GUILD_UPDATE",
-    }, function(...)
-      Data:UpdateCharacterInfo()
+    }, function()
+      self:QueueUpdate("UpdateCharacterInfo")
     end
   )
   addon.Events:RegisterEvent(
@@ -198,7 +277,7 @@ function Core:OnEnable()
       "CHALLENGE_MODE_MAPS_UPDATE",
       "WEEKLY_REWARDS_UPDATE",
     }, function()
-      Data:UpdateVault()
+      self:QueueUpdate("UpdateVault")
     end
   )
   -- Track an actual native Great Vault open separately from generic weekly
@@ -230,24 +309,20 @@ function Core:OnEnable()
       "LFG_UPDATE_RANDOM_INFO",
       "UPDATE_INSTANCE_INFO",
     }, function()
-      Data:UpdateRaidInstances()
+      self:QueueUpdate("UpdateRaidInstances")
     end
   )
   addon.Events:RegisterEvent(
     {
       "BAG_UPDATE_DELAYED",
       "CHALLENGE_MODE_COMPLETED",
-      "CHALLENGE_MODE_COMPLETED",
       "CHALLENGE_MODE_MAPS_UPDATE",
-      "CHALLENGE_MODE_MAPS_UPDATE",
-      "CHALLENGE_MODE_RESET",
       "CHALLENGE_MODE_RESET",
       "ITEM_CHANGED",
       "MYTHIC_PLUS_NEW_WEEKLY_RECORD",
-      "MYTHIC_PLUS_NEW_WEEKLY_RECORD",
     }, function()
-      Data:UpdateKeystoneItem()
-      Data:UpdateCurrencies()
+      self:QueueUpdate("UpdateKeystoneItem")
+      self:QueueUpdate("UpdateCurrencies")
       C_Timer.After(2, function()
         Data:FlushPendingKeystoneAnnounce()
       end)
@@ -260,7 +335,7 @@ function Core:OnEnable()
       "CHALLENGE_MODE_RESET",
       "MYTHIC_PLUS_NEW_WEEKLY_RECORD",
     }, function()
-      Data:UpdateMythicPlus()
+      self:QueueUpdate("UpdateMythicPlus")
     end
   )
   addon.Events:RegisterEvent(
@@ -275,14 +350,14 @@ function Core:OnEnable()
       "TRADE_CURRENCY_CHANGED",
       "TRADE_SKILL_CURRENCY_REWARD_RESULT",
     }, function()
-      Data:UpdateCurrencies()
+      self:QueueUpdate("UpdateCurrencies")
     end
   )
   addon.Events:RegisterEvent(
     {
       "PLAYER_MONEY",
     }, function()
-      Data:UpdateMoney()
+      self:QueueUpdate("UpdateMoney")
     end
   )
   addon.Events:RegisterEvent(
@@ -359,22 +434,23 @@ function Core:CheckGameData()
     return
   end
 
-  Data:loadGameData()
-  Data:TaskWeeklyReset()
-  Data:TaskSeasonReset()
-  -- One-time calibration for the Great Vault's displayed season week
-  -- number (Data.lua::GetSeasonWeekNumber) -- WoW has no API for this, so
-  -- it's seeded once from a week number confirmed correct on the day this
-  -- was added (this week's reset == week 7), then every other week just
-  -- counts 7-day steps from that anchor. `/alterego setweek N` re-anchors
-  -- it manually later if it ever needs correcting (a new season starting
-  -- over, a mistaken seed on an install that first ran in a different
-  -- week, etc.).
-  if not Data.db.global.seasonWeekAnchor then
-    Data:SetSeasonWeekAnchor(7)
-  end
-  Data:UpdateDB()
-  self:Render()
+  Data:loadGameData(function()
+    Data:TaskWeeklyReset()
+    Data:TaskSeasonReset()
+    -- One-time calibration for the Great Vault's displayed season week
+    -- number (Data.lua::GetSeasonWeekNumber) -- WoW has no API for this, so
+    -- it's seeded once from a week number confirmed correct on the day this
+    -- was added (this week's reset == week 7), then every other week just
+    -- counts 7-day steps from that anchor. `/alterego setweek N` re-anchors
+    -- it manually later if it ever needs correcting (a new season starting
+    -- over, a mistaken seed on an install that first ran in a different
+    -- week, etc.).
+    if not Data.db.global.seasonWeekAnchor then
+      Data:SetSeasonWeekAnchor(7)
+    end
+    self:QueueAllUpdates()
+    self:Render()
+  end)
 
   -- There's no dedicated "the weekly reset just happened" event in the
   -- game's API -- Data:TaskWeeklyReset only ever re-checks the boundary

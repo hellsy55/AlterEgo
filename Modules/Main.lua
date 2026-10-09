@@ -116,7 +116,7 @@ local function EnsureNebulousVoidcoreAlertWindow()
   window.details:SetPoint("TOPLEFT", body, "TOPLEFT", 24, -64)
   window.details:SetPoint("TOPRIGHT", body, "TOPRIGHT", -24, -64)
   window.details:SetJustifyH("CENTER")
-  window.details:SetText("Get additional bonus rolls from Orin Straylight in Silvermoon.")
+  window.details:SetText("Get additional bonus rolls from Orin Straylight in Silvermoon City.")
   window.details:SetTextColor(LIGHTGRAY_FONT_COLOR.r, LIGHTGRAY_FONT_COLOR.g, LIGHTGRAY_FONT_COLOR.b)
 
   window:SetBodySize(440, 96)
@@ -3213,44 +3213,6 @@ function Module:Render()
 end
 
 function Module:RenderNow()
-  ResetRowHighlightFrames()
-  local currentAffixes = Data:GetCurrentAffixes()
-  local seasonID = Data:GetCurrentSeason()
-  local dungeons = Data:GetDungeons()
-  local allCurrencies = Data:GetCurrencies()
-  local currencies = TableFilter(allCurrencies, function(currency) return currency.category == nil end)
-  local weeklies = TableFilter(allCurrencies, function(currency) return currency.category == "weekly" end)
-  local seasonalChores = TableFilter(allCurrencies, function(currency) return currency.category == "seasonalChore" end)
-  local trackerSections = Data:GetTrackerSections()
-  local trackerMoveState = {}
-  TableForEach(trackerSections, function(section, sectionIndex)
-    TableForEach(section.items, function(tracker, itemIndex)
-      trackerMoveState[tracker.id] = {
-        canMoveUp = itemIndex > 1 or sectionIndex > 1,
-        canMoveDown = itemIndex < #section.items or sectionIndex < #trackerSections,
-      }
-    end)
-  end)
-  local raidDifficulties = Data:GetRaidDifficulties()
-  local characterInfo = self:GetCharacterInfo()
-  local raids = Data:GetRaids()
-  local characters = Data:GetCharacters()
-  local numCharacters = TableCount(characters)
-  local affixes = Data:GetAffixes(true)
-  local mainWindowSettings = Data.db.global.liqui.windows.Main
-  local windowScalePercent = self.window and self.window:GetWindowScale() or mainWindowSettings.scale or 100
-  local windowScale = math.max(windowScalePercent / 100, 0.01)
-  local windowWidthMax = LibLiqUI.Utils.GetMaxWindowWidth()
-  if windowScale > 1 then
-    -- Horizontal character scrolling is always available. Window dimensions are
-    -- stored in unscaled UI units, so tighten the viewport whenever scaling would
-    -- otherwise push the visible window past the screen edge.
-    windowWidthMax = windowWidthMax / windowScale
-  end
-  local windowWidth, windowHeight = numCharacters == 0 and 500 or 0, 0
-  local weeklyAffixesModule = addon.Core:GetModule("WeeklyAffixes", true)
-  local dailyDelvesModule = addon.Core:GetModule("DailyDelves", true)
-
   if not self.window then
     local windows = Data.db.global.liqui.windows
     self.window = LibLiqUI:NewElement("Window", {
@@ -4643,13 +4605,52 @@ function Module:RenderNow()
     end)
     self.window.dailyDelvesButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
     self.window.dailyDelvesButton:SetScript("OnClick", function()
-      if dailyDelvesModule then dailyDelvesModule:Toggle() end
+      local module = addon.Core:GetModule("DailyDelves", true)
+      if module then module:Toggle() end
     end)
   end
 
   if not self.window:IsVisible() then
     return
   end
+
+  ResetRowHighlightFrames()
+  local currentAffixes = Data:GetCurrentAffixes()
+  local seasonID = Data:GetCurrentSeason()
+  local dungeons = Data:GetDungeons()
+  local allCurrencies = Data:GetCurrencies()
+  local currencies = TableFilter(allCurrencies, function(currency) return currency.category == nil end)
+  local weeklies = TableFilter(allCurrencies, function(currency) return currency.category == "weekly" end)
+  local seasonalChores = TableFilter(allCurrencies, function(currency) return currency.category == "seasonalChore" end)
+  local trackerSections = Data:GetTrackerSections()
+  local trackerMoveState = {}
+  TableForEach(trackerSections, function(section, sectionIndex)
+    TableForEach(section.items, function(tracker, itemIndex)
+      trackerMoveState[tracker.id] = {
+        canMoveUp = itemIndex > 1 or sectionIndex > 1,
+        canMoveDown = itemIndex < #section.items or sectionIndex < #trackerSections,
+      }
+    end)
+  end)
+  local raidDifficulties = Data:GetRaidDifficulties()
+  local characterInfo = self:GetCharacterInfo()
+  local raids = Data:GetRaids()
+  local characters = Data:GetCharacters()
+  local numCharacters = TableCount(characters)
+  local affixes = Data:GetAffixes(true)
+  local mainWindowSettings = Data.db.global.liqui.windows.Main
+  local windowScalePercent = self.window and self.window:GetWindowScale() or mainWindowSettings.scale or 100
+  local windowScale = math.max(windowScalePercent / 100, 0.01)
+  local windowWidthMax = LibLiqUI.Utils.GetMaxWindowWidth()
+  if windowScale > 1 then
+    -- Horizontal character scrolling is always available. Window dimensions are
+    -- stored in unscaled UI units, so tighten the viewport whenever scaling would
+    -- otherwise push the visible window past the screen edge.
+    windowWidthMax = windowWidthMax / windowScale
+  end
+  local windowWidth, windowHeight = numCharacters == 0 and 500 or 0, 0
+  local weeklyAffixesModule = addon.Core:GetModule("WeeklyAffixes", true)
+  local dailyDelvesModule = addon.Core:GetModule("DailyDelves", true)
 
   local scrollContent = self.window.body.content.scrollArea.content
   local sidebarCollapsed = mainWindowSettings.sidebarCollapsed == true
