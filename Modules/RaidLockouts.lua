@@ -1049,9 +1049,67 @@ local ALERT_MIN_WIDTH = 300
 local ALERT_SIDE_PADDING = 20
 local ALERT_ROW_HEIGHT = 20
 local ALERT_COLUMN_GAP = 18
+local ALERT_ICON_SIZE = 18
+local ALERT_ICON_GAP = 6
 
 local alertWindow
 local alertLines = {}
+local alertIcons = {}
+
+-- Use the same boss-achievement artwork shown by AlterEgo2's entrance alert.
+-- Prefer known IDs for the current season; scan achievements as a fallback
+-- so older/future bosses can still resolve without maintaining extra IDs.
+local BOSS_ACHIEVEMENT_IDS = {
+  nekzalithesoulcoiler = 63523,
+  thelostexplorers = 63525,
+  sszorak = 63527,
+  entombedsentinels = 63524,
+  vashnikthemalignant = 63526,
+  thetwinfangs = 63528,
+  thecoiledaltar = 63529,
+  ulatek = 63476,
+  nymrissawavecaller = 63682,
+}
+
+local function normalizeBossName(name)
+  return ((name or ""):lower():gsub("[^%w]", ""))
+end
+
+local achievementIconByBoss
+local function getBossAchievementIcon(bossName)
+  local knownID = BOSS_ACHIEVEMENT_IDS[normalizeBossName(bossName)]
+  if knownID then
+    local ok, _, _, _, _, _, _, _, _, _, icon = pcall(GetAchievementInfo, knownID)
+    if ok and icon then return icon end
+  end
+
+  if not achievementIconByBoss then
+    achievementIconByBoss = {}
+    local ok = pcall(function()
+      local mythicPrefix = (PLAYER_DIFFICULTY6 or "Mythic") .. ": "
+      for _, categoryID in ipairs(GetCategoryList() or {}) do
+        local numAchievements = GetCategoryNumAchievements(categoryID)
+        for index = 1, numAchievements do
+          local _, name, _, _, _, _, _, _, _, icon = GetAchievementInfo(categoryID, index)
+          if name and icon then
+            local prefix, boss = name:match("^(.-: )(.+)$")
+            if boss then
+              local isMythic = prefix == mythicPrefix
+              local key = normalizeBossName(boss)
+              local current = achievementIconByBoss[key]
+              if isMythic or not current then
+                achievementIconByBoss[key] = {icon = icon, mythic = isMythic}
+              end
+            end
+          end
+        end
+      end
+    end)
+    if not ok then achievementIconByBoss = nil return nil end
+  end
+  local entry = achievementIconByBoss[normalizeBossName(bossName)]
+  return entry and entry.icon
+end
 
 local function getRaidLockoutAlertDefaultPoint()
   return "TOPLEFT", "TOPLEFT", (UIParent:GetWidth() - ALERT_MIN_WIDTH) / 2, -(UIParent:GetHeight() * 0.22)
@@ -1211,6 +1269,7 @@ function Module:ShowInstanceAlert(raid, difficultyID)
   end
 
   for _, line in ipairs(alertLines) do line:Hide() end
+  for _, icon in ipairs(alertIcons) do icon:Hide() end
 
   local widest = math.ceil(math.max(window.subtitle:GetStringWidth(), window.footer:GetStringWidth()))
   local leftCount = useColumns and math.ceil(total / 2) or total
@@ -1227,13 +1286,22 @@ function Module:ShowInstanceAlert(raid, difficultyID)
     local encounter = raid.encounters and raid.encounters[encounterIndex]
     local bossName = encounter and encounter.name or format("%s (%d)", raid.name or RAID, encounterIndex)
     line:SetWidth(1000)
-    line:SetJustifyH(useColumns and "LEFT" or "CENTER")
-    line:SetText((useColumns and "- " or "") .. bossName)
+    line:SetJustifyH("LEFT")
+    line:SetText(bossName)
     if slots[encounterIndex] then
       line:SetTextColor(RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
     else
       line:SetTextColor(GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
     end
+
+    local icon = alertIcons[encounterIndex]
+    if not icon then
+      icon = body:CreateTexture(nil, "ARTWORK")
+      icon:SetSize(ALERT_ICON_SIZE, ALERT_ICON_SIZE)
+      icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+      alertIcons[encounterIndex] = icon
+    end
+    icon:SetTexture(getBossAchievementIcon(bossName))
 
     local textWidth = math.ceil(line:GetStringWidth())
     if useColumns then
@@ -1243,14 +1311,15 @@ function Module:ShowInstanceAlert(raid, difficultyID)
         leftWidth = math.max(leftWidth, textWidth)
       end
     else
-      widest = math.max(widest, textWidth)
+      widest = math.max(widest, textWidth + ALERT_ICON_SIZE + ALERT_ICON_GAP)
+      leftWidth = math.max(leftWidth, textWidth)
     end
   end
 
   local frameWidth
   local bossRows
   if useColumns then
-    local bossWidth = leftWidth + ALERT_COLUMN_GAP + rightWidth
+    local bossWidth = leftWidth + rightWidth + 2 * (ALERT_ICON_SIZE + ALERT_ICON_GAP) + ALERT_COLUMN_GAP
     frameWidth = math.max(ALERT_MIN_WIDTH, bossWidth + ALERT_SIDE_PADDING * 2, widest + ALERT_SIDE_PADDING * 2)
     bossRows = math.max(leftCount, total - leftCount)
   else
@@ -1264,14 +1333,14 @@ function Module:ShowInstanceAlert(raid, difficultyID)
   y = y + 14 + 12
 
   if useColumns then
-    local contentWidth = leftWidth + ALERT_COLUMN_GAP + rightWidth
+    local iconAndGap = ALERT_ICON_SIZE + ALERT_ICON_GAP
+    local contentWidth = leftWidth + rightWidth + 2 * iconAndGap + ALERT_COLUMN_GAP
     local startX = (frameWidth - contentWidth) / 2
-    local rightX = startX + leftWidth + ALERT_COLUMN_GAP
+    local rightX = startX + iconAndGap + leftWidth + ALERT_COLUMN_GAP
     for encounterIndex = 1, total do
       local line = alertLines[encounterIndex]
-      local row
-      local x
-      local width
+      local icon = alertIcons[encounterIndex]
+      local row, x, width
       if encounterIndex > leftCount then
         row = encounterIndex - leftCount - 1
         x = rightX
@@ -1281,20 +1350,29 @@ function Module:ShowInstanceAlert(raid, difficultyID)
         x = startX
         width = leftWidth
       end
+      icon:ClearAllPoints()
+      icon:SetPoint("TOPLEFT", body, "TOPLEFT", x, -(y + row * ALERT_ROW_HEIGHT + (ALERT_ROW_HEIGHT - ALERT_ICON_SIZE) / 2))
+      icon:Show()
       line:ClearAllPoints()
-      line:SetWidth(width)
+      line:SetWidth(width + 2)
       line:SetJustifyH("LEFT")
-      line:SetPoint("TOPLEFT", body, "TOPLEFT", x, -(y + row * ALERT_ROW_HEIGHT))
+      line:SetPoint("LEFT", icon, "RIGHT", ALERT_ICON_GAP, 0)
       line:Show()
     end
     y = y + bossRows * ALERT_ROW_HEIGHT
   else
+    local contentWidth = leftWidth + ALERT_ICON_SIZE + ALERT_ICON_GAP
+    local startX = (frameWidth - contentWidth) / 2
     for encounterIndex = 1, total do
       local line = alertLines[encounterIndex]
+      local icon = alertIcons[encounterIndex]
+      icon:ClearAllPoints()
+      icon:SetPoint("TOPLEFT", body, "TOPLEFT", startX, -(y + (ALERT_ROW_HEIGHT - ALERT_ICON_SIZE) / 2))
+      icon:Show()
       line:ClearAllPoints()
-      line:SetWidth(frameWidth - ALERT_SIDE_PADDING * 2)
-      line:SetJustifyH("CENTER")
-      line:SetPoint("TOP", body, "TOP", 0, -y)
+      line:SetWidth(leftWidth + 2)
+      line:SetJustifyH("LEFT")
+      line:SetPoint("LEFT", icon, "RIGHT", ALERT_ICON_GAP, 0)
       line:Show()
       y = y + ALERT_ROW_HEIGHT
     end
