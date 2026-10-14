@@ -323,6 +323,10 @@ local ASCENDANT_ITEM_LEVELS = {
   Hero = {crafted = 325, normal = 328},
   Myth = {crafted = 338, normal = 340},
 }
+local ASCENDANT_BASE_ITEM_LEVELS = {
+  Hero = {crafted = 318, normal = 321},
+  Myth = {crafted = 331, normal = 334},
+}
 
 local function isVenomstoneSlot(item)
   local slot = item.itemSlotID
@@ -358,15 +362,18 @@ end
 
 ---Explain the star in the Upgrade Level cell without modifying the item tooltip.
 ---Only equipment that passes venomstoneStatus receives this hover text.
-local function getVenomforgedUpgradeTooltip(eligibility, crafted, level, maximum)
+local function getVenomforgedUpgradeTooltip(eligibility, track, crafted, level, maximum)
   if not eligibility then return nil end
+  local kind = crafted and "crafted" or "normal"
+  local fromLevel = ASCENDANT_BASE_ITEM_LEVELS[track][kind]
+  local toLevel = ASCENDANT_ITEM_LEVELS[track][kind]
   if eligibility == "ready" then
-    return "This item is ready to be Venomforged. Use 10 Ascendant Venomstones to upgrade it."
+    return format("This item is ready to be Venomforged. Use 10 Ascendant Venomstones to upgrade it from %d to %d item level.", fromLevel, toLevel)
   end
   if crafted then
-    return format("Recraft this item to quality %d/%d, then use 10 Ascendant Venomstones to make it Venomforged.", maximum, maximum)
+    return format("Recraft this item to quality %d/%d, then use 10 Ascendant Venomstones to upgrade it from %d to %d item level.", maximum, maximum, fromLevel, toLevel)
   end
-  return format("Upgrade this item to %d/%d, then use 10 Ascendant Venomstones to make it Venomforged.", maximum, maximum)
+  return format("Upgrade this item to %d/%d, then use 10 Ascendant Venomstones to upgrade it from %d to %d item level.", maximum, maximum, fromLevel, toLevel)
 end
 
 ---@param item AE_Equipment
@@ -414,7 +421,7 @@ local function resolveEquipmentUpgradeLevel(item)
     table.insert(sortParts, format("%s%s Crafted %d/%d", ascendant and "Venomforged " or "", craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX))
     table.insert(displayParts, formatUpgradeTrackLabel(craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX, muted, true, ascendant, eligibility))
     if not muted then
-      venomforgedTooltip = getVenomforgedUpgradeTooltip(eligibility, true, craftedQuality, CRAFTED_QUALITY_MAX)
+      venomforgedTooltip = getVenomforgedUpgradeTooltip(eligibility, craftedTrack, true, craftedQuality, CRAFTED_QUALITY_MAX)
     end
   elseif not craftedQuality then
     local upgradeLevel = item.itemUpgradeLevel or 0
@@ -426,7 +433,7 @@ local function resolveEquipmentUpgradeLevel(item)
       table.insert(sortParts, format("%s%s %d/%d", ascendant and "Venomforged " or "", item.itemUpgradeTrack, upgradeLevel, upgradeMax))
       table.insert(displayParts, formatUpgradeTrackLabel(item.itemUpgradeTrack, upgradeLevel, upgradeMax, muted, false, ascendant, eligibility))
       if not muted then
-        venomforgedTooltip = getVenomforgedUpgradeTooltip(eligibility, false, upgradeLevel, upgradeMax)
+        venomforgedTooltip = getVenomforgedUpgradeTooltip(eligibility, item.itemUpgradeTrack, false, upgradeLevel, upgradeMax)
       end
     end
 
