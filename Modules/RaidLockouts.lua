@@ -232,7 +232,7 @@ local function groupMembers()
   for i = 1, GetNumGroupMembers() do
     local unit = "raid" .. i
     local key = unitKey(unit)
-    if key then
+    if key and UnitIsConnected(unit) then
       local name, realm
       if UnitFullName then
         name, realm = UnitFullName(unit)
@@ -1493,6 +1493,10 @@ function Module:OnEnable()
         Module:RefreshWindow()
       end)
     end
+  end, true)
+
+  addon.Events:RegisterEvent("UNIT_CONNECTION", function()
+    Module:RefreshWindow()
   end, true)
 
   addon.Events:RegisterEvent("UPDATE_INSTANCE_INFO", function()
