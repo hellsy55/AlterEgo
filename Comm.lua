@@ -1227,7 +1227,7 @@ end
 -- Render() rebuilds a decent chunk of UI, which is exactly the kind of
 -- thing that causes a hitch during a pull). Applied automatically the
 -- moment combat ends (PLAYER_REGEN_ENABLED, below).
-local pendingCombatApplies = {} -- [GUID] = {character, isNew, sender, distribution, payload}; auto-batch metadata is kept so completion waits until the queued record is actually applied
+local pendingCombatApplies = {} -- [GUID] = {character, isNew, acks = {...}}; confirmations wait for actual combat-safe application
 
 -- Which senders we've already warned about an unreadable message --
 -- session-only. See where it's used in OnCommReceived for why.
@@ -1440,6 +1440,112 @@ local function TrackBatchDone(sender, distribution, payload)
   end
 end
 
+---Preserve newer AlterEgo-only tracking fields when an older peer exports a
+---character record that predates those fields. Never overwrite a field the
+---sender DID provide. The existing syncRevision/authority checks run first.
+local function PreserveModernTrackingFromOlderPeer(remote, existing)
+  if type(remote) ~= "table" or type(existing) ~= "table" then return end
+  local trackingVersion = tonumber(remote.alterEgoTrackingVersion) or 0
+  if trackingVersion < 3 and type(existing.labyrinth) == "table" then
+    remote.labyrinth = remote.labyrinth or {}
+    local source = existing.labyrinth
+    local fields = {"highestUnlockedTier", "lastChambers", "lastTier"}
+    for _, field in ipairs(fields) do
+      if source[field] ~= nil and remote.labyrinth[field] == nil then
+        remote.labyrinth[field] = source[field]
+      end
+    end
+    if Data:IsSameWeeklyReset(source.weeklyResetAt, Data.db.global.weeklyReset) then
+      for _, field in ipairs({"weeklyResetAt", "weeklyChambers"}) do
+        if source[field] ~= nil then remote.labyrinth[field] = source[field] end
+      end
+    end
+    -- Older peers do not understand the active-run counter. Keep the
+    -- modern session intact rather than restoring the old nine-stage guess.
+    if source.chamberTrackingVersion == 1 then
+      for _, field in ipairs({"chamberTrackingVersion", "active", "chambers", "tier",
+        "runStartedAt", "lastChamberAt", "lastSeenAt"}) do
+        remote.labyrinth[field] = source[field]
+      end
+    end
+  end
+  if trackingVersion >= 2 then return end
+  if type(remote.labyrinth) ~= "table" or not next(remote.labyrinth) then
+    if type(existing.labyrinth) == "table" then
+      remote.labyrinth = existing.labyrinth
+    end
+  end
+  -- Prior PTR builds placed the weekly kill in a legacy tracker rather
+  -- than Labyrinth. Migrate it when an old peer still transmits that row.
+  if type(remote.currencies) == "table" then
+    for index = #remote.currencies, 1, -1 do
+      local entry = remote.currencies[index]
+      if type(entry) == "table" and entry.id == "kindojanBounty" then
+        if entry.questCompleted == true and Data:IsSameWeeklyReset(entry.resetAt, Data.db.global.weeklyReset) then
+          remote.labyrinth = remote.labyrinth or {}
+          remote.labyrinth.killResetAt = Data.db.global.weeklyReset
+        end
+        table.remove(remote.currencies, index)
+      end
+    end
+  end
+  -- An old peer may know the Labyrinth tier but not the weekly
+  -- Nemesis kill. Preserve it without merging unrelated stale progress.
+  if type(existing.labyrinth) == "table" then
+    remote.labyrinth = remote.labyrinth or {}
+    local resetAt = Data.db.global.weeklyReset
+    if Data:IsSameWeeklyReset(existing.labyrinth.killResetAt, resetAt) and remote.labyrinth.killResetAt == nil then
+      remote.labyrinth.killResetAt = resetAt
+    end
+  end
+  -- Preserve the 12.1.5-only equipment classification only if the same
+  -- exact item remains equipped in the same slot; never transplant it to
+  -- a replaced item from an older client.
+  local previousEquipment = {}
+  for _, item in ipairs(existing.equipment or {}) do
+    if type(item) == "table" and item.itemSlotID then
+      previousEquipment[item.itemSlotID] = item
+    end
+  end
+  for _, item in ipairs(remote.equipment or {}) do
+    local oldItem = previousEquipment[item.itemSlotID]
+    if oldItem and item.itemLink and item.itemLink == oldItem.itemLink
+      and item.ascendantVenomforged == nil then
+      item.ascendantVenomforged = oldItem.ascendantVenomforged
+    end
+  end
+  -- A legacy raid catalog can omit Kith'ix. Preserve an active previously
+  -- captured Kith'ix lockout; expired data must NEVER survive the reset.
+  local hasNewRaid = false
+  local oldKithix
+  for _, saved in ipairs((remote.raids and remote.raids.savedInstances) or {}) do
+    if saved.instanceID == 3095 then hasNewRaid = true break end
+  end
+  if not hasNewRaid then
+    for _, saved in ipairs((existing.raids and existing.raids.savedInstances) or {}) do
+      if saved.instanceID == 3095 and type(saved.expires) == "number"
+        and saved.expires > time() then oldKithix = saved break end
+    end
+    if oldKithix then
+      remote.raids = remote.raids or {}
+      remote.raids.savedInstances = remote.raids.savedInstances or {}
+      table.insert(remote.raids.savedInstances, oldKithix)
+    end
+  end
+  if type(existing.currencies) ~= "table" then return end
+  remote.currencies = remote.currencies or {}
+  local protected = {[280562] = true, [285807] = true, [285065] = true}
+  local received = {}
+  for _, entry in ipairs(remote.currencies) do
+    if type(entry) == "table" then received[entry.id] = true end
+  end
+  for _, entry in ipairs(existing.currencies) do
+    if type(entry) == "table" and protected[entry.id] and not received[entry.id] then
+      table.insert(remote.currencies, entry)
+    end
+  end
+end
+
 ---Actually write a received character into the saved roster and refresh
 ---the UI. Called either immediately (out of combat) or once combat ends
 ---for anything that came in while you were fighting.
@@ -1463,10 +1569,53 @@ local function ApplyReceivedCharacter(remote, isNew)
   end
 end
 
+local SendAck
+
+local function RespondForCharacter(remote, sender, distribution, payload, status, reason, isNew)
+  local transmissionId = payload.transmissionId
+  if transmissionId and processedAckTransmissionIds[transmissionId] then return end
+  if transmissionId then
+    processedAckTransmissionIds[transmissionId] = true
+    C_Timer.After(600, function() processedAckTransmissionIds[transmissionId] = nil end)
+  end
+  -- A negative response has a different opcode; older peers must not mistake
+  -- an explicitly rejected record for a successful acknowledgement.
+  SendAck(remote, sender, Data.db.global.sync.password, payload.batchId,
+    payload.transmissionId, payload.forced, status, reason)
+  if status == "applied" or status == "alreadyCurrent" then
+    MarkSuccessfulSync(sender)
+    if payload.forced then
+      TrackBatchArrival(sender, distribution, payload, remote)
+    else
+      TrackAutomaticBatchCompletion(sender, distribution, payload, remote, status == "applied" and isNew)
+    end
+  end
+end
+
 addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
-  for _, pending in pairs(pendingCombatApplies) do
-    ApplyReceivedCharacter(pending.character, pending.isNew)
-    TrackAutomaticBatchCompletion(pending.sender, pending.distribution, pending.payload, pending.character, pending.isNew)
+  for GUID, pending in pairs(pendingCombatApplies) do
+    -- Another local update or a manual deletion could change authority while
+    -- we were in combat. Never overwrite a local or newer record at flush time.
+    local existing = Data.db.global.characters[GUID]
+    local existingRevision = existing and GetCharacterRevision(existing) or -1
+    local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
+    local protected = existing and mainAccountId and existing.accountId == mainAccountId
+    local status = protected and "rejected"
+      or (existingRevision > GetCharacterRevision(pending.character) and "rejected")
+      or (existingRevision == GetCharacterRevision(pending.character) and "alreadyCurrent")
+      or "applied"
+    if status == "applied" then
+      ApplyReceivedCharacter(pending.character, pending.isNew)
+      processedUpdates[GUID .. "|" .. tostring(GetCharacterRevision(pending.character))] = true
+    end
+    for index, ack in ipairs(pending.acks) do
+      -- Only the first delivery applied a new snapshot. Other deliveries
+      -- of that same revision are confirmed as already current.
+      local replyStatus = status == "applied" and index > 1 and "alreadyCurrent" or status
+      RespondForCharacter(pending.character, ack.sender, ack.distribution,
+        ack.payload, replyStatus, status == "rejected" and "not-authoritative-or-stale" or nil,
+        replyStatus == "applied" and pending.isNew)
+    end
   end
   wipe(pendingCombatApplies)
   ResumeAutomaticSyncIfPending()
@@ -1490,10 +1639,13 @@ end, true)
 ---@param batchId string?
 ---@param transmissionId string?
 ---@param manual boolean?
-local function SendAck(remote, sender, password, batchId, transmissionId, manual)
+SendAck = function(remote, sender, password, batchId, transmissionId, manual, status, reason)
   local payload = {
     password = password,
-    ack = true,
+    ack = status ~= "rejected",
+    rejected = status == "rejected" or nil,
+    status = status or "received",
+    reason = reason,
     GUID = remote.GUID,
     syncRevision = GetCharacterRevision(remote),
     lastUpdate = remote.lastUpdate, -- kept for compatibility with older peers
@@ -1615,7 +1767,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   -- data -- print it and stop, nothing else to process. If it's for the
   -- Sync Now push currently going out, also remember who confirmed, so
   -- the final "successfully sent" summary can name them.
-  if payload.ack then
+  if payload.ack or payload.rejected then
     local confirmation = payload.transmissionId and pendingConfirmations[payload.transmissionId] or nil
     -- A transmission id is unique to one batch. An ACK with a mismatched batch id is
     -- still proof that an older record arrived, but it must never satisfy the current
@@ -1630,7 +1782,11 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
 
     local GUID = payload.GUID or (confirmation and confirmation.GUID)
     local confirmedRevision = payload.syncRevision or payload.lastUpdate or (confirmation and confirmation.revision)
-    if GUID and confirmedRevision then
+    -- A legacy ACK without status proves only transport receipt. The new
+    -- status distinguishes persistence, equality, and explicit rejection.
+    local status = payload.status or (payload.rejected and "rejected" or "received")
+    local accepted = status == "applied" or status == "alreadyCurrent"
+    if accepted and confirmation and GUID and confirmedRevision then
       local sync = Data.db.global.sync
       sync.lastConfirmedRevision = sync.lastConfirmedRevision or {}
       local previous = tonumber(sync.lastConfirmedRevision[GUID]) or 0
@@ -1644,12 +1800,18 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
       MarkSuccessfulSync(sender)
     end
 
-    -- Manual Sync Now keeps explicit chat confirmations only for the exact active
-    -- transmission. Automatic delivery ACKs and delayed ACKs from older attempts stay silent.
     if confirmation and confirmation.manual then
-      addon.Core:Print(format("Sync: %s |cff33ff99confirmed|r receiving %s-%s.", tostring(sender), payload.name or "?", payload.realm or "?"))
+      if status == "applied" then
+        addon.Core:Print(format("Sync: %s |cff33ff99applied|r %s-%s.", tostring(sender), payload.name or "?", payload.realm or "?"))
+      elseif status == "alreadyCurrent" then
+        addon.Core:Print(format("Sync: %s |cff33ff99already current|r for %s-%s.", tostring(sender), payload.name or "?", payload.realm or "?"))
+      elseif status == "rejected" then
+        addon.Core:Print(format("Sync: %s |cffff8844rejected|r %s-%s (%s).", tostring(sender), payload.name or "?", payload.realm or "?", payload.reason or "not authorized or stale"))
+      else
+        addon.Core:Print(format("Sync: %s confirmed |cffffff88receiving|r %s-%s (legacy peer; application unverified).", tostring(sender), payload.name or "?", payload.realm or "?"))
+      end
     end
-    if confirmation and payload.batchId and payload.batchId == activeBatchId then
+    if confirmation and accepted and payload.batchId and payload.batchId == activeBatchId then
       activeBatchConfirmedBy[sender] = true
     end
     return
@@ -1682,78 +1844,63 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   if type(remote) ~= "table" or type(remote.GUID) ~= "string" or remote.GUID == "" then return end
   if remote.GUID == UnitGUID("player") then return end -- shouldn't happen, but never let a record overwrite the live character
 
-  -- Same update already handled via another channel this session (see
-  -- processedUpdates above) -- stop here, before the ack and before
-  -- touching the character data, so neither happens twice for the one
-  -- broadcast.
   local remoteRevision = GetCharacterRevision(remote)
   local updateKey = remote.GUID .. "|" .. tostring(remoteRevision)
-  if processedUpdates[updateKey] then
-    -- If the original ACK was lost, a retry carries a NEW transmission id. Re-ACK
-    -- that retry without reapplying the same character. Copies of the same transmission
-    -- arriving over Both/Guild+Party are still handled only once.
-    if payload.transmissionId and not processedAckTransmissionIds[payload.transmissionId] then
-      local transmissionId = payload.transmissionId
-      processedAckTransmissionIds[transmissionId] = true
-      C_Timer.After(600, function() processedAckTransmissionIds[transmissionId] = nil end)
-      SendAck(remote, sender, password, payload.batchId, transmissionId, payload.forced)
-      if payload.forced then
-        TrackBatchArrival(sender, distribution, payload, remote)
-      else
-        TrackAutomaticBatchCompletion(sender, distribution, payload, remote, false)
-      end
-    end
+  local current = Data.db.global.characters[remote.GUID]
+  local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
+  if current and mainAccountId and current.accountId == mainAccountId then
+    RespondForCharacter(remote, sender, distribution, payload, "rejected", "main-account-authority", false)
     return
   end
-  processedUpdates[updateKey] = true
-  if payload.transmissionId then
-    local transmissionId = payload.transmissionId
-    processedAckTransmissionIds[transmissionId] = true
-    C_Timer.After(600, function() processedAckTransmissionIds[transmissionId] = nil end)
+
+  -- Previously applied versions only count as current while they are STILL
+  -- the version stored. The same GUID may have advanced later this session.
+  if processedUpdates[updateKey] and current and GetCharacterRevision(current) == remoteRevision then
+    RespondForCharacter(remote, sender, distribution, payload, "alreadyCurrent", nil, false)
+    return
   end
 
-  local peer = syncPeers[sender]
-  if peer then
-    peer.versions = peer.versions or {}
-    peer.versions[remote.GUID] = remoteRevision
-  end
-
-  -- ACK every readable character record, automatic or manual. The sender uses this
-  -- to distinguish "left my client" from "another Sync peer actually received it".
-  SendAck(remote, sender, password, payload.batchId, payload.transmissionId, payload.forced)
-  MarkSuccessfulSync(sender)
-  if payload.forced then
-    TrackBatchArrival(sender, distribution, payload, remote)
+  -- The same version can arrive twice during combat; keep both transmission
+  -- IDs and acknowledge them only after the queued record is committed.
+  local pending = pendingCombatApplies[remote.GUID]
+  if pending then
+    local pendingRevision = GetCharacterRevision(pending.character)
+    if remoteRevision <= pendingRevision then
+      if remoteRevision == pendingRevision then
+        if not payload.transmissionId or not pending.seen[payload.transmissionId] then
+          if payload.transmissionId then pending.seen[payload.transmissionId] = true end
+          table.insert(pending.acks, {sender = sender, distribution = distribution, payload = payload})
+        end
+      else
+        RespondForCharacter(remote, sender, distribution, payload, "rejected", "superseded", false)
+      end
+      return
+    end
+    -- A newer revision supersedes the queued older one. Do not acknowledge
+    -- the old batch as applied; tell the sender that it was superseded.
+    for _, ack in ipairs(pending.acks) do
+      RespondForCharacter(pending.character, ack.sender, ack.distribution,
+        ack.payload, "rejected", "superseded", false)
+    end
+    pendingCombatApplies[remote.GUID] = nil
   end
 
   local existing = Data.db.global.characters[remote.GUID]
   local isNew = existing == nil
 
   -- A remote record may never roll a character back to an older Sync revision.
-  -- Manual Sync Now may reapply an EQUAL revision as an explicit reconciliation,
-  -- but "forced" no longer means "accept stale data". Automatic sync still ignores
-  -- equal revisions because there is nothing newer to apply.
+  -- Equal revisions are already current and do not need reapplication.
   if existing then
     local existingRevision = GetCharacterRevision(existing)
-    local isOlder = remoteRevision < existingRevision
-    local isSameAutomatic = not payload.forced and remoteRevision <= existingRevision
-    if isOlder or isSameAutomatic then
-      TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
+    if remoteRevision <= existingRevision then
+      local status = remoteRevision == existingRevision and "alreadyCurrent" or "rejected"
+      RespondForCharacter(remote, sender, distribution, payload, status,
+        status == "rejected" and "stale-revision" or nil, false)
       return
     end
   end
 
   if existing then
-    -- Protect your own Main WoW Account -- if this character is already
-    -- filed there, it's YOUR authoritative copy, so incoming sync data
-    -- never overwrites it. Silent: this is normal, expected protection,
-    -- not something worth a chat line every time it does its job.
-    local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
-    if mainAccountId and existing.accountId == mainAccountId then
-      TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
-      return
-    end
-
     -- Preserve local-only bookkeeping across syncs -- which WoW Account
     -- bucket you filed this character under, whether you disabled it, and
     -- its manual sort order shouldn't reset just because a fresher sync
@@ -1791,19 +1938,28 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     end
   end
 
+  -- Old senders do not know the new Labyrinth/item/weekly fields. Preserve
+  -- those fields locally without overriding fields supplied by modern peers.
+  PreserveModernTrackingFromOlderPeer(remote, existing)
+  -- A legacy client can still transmit the obsolete bounty field.
+  -- Do not reintroduce it after the local migration removes it.
+  if type(remote.labyrinth) == "table" then
+    remote.labyrinth.bountyResetAt = nil
+  end
+
   if InCombatLockdown() then
     pendingCombatApplies[remote.GUID] = {
       character = remote,
       isNew = isNew,
-      sender = sender,
-      distribution = distribution,
-      payload = payload,
+      acks = {{sender = sender, distribution = distribution, payload = payload}},
+      seen = payload.transmissionId and {[payload.transmissionId] = true} or {},
     }
     return
   end
 
   ApplyReceivedCharacter(remote, isNew)
-  TrackAutomaticBatchCompletion(sender, distribution, payload, remote, isNew)
+  processedUpdates[updateKey] = true
+  RespondForCharacter(remote, sender, distribution, payload, "applied", nil, isNew)
 end
 
 -- Advertise presence/version state when this client becomes reachable on a relevant

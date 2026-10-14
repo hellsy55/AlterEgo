@@ -169,6 +169,7 @@ end
 local updaters = {
   UpdateCharacterInfo = function() Data:UpdateCharacterInfo() end,
   UpdatePreyProgress = function() Data:UpdatePreyProgress() end,
+  UpdateLabyrinthProgress = function() Data:UpdateLabyrinthProgress() end,
   UpdateEquipment = function()
     local equipment = addon.Core:GetModule("Equipment", true)
     if equipment then
@@ -221,6 +222,7 @@ function Core:QueueAllUpdates()
   for _, name in ipairs({
     "UpdateCharacterInfo",
     "UpdatePreyProgress",
+    "UpdateLabyrinthProgress",
     "UpdateEquipment",
     "UpdateMoney",
     "UpdateCurrencies",
@@ -272,6 +274,26 @@ function Core:OnEnable()
       self:RequestGameData()
     end
   )
+  -- Kindo'jan is the Labyrinth's only boss encounter. A successful
+  -- ENCOUNTER_END inside its instance is the primary weekly kill signal;
+  -- BOSS_KILL is a secondary positive signal, independent of locale/name.
+  -- The Data setter coalesces duplicate notifications from both events.
+  addon.Events:RegisterEvent("BOSS_KILL", function(_, _, encounterID, encounterName)
+    Data:RecordKindoJanEncounter(true)
+  end, true)
+  addon.Events:RegisterEvent("ENCOUNTER_END", function(_, _, encounterID, encounterName, difficultyID, groupSize, success)
+    Data:RecordKindoJanEncounter(success == 1)
+  end, true)
+  addon.Events:RegisterEvent("SCENARIO_COMPLETED", function()
+    if Data:RecordLabyrinthChamber() then
+      -- Refresh the independent Great Vault module, without adding vault
+      -- information to the Labyrinth tracker.
+      self:QueueUpdate("UpdateVault")
+    end
+  end, true)
+  addon.Events:RegisterEvent("ACHIEVEMENT_EARNED", function()
+    Data:UpdateLabyrinthUnlockedTier(true)
+  end, true)
   addon.Events:RegisterEvent(
     {
       "CHALLENGE_MODE_MAPS_UPDATE",
@@ -369,6 +391,7 @@ function Core:OnEnable()
     },
     function()
       Data:UpdateCharacterLocation()
+      self:QueueUpdate("UpdateLabyrinthProgress")
     end,
     true
   )
@@ -376,9 +399,19 @@ function Core:OnEnable()
     "PLAYER_LOGOUT",
     function()
       Data:UpdateCharacterLocation()
+      Data:UpdateLabyrinthProgress()
     end,
     true
   )
+  addon.Events:RegisterEvent({
+    "SCENARIO_UPDATE",
+    "SCENARIO_CRITERIA_UPDATE",
+    "SCENARIO_COMPLETED",
+    "UPDATE_UI_WIDGET",
+  }, function()
+    self:QueueUpdate("UpdateLabyrinthProgress")
+    self:QueueUpdate("UpdateVault")
+  end)
   addon.Events:RegisterEvent(
     "MYTHIC_PLUS_CURRENT_AFFIX_UPDATE",
     function()

@@ -2845,20 +2845,29 @@ local function UpdateCharacterScrollEdgeButtons(window)
 
   local arrowScale = math.max(50, math.min(200, tonumber(settings.characterScrollArrowScale) or 100)) / 100
   local iconSize = math.floor((80 * arrowScale) + 0.5)
-  local hitWidth = math.max(48, iconSize)
-  local hitHeight = math.max(60, iconSize + 20)
-  -- Keep the texture itself inside the window. The native atlas has transparent
-  -- padding, so a very small outward nudge keeps the visible arrow close to the
-  -- edge without letting the artwork cross the window boundary.
+  -- Both arrows belong to the character viewport, not the full body: when the
+  -- Row Labels column is shown, its area must remain unobstructed.
+  local characterViewport = scrollArea.container
   local visualEdgeOffset = math.max(2, math.floor((4 * arrowScale) + 0.5))
+  local viewportWidth = characterViewport:GetWidth()
+  if viewportWidth and viewportWidth > 0 then
+    -- Large arrow scaling must not spill into the Row Labels column when only
+    -- one character column is visible.
+    iconSize = math.min(iconSize, math.max(1, math.floor(viewportWidth - 2 * visualEdgeOffset)))
+  end
+  local hitWidth = math.max(48, iconSize)
+  if viewportWidth and viewportWidth > 0 then
+    hitWidth = math.min(hitWidth, viewportWidth)
+  end
+  local hitHeight = math.max(60, iconSize + 20)
   for _, button in pairs({navigation.left, navigation.right}) do
     button:SetSize(hitWidth, hitHeight)
     button.Icon:SetSize(iconSize, iconSize)
     button.Icon:ClearAllPoints()
     if button.isLeftEdge then
-      button.Icon:SetPoint("LEFT", window.body, "LEFT", -visualEdgeOffset, 0)
+      button.Icon:SetPoint("LEFT", characterViewport, "LEFT", visualEdgeOffset, 0)
     else
-      button.Icon:SetPoint("RIGHT", window.body, "RIGHT", visualEdgeOffset, 0)
+      button.Icon:SetPoint("RIGHT", characterViewport, "RIGHT", -visualEdgeOffset, 0)
     end
   end
 
@@ -2873,6 +2882,43 @@ local function UpdateCharacterScrollEdgeButtons(window)
   local percentage = scrollBox.GetScrollPercentage and scrollBox:GetScrollPercentage() or 0
   navigation.left:SetShown(percentage > 0.001)
   navigation.right:SetShown(percentage < 0.999)
+end
+
+---On reopening Main, reveal the logged-in character if horizontal scrolling has
+---left that column outside the viewport. Do not disturb scrolling within an
+---already-open window or move an already-visible character unnecessarily.
+---@param window table
+---@param characterIndex number
+---@param columnWidth number
+---@return boolean layoutReady
+local function RevealCurrentCharacterOnOpen(window, characterIndex, columnWidth)
+  local scrollArea = window and window.body and window.body.content and window.body.content.scrollArea
+  local scrollBox = scrollArea and scrollArea.horizontalScrollBox
+  local viewport = scrollArea and scrollArea.container
+  if not scrollBox or not viewport then return true end
+
+  local viewportWidth = viewport:GetWidth()
+  if not viewportWidth or viewportWidth <= 0 then return false end
+
+  local range = scrollBox:GetDerivedScrollRange() or 0
+  local contentWidth = scrollArea.content and scrollArea.content:GetWidth() or 0
+  if contentWidth > viewportWidth + 1 and range <= 0 then return false end
+  if range <= 0 then return true end
+
+  local firstPixel = (characterIndex - 1) * columnWidth
+  local lastPixel = firstPixel + columnWidth
+  local currentOffset = (scrollBox:GetScrollPercentage() or 0) * range
+  local targetOffset = currentOffset
+  if firstPixel < currentOffset then
+    targetOffset = firstPixel
+  elseif lastPixel > currentOffset + viewportWidth then
+    targetOffset = lastPixel - viewportWidth
+  end
+  targetOffset = math.max(0, math.min(range, targetOffset))
+  if math.abs(targetOffset - currentOffset) > 0.5 then
+    scrollBox:SetScrollPercentage(targetOffset / range, ScrollBoxConstants.NoScrollInterpolation)
+  end
+  return true
 end
 
 ---Create persistent, clickable edge arrows for the horizontally-scrollable character grid.
@@ -2890,12 +2936,11 @@ local function EnsureCharacterScrollEdgeButtons(window)
   local function CreateEdgeButton(side)
     local isLeft = side == "left"
     local button = CreateFrame("Button", nil, window)
-    local anchorHost = window.body or host
+    local anchorHost = scrollArea.container
     button.isLeftEdge = isLeft
     button:SetSize(88, 100)
-    -- Keep a generous invisible hitbox inside the window, but anchor the artwork
-    -- independently so the atlas' built-in transparent padding does not make the
-    -- arrow look inset from the actual window edge.
+    -- Anchor the hitbox to the character viewport. With Row Labels shown, the
+    -- left edge is the first character column rather than the sidebar.
     button:SetPoint(isLeft and "LEFT" or "RIGHT", anchorHost, isLeft and "LEFT" or "RIGHT", 0, 0)
     button:SetFrameLevel(host:GetFrameLevel() + 50)
     button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -2906,9 +2951,9 @@ local function EnsureCharacterScrollEdgeButtons(window)
     button.Icon:SetDesaturation(1)
     button.Icon:SetSize(80, 80)
     if isLeft then
-      button.Icon:SetPoint("LEFT", anchorHost, "LEFT", -4, 0)
+      button.Icon:SetPoint("LEFT", anchorHost, "LEFT", 4, 0)
     else
-      button.Icon:SetPoint("RIGHT", anchorHost, "RIGHT", 4, 0)
+      button.Icon:SetPoint("RIGHT", anchorHost, "RIGHT", -4, 0)
     end
 
     button:SetScript("OnEnter", function(self)
@@ -2977,7 +3022,27 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
   local showIcons = settings.showIcons == true
     or (mainWindowSettings.sidebarCollapsed == true and mainWindowSettings.collapsingRowLabelsDisplaysAllIcons ~= false)
 
-  if currency.currencyType == "delveMap" then
+  currencyFrame:SetScript("OnMouseUp", nil)
+  if currency.currencyType == "trackedItem" then
+    local count = characterCurrency and characterCurrency.quantity or 0
+    local required = currency.required or 1
+    local cellText = tostring(count)
+    if showIcons then cellText = format("%s %s", infoIcon, cellText) end
+    currencyFrame.Text:SetText((characterCurrency and count >= required and RED_FONT_COLOR or (characterCurrency and count > 0 and CAMPAIGN_COMPLETE_COLOR or GRAY_FONT_COLOR)):WrapTextInColorCode(cellText))
+    currencyFrame.Text:SetJustifyH(settings.alignCenter and "CENTER" or "LEFT")
+    currencyFrame:SetScript("OnEnter", function()
+      GameTooltip:SetOwner(currencyFrame, "ANCHOR_RIGHT")
+      GameTooltip:SetText(currency.name, 1, 1, 1)
+      GameTooltip:AddDoubleLine("In bags:", tostring(count), nil, nil, nil, 1, 1, 1)
+      GameTooltip:AddDoubleLine("Ready to use:", format("%d", math.floor(count / required)), nil, nil, nil, 1, 1, 1)
+      if currency.tooltipNote then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(format("%s %s", RARE_BLUE_COLOR:WrapTextInColorCode(addon.name .. ":"), currency.tooltipNote), 1, 1, 1, true)
+      end
+      GameTooltip:Show()
+      SetHighlightColor(currencyFrame, 1, 1, 1, 0.05)
+    end)
+  elseif currency.currencyType == "delveMap" then
     local statusValue = "-"
     local cellText = GRAY_FONT_COLOR:WrapTextInColorCode("-")
     if characterCurrency then
@@ -3112,6 +3177,12 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
   else
     local infoMaxQuantity = currency.maxQuantity or 0
     local infoMaxWeeklyQuantity = currency.maxWeeklyQuantity or 0
+    local crestUncapped = currency.currencyType == "crest" and Data:IsSeason2CrestCapLifted()
+    if crestUncapped and infoMaxQuantity == 0 then
+      -- Blizzard's current currency data confirms the cap is gone. Do not
+      -- override a nonzero API cap (or a separately enforced bag cap).
+      infoMaxWeeklyQuantity = 0
+    end
     local charQuantity = 0
     local charTotalEarned = 0
     local charEarnedThisWeek = 0
@@ -3134,6 +3205,9 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
     end
 
     cellValue = tostring(charQuantity)
+    if currency.currencyType == "spark" then
+      cellValue = format("%s (%d)", cellValue, characterCurrency and (characterCurrency.bagCount or 0) or 0)
+    end
     if showIcons then
       cellValue = format("%s %s", infoIcon, cellValue)
     end
@@ -3174,6 +3248,9 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
         if infoMaxQuantity > 0 then
           GameTooltip:AddDoubleLine("Total Maximum:", tostring(infoMaxQuantity), nil, nil, nil, 1, 1, 1)
         end
+      end
+      if currency.currencyType == "spark" then
+        GameTooltip:AddDoubleLine("Sparks in bags:", tostring(characterCurrency and (characterCurrency.bagCount or 0) or 0), nil, nil, nil, 1, 1, 1)
       end
       if currency.tooltipNote then
         GameTooltip:AddLine(" ")
@@ -3223,6 +3300,7 @@ function Module:RenderNow()
       overlayFontObject = "GameFontHighlight_NoShadow",
       overlayTextColor = {r = 1, g = 0.82, b = 0, a = 1},
       onShow = function()
+        Module.revealCurrentCharacterOnOpen = true
         Module:Render()
       end,
       onScaleChanged = function()
@@ -3587,6 +3665,18 @@ function Module:RenderNow()
                 end,
                 difficulty.id
               )
+            end)
+            menu:CreateTitle("Labyrinth")
+            menu:CreateCheckbox(
+              "Enable Labyrinth",
+              function() return Data.db.global.labyrinth.enabled end,
+              function()
+                Data.db.global.labyrinth.enabled = not Data.db.global.labyrinth.enabled
+                self:Render()
+                return MenuResponse.Refresh
+              end
+            ):SetTooltip(function(tooltip)
+              tooltip:AddLine("Track the current Kindo'jan Labyrinth tier and chambers.", 1, 1, 1, true)
             end)
             menu:CreateTitle(DUNGEONS)
             menu:CreateCheckbox(
@@ -4583,6 +4673,7 @@ function Module:RenderNow()
     -- Merely closing the Settings dropdown itself keeps the saved position.
     self.window:HookScript("OnHide", function()
       Module.settingsMenuScrollPercentage = nil
+      Module.revealCurrentCharacterOnOpen = nil
       HideSyncTutorial()
     end)
 
@@ -4885,6 +4976,65 @@ function Module:RenderNow()
         rowCount = rowCount + 1
         totalHeight = totalHeight + Constants.sizes.row
       end)
+    end
+
+    do -- Labyrinth Label
+      local label = self.window.body.sidebar.labyrinthLabel
+      if not label then
+        label = CreateFrame("Frame", "$parentLabyrinthLabel", self.window.body.sidebar)
+        label.text = label:CreateFontString(label:GetName() .. "Text", "OVERLAY")
+        label.text:SetPoint("TOPLEFT", label, "TOPLEFT", Constants.sizes.padding, 0)
+        label.text:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", -Constants.sizes.padding, 0)
+        label.text:SetFontObject("GameFontHighlight_NoShadow")
+        label.text:SetJustifyH("LEFT")
+        label.text:SetText("Labyrinth")
+        label.text:SetVertexColor(1.0, 0.82, 0.0, 1)
+        self.window.body.sidebar.labyrinthLabel = label
+      end
+      if Data.db.global.labyrinth.enabled then
+        label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
+        label:SetPoint("TOPRIGHT", self.window.body.sidebar, "TOPRIGHT", 0, -totalHeight)
+        label:SetHeight(Constants.sizes.row)
+        label:Show()
+        rowCount = rowCount + 1
+        totalHeight = totalHeight + Constants.sizes.row
+      else
+        label:Hide()
+      end
+    end
+    do -- Labyrinth Row
+      local label = self.window.body.sidebar.labyrinthRow
+      if not label then
+        label = CreateFrame("Frame", "$parentLabyrinthRow", self.window.body.sidebar)
+        label.text = label:CreateFontString(label:GetName() .. "Text", "OVERLAY")
+        label.text:SetPoint("TOPLEFT", label, "TOPLEFT", Constants.sizes.padding, 0)
+        label.text:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", -Constants.sizes.padding, 0)
+        label.text:SetFontObject("GameFontHighlight_NoShadow")
+        label.text:SetText("Kindo'jan")
+        label.text:SetJustifyH("LEFT")
+        self.window.body.sidebar.labyrinthRow = label
+      end
+      -- Keep the same icon-free, left-aligned row label style as Prey.
+      label.text:SetText("Kindo'jan")
+      label:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(label, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Kindo'jan", 1, 1, 1)
+        GameTooltip:AddLine("Face the Nemesis at the end of the Labyrinth's nine chambers. Track your tier, chamber progress and weekly Nemesis kill.", 1, 1, 1, true)
+        GameTooltip:Show()
+      end)
+      label:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+      end)
+      if Data.db.global.labyrinth.enabled then
+        label:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPLEFT", 0, -totalHeight)
+        label:SetPoint("TOPRIGHT", self.window.body.sidebar, "TOPRIGHT", 0, -totalHeight)
+        label:SetHeight(Constants.sizes.row)
+        label:Show()
+        rowCount = rowCount + 1
+        totalHeight = totalHeight + Constants.sizes.row
+      else
+        label:Hide()
+      end
     end
 
     do -- MythicPlus Header
@@ -5524,6 +5674,7 @@ function Module:RenderNow()
         characterFrame.raidFrames = {}
         characterFrame.affixHeaderFrame = CreateFrame("Frame", "$parentAffixes", characterFrame)
         characterFrame.preyHeader = CreateFrame("Frame", "$parentPreyHeader", characterFrame)
+        characterFrame.labyrinthHeader = CreateFrame("Frame", "$parentLabyrinthHeader", characterFrame)
         characterFrame.raidHeader = CreateFrame("Frame", "$parentRaidHeader", characterFrame)
         characterFrame.currencyHeaderFrame = CreateFrame("Frame", "$parentCurrencies", characterFrame)
         characterFrame.weekliesHeaderFrame = CreateFrame("Frame", "$parentWeeklies", characterFrame)
@@ -5809,6 +5960,67 @@ function Module:RenderNow()
           rowCount = rowCount + 1
           totalHeight = totalHeight + Constants.sizes.row
         end)
+      end
+
+      do -- Labyrinth Progress and weekly Kindo'jan Nemesis
+        local enabled = Data.db.global.labyrinth.enabled
+        if enabled then
+          characterFrame.labyrinthHeader:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
+          characterFrame.labyrinthHeader:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
+          characterFrame.labyrinthHeader:SetHeight(Constants.sizes.row)
+          SetBackgroundColor(characterFrame.labyrinthHeader, 0, 0, 0, 0.3)
+          characterFrame.labyrinthHeader:Show()
+          totalHeight = totalHeight + Constants.sizes.row
+          rowCount = rowCount + 1
+        else
+          characterFrame.labyrinthHeader:Hide()
+        end
+        local frame = characterFrame.labyrinthProgress
+        if not frame then
+          frame = CreateFrame("Frame", "$parentLabyrinthProgress", characterFrame)
+          frame.Text = frame:CreateFontString(frame:GetName() .. "Text", "OVERLAY")
+          frame.Text:SetFontObject("GameFontHighlight_NoShadow")
+          frame.Text:SetAllPoints(frame)
+          frame.Text:SetJustifyH("CENTER")
+          characterFrame.labyrinthProgress = frame
+        end
+        frame:SetScript("OnMouseUp", nil)
+        if enabled then
+          local progress = character.labyrinth or {}
+          local nextReset = Data.db.global.weeklyReset
+          local killed = Data:IsSameWeeklyReset(progress.killResetAt, nextReset)
+          -- A compact display: tier/chambers and weekly Nemesis kill.
+          -- The full text belongs in the tooltip so it fits 130px columns.
+          -- An unstarted Labyrinth has no tier yet; always show 0/9 rather
+          -- than leaving the chamber count blank. The weekly kill is separate.
+          local tierText = type(progress.tier) == "number" and progress.tier > 0
+            and format("T%d", progress.tier) or "T"
+          local chambers = progress.active and progress.chambers or progress.lastChambers
+          local chamberCount = type(chambers) == "number" and math.max(0, math.min(9, chambers)) or 0
+          local killMark = CreateAtlasMarkup(killed and "common-icon-checkmark" or "Recurringavailablequesticon", 14, 14)
+          frame.Text:SetText(format("%s %d/9 %s", tierText, chamberCount, killMark))
+          frame:EnableMouse(true)
+          frame:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(frame, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Labyrinth of Kindo'jan", 1, 1, 1)
+            GameTooltip:AddDoubleLine("Tier:", type(progress.tier) == "number" and tostring(progress.tier) or "-", nil, nil, nil, 1, 1, 1)
+            GameTooltip:AddDoubleLine("Chambers:", format("%d/9", chamberCount), nil, nil, nil, 1, 1, 1)
+            GameTooltip:AddDoubleLine("Nemesis:", killed and "Defeated" or "Not defeated", nil, nil, nil, 1, 1, 1)
+            GameTooltip:Show()
+            SetHighlightColor(frame, 1, 1, 1, 0.05)
+          end)
+          frame:SetScript("OnLeave", function() GameTooltip:Hide() SetHighlightColor(frame, 1, 1, 1, 0) end)
+          -- Weekly Nemesis kills are driven by successful encounter events only.
+          -- The tracker is read-only: no click can forge or remove a kill.
+          frame:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
+          frame:SetPoint("TOPRIGHT", characterFrame, "TOPRIGHT", 0, -totalHeight)
+          frame:SetHeight(Constants.sizes.row)
+          frame:Show()
+          rowCount = rowCount + 1
+          totalHeight = totalHeight + Constants.sizes.row
+        else
+          frame:Hide()
+        end
       end
 
       do -- Dungeon Header
@@ -6371,6 +6583,35 @@ function Module:RenderNow()
   self.window.characterScrollColumnWidth = finalCharacterWidth
   self.window.body.content.scrollArea:UpdateLayout(characterContentWidth, windowHeight)
   UpdateCharacterScrollEdgeButtons(self.window)
+
+  if self.revealCurrentCharacterOnOpen then
+    self.revealCurrentCharacterOnOpen = nil
+    local currentGUID = UnitGUID("player")
+    local currentIndex
+    if currentGUID then
+      for index, character in ipairs(characters) do
+        if character.GUID == currentGUID then
+          currentIndex = index
+          break
+        end
+      end
+    end
+    if currentIndex then
+      local window = self.window
+      local attempts = 0
+      local function revealAfterLayout()
+        if Module.window ~= window or not window:IsShown() then return end
+        if not RevealCurrentCharacterOnOpen(window, currentIndex, finalCharacterWidth) and attempts < 2 then
+          attempts = attempts + 1
+          C_Timer.After(0.05, revealAfterLayout)
+          return
+        end
+        UpdateCharacterScrollEdgeButtons(window)
+      end
+      -- ScrollBox range is settled after the layout update, not on OnShow.
+      C_Timer.After(0, revealAfterLayout)
+    end
+  end
 
   local zeroCharactersText = "|cffffffffHi there :-)|r\nEnable a character top right for AlterEgo to show you some goodies!"
   if numCharacters <= 0 then

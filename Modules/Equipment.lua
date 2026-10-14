@@ -248,6 +248,10 @@ local function resolveCraftedUpgradeTrack(itemLevel, craftedQuality)
   end
 
   local roundedItemLevel = floor(itemLevel + 0.5)
+  if craftedQuality == CRAFTED_QUALITY_MAX then
+    if roundedItemLevel == 325 then return "Hero" end
+    if roundedItemLevel == 338 then return "Myth" end
+  end
 
   -- Prefer the exact quality + item-level pair so overlapping boundary levels
   -- are assigned to the correct track.
@@ -280,8 +284,9 @@ end
 ---@param muted boolean
 ---@param crafted boolean?
 ---@return string
-local function formatUpgradeTrackLabel(trackName, level, maxLevel, muted, crafted)
+local function formatUpgradeTrackLabel(trackName, level, maxLevel, muted, crafted, ascendant, eligibility)
   local displayTrackName = crafted and format("%s Crafted", trackName) or trackName
+  if ascendant then displayTrackName = "Venomforged " .. displayTrackName end
   local isMythBonusRank = not crafted and trackName == "Myth" and level == 9 and maxLevel == 6
   local rankText = format("%d/%d%s", level, maxLevel, isMythBonusRank and "*" or "")
 
@@ -293,6 +298,10 @@ local function formatUpgradeTrackLabel(trackName, level, maxLevel, muted, crafte
   local coloredTrack = trackColor and trackColor:WrapTextInColorCode(displayTrackName) or displayTrackName
   local coloredRank = (level == maxLevel or isMythBonusRank) and GREEN_FONT_COLOR:WrapTextInColorCode(rankText) or rankText
 
+  if eligibility and not ascendant then
+    local starColor = eligibility == "ready" and RARE_BLUE_COLOR or RED_FONT_COLOR
+    coloredRank = coloredRank .. " " .. starColor:WrapTextInColorCode("*")
+  end
   return format("%s %s", coloredTrack, coloredRank)
 end
 
@@ -309,14 +318,66 @@ local function isUpgradeFromPreviousSeason(seasonID)
   return seasonID ~= currentSeason
 end
 
+-- Patch 12.1.5 Ascendant Venomstone equipment conversion levels.
+local ASCENDANT_ITEM_LEVELS = {
+  Hero = {crafted = 325, normal = 328},
+  Myth = {crafted = 338, normal = 340},
+}
+
+local function isVenomstoneSlot(item)
+  local slot = item.itemSlotID
+  return slot == INVSLOT_NECK or slot == INVSLOT_TRINKET1 or slot == INVSLOT_TRINKET2
+    or slot == INVSLOT_MAINHAND or slot == INVSLOT_OFFHAND
+end
+
+local function venomstoneStatus(item, track, level, maximum, crafted, seasonID)
+  if not isVenomstoneSlot(item) or (track ~= "Hero" and track ~= "Myth") then return nil, nil end
+  if crafted and seasonID ~= 18 then return nil, nil end
+  -- A 12.1 client never has Venomstones. Do not mark legacy equipment.
+  local _, _, _, interface = GetBuildInfo()
+  if (tonumber(interface) or 0) < 120105 then return nil, nil end
+  if not crafted and (not item.itemLevel or item.itemLevel < 305) then return nil, nil end
+  local ascendedLevel = ASCENDANT_ITEM_LEVELS[track]
+  if item.ascendantVenomforged == true then return true, nil end
+  -- Exact post-conversion levels are a backup for offline characters whose
+  -- tooltip was not ready or was localized when their equipment was captured.
+  if item.itemLevel == ascendedLevel[crafted and "crafted" or "normal"]
+    and level and maximum and level >= maximum then
+    return true, nil
+  end
+  -- Exclude special elevated Myth 9/6 items and unrelated item levels.
+  if not crafted and (level > maximum or (track == "Myth" and item.itemLevel > 334)
+    or (track == "Hero" and item.itemLevel > 321)) then
+    return nil, nil
+  end
+  if level and maximum and maximum > 0 then
+    return false, level >= maximum and "ready" or "pending"
+  end
+  return nil, nil
+end
+
+---Explain the star in the Upgrade Level cell without modifying the item tooltip.
+---Only equipment that passes venomstoneStatus receives this hover text.
+local function getVenomforgedUpgradeTooltip(eligibility, crafted, level, maximum)
+  if not eligibility then return nil end
+  if eligibility == "ready" then
+    return "This item is ready to be Venomforged. Use 10 Ascendant Venomstones to upgrade it."
+  end
+  if crafted then
+    return format("Recraft this item to quality %d/%d, then use 10 Ascendant Venomstones to make it Venomforged.", maximum, maximum)
+  end
+  return format("Upgrade this item to %d/%d, then use 10 Ascendant Venomstones to make it Venomforged.", maximum, maximum)
+end
+
 ---@param item AE_Equipment
----@return string, string, boolean
+---@return string, string, boolean, string?
 local function resolveEquipmentUpgradeLevel(item)
   ---@type string[]
   local displayParts = {}
   ---@type string[]
   local sortParts = {}
   local hasUpgradeTrack = false
+  local venomforgedTooltip
 
   local function appendLabel(text, complete, muted)
     table.insert(sortParts, text)
@@ -349,16 +410,24 @@ local function resolveEquipmentUpgradeLevel(item)
   if craftedTrack then
     hasUpgradeTrack = true
     local muted = isUpgradeFromPreviousSeason(craftedSeason)
-    table.insert(sortParts, format("%s Crafted %d/%d", craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX))
-    table.insert(displayParts, formatUpgradeTrackLabel(craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX, muted, true))
+    local ascendant, eligibility = venomstoneStatus(item, craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX, true, craftedSeason)
+    table.insert(sortParts, format("%s%s Crafted %d/%d", ascendant and "Venomforged " or "", craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX))
+    table.insert(displayParts, formatUpgradeTrackLabel(craftedTrack, craftedQuality, CRAFTED_QUALITY_MAX, muted, true, ascendant, eligibility))
+    if not muted then
+      venomforgedTooltip = getVenomforgedUpgradeTooltip(eligibility, true, craftedQuality, CRAFTED_QUALITY_MAX)
+    end
   elseif not craftedQuality then
     local upgradeLevel = item.itemUpgradeLevel or 0
     local upgradeMax = item.itemUpgradeMax or 0
     if item.itemUpgradeTrack and item.itemUpgradeTrack ~= "" and upgradeLevel > 0 and upgradeMax > 0 then
       hasUpgradeTrack = true
       local muted = item.itemUpgradeColor ~= nil and item.itemUpgradeColor == DISABLED_FONT_COLOR:GenerateHexColor()
-      table.insert(sortParts, format("%s %d/%d", item.itemUpgradeTrack, upgradeLevel, upgradeMax))
-      table.insert(displayParts, formatUpgradeTrackLabel(item.itemUpgradeTrack, upgradeLevel, upgradeMax, muted))
+      local ascendant, eligibility = venomstoneStatus(item, item.itemUpgradeTrack, upgradeLevel, upgradeMax, false)
+      table.insert(sortParts, format("%s%s %d/%d", ascendant and "Venomforged " or "", item.itemUpgradeTrack, upgradeLevel, upgradeMax))
+      table.insert(displayParts, formatUpgradeTrackLabel(item.itemUpgradeTrack, upgradeLevel, upgradeMax, muted, false, ascendant, eligibility))
+      if not muted then
+        venomforgedTooltip = getVenomforgedUpgradeTooltip(eligibility, false, upgradeLevel, upgradeMax)
+      end
     end
 
     if #displayParts == 0 then
@@ -381,7 +450,8 @@ local function resolveEquipmentUpgradeLevel(item)
       if fallbackTrack then
         hasUpgradeTrack = true
         table.insert(sortParts, format("%s %d/%d", fallbackTrack, fallbackLevel, fallbackMax))
-        table.insert(displayParts, formatUpgradeTrackLabel(fallbackTrack, fallbackLevel, fallbackMax, true))
+        local ascendant, eligibility = venomstoneStatus(item, fallbackTrack, fallbackLevel, fallbackMax, false)
+        table.insert(displayParts, formatUpgradeTrackLabel(fallbackTrack, fallbackLevel, fallbackMax, true, false, ascendant, eligibility))
       end
     end
   end
@@ -399,7 +469,7 @@ local function resolveEquipmentUpgradeLevel(item)
     appendLabel(format("Crafted %d/%d", craftedQuality, CRAFTED_QUALITY_MAX), craftedQuality == CRAFTED_QUALITY_MAX, isUpgradeFromPreviousSeason(craftedSeason))
   end
 
-  return table.concat(displayParts, " / "), table.concat(sortParts, " / "), hasUpgradeTrack
+  return table.concat(displayParts, " / "), table.concat(sortParts, " / "), hasUpgradeTrack, venomforgedTooltip
 end
 
 ---@param item AE_Equipment
@@ -700,7 +770,7 @@ function Module:Render()
   TableForEach(character.equipment, function(item)
     local itemID = C_Item.GetItemIDForItemInfo(item.itemLink)
 
-    local upgradeLevel, upgradeSort, hasUpgradeTrack = resolveEquipmentUpgradeLevel(item)
+    local upgradeLevel, upgradeSort, hasUpgradeTrack, venomforgedTooltip = resolveEquipmentUpgradeLevel(item)
 
     local enchantText, enchantTooltip, enchantColor = "", "", GREEN_FONT_COLOR
     ---@type string[]
@@ -841,7 +911,17 @@ function Module:Render()
           end,
         },
         {data = WrapTextInColorCode(tostring(floor(item.itemLevel)), select(4, C_Item.GetItemQualityColor(item.itemQuality)))},
-        {data = upgradeLevel},
+        {
+          data = upgradeLevel,
+          onEnter = function(cellFrame)
+            if not venomforgedTooltip then return end
+            GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Venomforged Upgrade", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+            GameTooltip:AddLine(venomforgedTooltip, 1, 1, 1, true)
+            GameTooltip:Show()
+          end,
+          onLeave = function() GameTooltip:Hide() end,
+        },
         {
           data = embellishmentText,
           onEnter = function(cellFrame)

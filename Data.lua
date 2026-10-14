@@ -14,7 +14,7 @@ local TableFind = addon.Libs.LiqUI.Utils.TableFind
 local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
 local TableGet = addon.Libs.LiqUI.Utils.TableGet
 
-Data.dbVersion = 46
+Data.dbVersion = 50
 
 Data.defaultDB = {
   ---@type AE_Global
@@ -69,6 +69,7 @@ Data.defaultDB = {
       enabled = true,
       hiddenDifficulties = {},
     },
+    labyrinth = {enabled = true},
     raids = {
       enabled = true,
       colors = true,
@@ -202,6 +203,7 @@ Data.defaultCharacter = {
   prey = {
     questsCompleted = {},
   },
+  labyrinth = {},
   raids = {
     savedInstances = {},
   },
@@ -304,6 +306,24 @@ function Data:GetCurrentSeason()
   return seasonID, seasonDisplayID
 end
 
+---Only treat the Season 2 crest acquisition cap as lifted after the REAL
+---regional weekly reset for October 20/21. The game schedules that reset;
+---this intentionally avoids hardcoded server-maintenance timestamps.
+---The caller must also respect the currency cap returned by Blizzard.
+function Data:IsSeason2CrestCapLifted()
+  local _, _, _, interface = GetBuildInfo()
+  if (tonumber(interface) or 0) < 120105 then return false end
+  if self:GetCurrentSeason() ~= 18 then return false end
+  if not (C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset) then return false end
+  local remaining = C_DateAndTime.GetSecondsUntilWeeklyReset()
+  if type(remaining) ~= "number" or remaining <= 0 then return false end
+  local lastReset = time() + remaining - 604800
+  local utc = date("!*t", lastReset)
+  if not utc then return false end
+  return utc.year > 2026 or (utc.year == 2026 and
+    (utc.month > 10 or (utc.month == 10 and utc.day >= 20)))
+end
+
 ---Get the currencies of the current season enriched with C_CurrencyInfo data
 ---@return AE_CurrencyInfo[]
 function Data:GetCurrencies()
@@ -336,6 +356,16 @@ function Data:GetCurrencies()
         quantityEarnedThisWeek = 0,
       }
       table.insert(currencies, questInfo)
+      return
+    end
+    if currency.currencyType == "trackedItem" then
+      table.insert(currencies, {
+        id = currency.id, name = currency.name, description = currency.description,
+        currencyType = currency.currencyType, category = currency.category,
+        iconFileID = C_Item.GetItemIconByID(currency.id),
+        tooltipNote = currency.tooltipNote, required = currency.required,
+        maxQuantity = 0, maxWeeklyQuantity = 0, quantity = 0,
+      })
       return
     end
     if currency.currencyType == "delveMap" then
@@ -1390,6 +1420,7 @@ end
 function Data:UpdateDB()
   self:UpdateCharacterInfo()
   self:UpdatePreyProgress()
+  self:UpdateLabyrinthProgress()
   self:UpdateEquipment()
   self:UpdateMoney()
   self:UpdateCurrencies()
@@ -1652,9 +1683,119 @@ function Data:MigrateDB()
         end
       end
     end
+    -- Fold the previous PTR-only Kindo'jan weekly currency into the
+    -- Labyrinth itself, including offline and synced characters.
+    if self.db.global.dbVersion == 46 then
+      for _, character in pairs(self.db.global.characters or {}) do
+        local entries = character.currencies or {}
+        for index = #entries, 1, -1 do
+          local entry = entries[index]
+          if type(entry) == "table" and entry.id == "kindojanBounty" then
+            if entry.questCompleted == true and self:IsSameWeeklyReset(entry.resetAt, self.db.global.weeklyReset) then
+              character.labyrinth = character.labyrinth or {}
+              character.labyrinth.killResetAt = self.db.global.weeklyReset
+            end
+            table.remove(entries, index)
+          end
+        end
+      end
+      if self.db.global.trackerOverrides then
+        self.db.global.trackerOverrides.kindojanBounty = nil
+      end
+      for _, section in ipairs({"weeklies", "seasonalChores", "currencies"}) do
+        local settings = self.db.global[section]
+        if settings and settings.hiddenCurrencies then
+          settings.hiddenCurrencies.kindojanBounty = nil
+        end
+      end
+    end
+    -- Retire the separate Ancestral Bounty marker. The weekly Nemesis
+    -- kill is the sole completion state shown in the Labyrinth tracker.
+    if self.db.global.dbVersion == 47 then
+      for _, character in pairs(self.db.global.characters or {}) do
+        if type(character.labyrinth) == "table" then
+          character.labyrinth.bountyResetAt = nil
+        end
+      end
+    end
+    -- Older builds inferred chambers from a nine-stage scenario, which is
+    -- not how Labyrinth chambers are represented. Drop those estimates but
+    -- keep the previously recorded weekly Nemesis kill and tier information.
+    if self.db.global.dbVersion == 48 then
+      for _, character in pairs(self.db.global.characters or {}) do
+        local progress = character.labyrinth
+        if type(progress) == "table" then
+          progress.active = false
+          progress.chambers = nil
+          progress.lastChambers = nil
+          progress.lastTier = progress.tier
+          progress.runStartedAt = nil
+          progress.lastChamberAt = nil
+          progress.weeklyChambers = 0
+          progress.weeklyResetAt = self.db.global.weeklyReset
+          progress.chamberTrackingVersion = 1
+        end
+      end
+    end
+    -- Labyrinth no longer duplicates Great Vault / estimated-credit data.
+    -- Keep weekly chamber totals and Nemesis kills untouched.
+    if self.db.global.dbVersion == 49 then
+      for _, character in pairs(self.db.global.characters or {}) do
+        local progress = character.labyrinth
+        if type(progress) == "table" then
+          progress.weeklyCredits = nil
+          progress.weeklyNemesisCredit = nil
+          progress.runCreditedChambers = nil
+          progress.worldVaultProgress = nil
+          progress.worldVaultThreshold = nil
+        end
+      end
+    end
     self.db.global.dbVersion = self.db.global.dbVersion + 1
     self:MigrateDB()
   end
+end
+
+---Two WoW accounts can calculate the same regional weekly reset a few seconds
+---apart. Accept that clock/API jitter, but never equate different weekly cycles.
+---The hour-long allowance is far below the seven-day reset interval.
+function Data:IsSameWeeklyReset(first, second)
+  first, second = tonumber(first), tonumber(second)
+  return first ~= nil and second ~= nil and first > 0 and second > 0
+    and math.abs(first - second) <= 3600
+end
+
+---The Labyrinth's regional weekly reset is shared with the existing
+---Nemesis and Great Vault trackers. Do not treat a wipe as a kill.
+function Data:SetKindoJanKillCompleted(character, completed)
+  if not character or character.GUID ~= UnitGUID("player") then return end
+  character.labyrinth = character.labyrinth or {}
+  local progress = character.labyrinth
+  local nextReset = self.db.global.weeklyReset
+  local value = completed == true and nextReset or nil
+  if progress.killResetAt == value or self:IsSameWeeklyReset(progress.killResetAt, value) then return end
+  progress.killResetAt = value
+  -- Nemesis completion is tracked independently from chamber totals.
+  -- The native Great Vault tracker handles World Activities separately.
+  self:MarkCharacterSyncChanged(character)
+  addon.Core:Render()
+end
+
+---Kindo'jan is the only boss encounter in the Labyrinth. A positive
+---ENCOUNTER_END (or BOSS_KILL) while inside instance 3043 is therefore
+---sufficient, regardless of the client's locale or the encounter's name.
+---A failed encounter must never mark the weekly Nemesis kill. Separately,
+---UpdateLabyrinthProgress checks the official lifetime statistic for an
+---increase observed during the same run as a fallback, not as a weekly flag.
+function Data:RecordKindoJanEncounter(succeeded)
+  if succeeded ~= true then return false end
+  local _, _, _, interface = GetBuildInfo()
+  if (tonumber(interface) or 0) < 120105 then return false end
+  if not self:IsInLabyrinth() then return false end
+  local character = self:GetCharacter()
+  if not character then return false end
+  self:SetKindoJanKillCompleted(character, true)
+  return true
 end
 
 ---Perform weekly reset tasks (e.g., vault, weekly-earn currency progress for offline alts)
@@ -1676,6 +1817,14 @@ function Data:TaskWeeklyReset()
       TableForEach(character.mythicplus.runHistory, function(run)
         run.thisWeek = false
       end)
+      -- Weekly Nemesis kill resets with the regional weekly cycle.
+      if type(character.labyrinth) == "table" then
+        local progress = character.labyrinth
+        progress.killResetAt = nil
+        progress.weeklyChambers = 0
+        progress.weeklyResetAt = nil
+        -- A weekly reset does not end an active physical Labyrinth run.
+      end
       -- Reset Prey Hunts
       character.prey.questsCompleted = wipe(character.prey.questsCompleted or {})
       character.vault.activityEncounterInfo = wipe(character.vault.activityEncounterInfo or {})
@@ -1721,9 +1870,26 @@ end
 ---@param entry AE_Raid|AE_Dungeon
 local function loadEncounters(entry)
   local journalInstanceID = entry.journalInstanceID
-  EJ_SelectInstance(journalInstanceID)
+  if not journalInstanceID and entry.instanceID and EJ_GetInstanceByIndex then
+    -- Newly added raid IDs may not have a stable journal ID in pre-launch data.
+    -- Resolve it by the real map/instance ID, without guessing a journal ID.
+    if EJ_GetNumTiers and EJ_SelectTier then
+      EJ_SelectTier(EJ_GetNumTiers())
+    end
+    for raidIndex = 1, 40 do
+      local candidateID, _, _, _, _, _, _, _, _, _, mapID = EJ_GetInstanceByIndex(raidIndex, true)
+      if not candidateID then break end
+      if mapID == entry.instanceID then
+        journalInstanceID = candidateID
+        entry.journalInstanceID = candidateID
+        break
+      end
+    end
+  end
+  if journalInstanceID then EJ_SelectInstance(journalInstanceID) end
   local encounterIndex = 1
   while true do
+    if not journalInstanceID then break end
     local name, description, journalEncounterID, journalEncounterSectionID, journalLink,
       encounterJournalInstanceID, instanceEncounterID, instanceID = EJ_GetEncounterInfoByIndex(encounterIndex, journalInstanceID)
     if not journalEncounterID then break end
@@ -1746,7 +1912,7 @@ local function loadEncounters(entry)
     for placeholderIndex = 1, entry.numEncounters do
       entry.encounters[placeholderIndex] = {
         index = placeholderIndex,
-        name = format("%s (%d)", entry.name, placeholderIndex),
+        name = entry.instanceID == 3095 and "Kith'ix" or format("%s (%d)", entry.name, placeholderIndex),
         instanceID = entry.instanceID,
       }
     end
@@ -1859,6 +2025,188 @@ function Data:UpdateRaidInstances()
   end
   addon.Core:Render()
   self:MarkCharacterSyncChanged(character)
+end
+
+-- These IDs are from the 12.1.5 client data and the DelveGuide PTR
+-- observations. No dependency on DelveGuide is introduced.
+local LABYRINTH_INSTANCE_ID = 3043
+local LABYRINTH_TIER_ACHIEVEMENTS = {
+  63863, 63864, 63865, 63846, 63847, 63848, 63849, 63850, 63851, 63852, 63853,
+}
+
+function Data:IsInLabyrinth()
+  local _, _, _, _, _, _, _, mapID = GetInstanceInfo()
+  return type(mapID) == "number" and mapID == LABYRINTH_INSTANCE_ID
+end
+
+local function ReadNemesisKillStatistic()
+  if type(GetStatistic) ~= "function" then return end
+  local ok, value = pcall(GetStatistic, 63731)
+  if not ok or type(value) ~= "string" and type(value) ~= "number" then return end
+  -- GetStatistic is localized presentation text; strip grouping separators.
+  if type(value) == "string" then
+    if value == "--" or value == "" then return end
+    value = value:gsub("[^%d]", "")
+  end
+  return tonumber(value)
+end
+
+---The Labyrinth header is a ScenarioHeaderDelves widget (type 29).
+---C_DelvesUI.GetActiveDelveTier may return 0 inside a Labyrinth.
+local function ReadLabyrinthTier()
+  if C_UIWidgetManager and C_UIWidgetManager.GetAllWidgetsBySetID
+    and C_UIWidgetManager.GetScenarioHeaderDelvesWidgetVisualizationInfo then
+    local widgetSetID
+    if C_ScenarioInfo and C_ScenarioInfo.GetScenarioStepInfo then
+      local ok, step = pcall(C_ScenarioInfo.GetScenarioStepInfo)
+      if ok then widgetSetID = type(step) == "table" and step.widgetSetID end
+    end
+    if (not widgetSetID or widgetSetID == 0) and C_Scenario and C_Scenario.GetStepInfo then
+      local ok, id = pcall(function() return select(12, C_Scenario.GetStepInfo()) end)
+      if ok then widgetSetID = id end
+    end
+    if type(widgetSetID) == "number" and widgetSetID > 0 then
+      local ok, widgets = pcall(C_UIWidgetManager.GetAllWidgetsBySetID, widgetSetID)
+      if ok and type(widgets) == "table" then
+        for _, widget in ipairs(widgets) do
+          if widget.widgetType == 29 then
+            local valid, info = pcall(C_UIWidgetManager.GetScenarioHeaderDelvesWidgetVisualizationInfo, widget.widgetID)
+            local text = valid and info and info.tierText
+            if type(text) == "string" and not (issecretvalue and issecretvalue(text)) then
+              local tier = tonumber(text:match("(%d+)"))
+              if tier and tier >= 1 and tier <= 11 then return tier end
+            end
+          end
+        end
+      end
+    end
+  end
+  if C_DelvesUI and C_DelvesUI.GetActiveDelveTier then
+    local ok, tier = pcall(C_DelvesUI.GetActiveDelveTier)
+    if ok and type(tier) == "number" and tier >= 1 and tier <= 11 then return tier end
+  end
+end
+
+---The achievement ladder records "3 chambers at Tier N", unlocking N+1.
+---Do not classify an unknown achievement API response as zero progress.
+function Data:UpdateLabyrinthUnlockedTier(force)
+  local character = self:GetCharacter()
+  if not character then return end
+  local now = time()
+  if not force and self.cache.labyrinthAchievementCheckedAt
+    and now - self.cache.labyrinthAchievementCheckedAt < 60 then return end
+  self.cache.labyrinthAchievementCheckedAt = now
+  if type(GetAchievementInfo) ~= "function" then return end
+  local highestCleared, known = 0, false
+  for tier, id in ipairs(LABYRINTH_TIER_ACHIEVEMENTS) do
+    local ok, achievementID, _, _, completed = pcall(GetAchievementInfo, id)
+    if ok and achievementID == id then
+      known = true
+      if completed then highestCleared = tier end
+    end
+  end
+  if not known then return end
+  local progress = character.labyrinth or {}
+  local unlocked = math.min(11, highestCleared + 1)
+  if progress.highestUnlockedTier ~= unlocked then
+    progress.highestUnlockedTier = unlocked
+    character.labyrinth = progress
+    self:MarkCharacterSyncChanged(character)
+    addon.Core:Render()
+  end
+end
+
+---A completion event represents one chamber; the scenario step counter does
+---not. Save counters per physical visit so /reload and DC can resume safely.
+---A five-second debounce prevents duplicated SCENARIO_COMPLETED events.
+function Data:RecordLabyrinthChamber()
+  if not self:IsInLabyrinth() then return false end
+  local character = self:GetCharacter()
+  if not character then return false end
+  self:UpdateLabyrinthProgress()
+  local progress = character.labyrinth
+  if not progress or not progress.active then return false end
+  local now = time()
+  if progress.lastChamberAt and now - progress.lastChamberAt < 5 then return false end
+  if (progress.chambers or 0) >= 9 then return false end
+  progress.lastChamberAt = now
+  progress.chambers = (progress.chambers or 0) + 1
+  progress.lastChambers = progress.chambers
+  progress.lastTier = progress.tier or progress.lastTier
+  if not self:IsSameWeeklyReset(progress.weeklyResetAt, self.db.global.weeklyReset) then
+    progress.weeklyResetAt = self.db.global.weeklyReset
+    progress.weeklyChambers = 0
+  end
+  progress.weeklyChambers = (progress.weeklyChambers or 0) + 1
+  character.alterEgoTrackingVersion = 3
+  self:MarkCharacterSyncChanged(character)
+  addon.Core:Render()
+  return true
+end
+
+---Update only on entry, exit, scenario/widget changes and short deferred
+---updates. Never infer chambers from the number of scenario stages.
+function Data:UpdateLabyrinthProgress()
+  local character = self:GetCharacter()
+  if not character then return end
+  local progress = character.labyrinth or {}
+  local now = time()
+  local changed = false
+  if not self:IsInLabyrinth() then
+    if progress.active then
+      progress.active = false
+      progress.lastChambers = progress.chambers
+      progress.lastTier = progress.tier
+      progress.chambers = nil
+      progress.runStartedAt = nil
+      progress.lastSeenAt = nil
+      progress.nemesisStatistic = nil
+      changed = true
+    end
+  else
+    -- A new visit follows a confirmed exit or an abandoned session older
+    -- than three hours. Reloads and short disconnects continue the same run.
+    local stale = progress.lastSeenAt and now - progress.lastSeenAt > 10800
+    if not progress.active or stale or not progress.runStartedAt then
+      progress.active = true
+      progress.runStartedAt = now
+      progress.chambers = 0
+      progress.tier = nil
+      progress.lastChamberAt = nil
+      progress.nemesisStatistic = ReadNemesisKillStatistic()
+      changed = true
+    end
+    -- Avoid sync churn: the time of a live observation is local recovery
+    -- metadata and does not need to be transmitted on every event.
+    progress.lastSeenAt = now
+    local tier = ReadLabyrinthTier()
+    if tier and progress.tier ~= tier then
+      progress.tier = tier
+      progress.lastTier = tier
+      changed = true
+    end
+    -- The official lifetime kill statistic (DelveGuide: 63731) is only
+    -- supporting evidence: an increase since an observation from THIS run
+    -- confirms a new kill. A lifetime total alone proves no weekly status.
+    -- Keep the highest sample: an API glitch returning a lower value must
+    -- not create a false kill when the previous total reappears.
+    local kills = ReadNemesisKillStatistic()
+    local previousKills = progress.nemesisStatistic
+    if kills and previousKills and kills > previousKills then
+      self:SetKindoJanKillCompleted(character, true)
+    end
+    if kills and (not previousKills or kills > previousKills) then
+      progress.nemesisStatistic = kills
+    end
+  end
+  progress.chamberTrackingVersion = 1
+  character.labyrinth = progress
+  self:UpdateLabyrinthUnlockedTier(false)
+  if changed then
+    character.alterEgoTrackingVersion = 3
+    self:MarkCharacterSyncChanged(character)
+    addon.Core:Render()
+  end
 end
 
 function Data:UpdatePreyProgress()
@@ -2048,21 +2396,56 @@ function Data:UpdateMoney()
   end
 end
 
+---Compare the currency snapshots that are actually saved/synced, including
+---weekly counters and tracked-item quantities. API lookups return fresh tables
+---even when nothing changed, so table identity is not meaningful here.
+local function CurrencySnapshotEqual(a, b)
+  if a == b then return true end
+  if type(a) ~= type(b) then return false end
+  if type(a) ~= "table" then return false end
+  for key, value in pairs(a) do
+    if not CurrencySnapshotEqual(value, b[key]) then return false end
+  end
+  for key in pairs(b) do
+    if a[key] == nil then return false end
+  end
+  return true
+end
+
 ---Refresh currencies from the API
 function Data:UpdateCurrencies()
   local character = self:GetCharacter()
   if not character then return end
   local seasonID = self:GetCurrentSeason()
+  local oldCurrencies = character.currencies or {}
+  local oldTrackingVersion = character.alterEgoTrackingVersion
+  local oldKillResetAt = character.labyrinth and character.labyrinth.killResetAt
 
   -- Gilded Stash progress is only readable from the API while near Silvermoon City (or otherwise
   -- triggering the spell visual). Grab whatever we already had stored before wiping the table, so
   -- it can be carried forward when the live widget has nothing to report this time.
   local previousGildedStash = TableGet(character.currencies or {}, "id", "gildedStash")
-
-  character.currencies = wipe(character.currencies or {})
+  -- Migrate old weekly Nemesis completion to the Labyrinth without losing
+  -- a kill recorded by an earlier PTR build. Obsolete currency rows disappear.
+  local previousBounty = TableGet(character.currencies or {}, "id", "kindojanBounty")
+  if previousBounty and previousBounty.questCompleted == true
+    and self:IsSameWeeklyReset(previousBounty.resetAt, self.db.global.weeklyReset) then
+    character.labyrinth = character.labyrinth or {}
+    character.labyrinth.killResetAt = self.db.global.weeklyReset
+  end
+  character.currencies = {}
+  character.alterEgoTrackingVersion = 3
 
   TableForEach(self.currencies or {}, function(dataCurrency)
     if dataCurrency.seasonID ~= nil and dataCurrency.seasonID ~= seasonID then
+      return
+    end
+    if dataCurrency.currencyType == "trackedItem" then
+      local count = C_Item.GetItemCount(dataCurrency.id, false, false, false)
+      table.insert(character.currencies, {
+        id = dataCurrency.id, currencyType = dataCurrency.currencyType,
+        name = dataCurrency.name, quantity = count or 0,
+      })
       return
     end
     if dataCurrency.currencyType == "quest" then
@@ -2149,12 +2532,26 @@ function Data:UpdateCurrencies()
     local currency = currencyInfo
     currency.id = dataCurrency.id
     currency.currencyType = dataCurrency.currencyType
-    if dataCurrency.itemID then
+    if dataCurrency.currencyType == "spark" and dataCurrency.itemID then
+      -- Count the actual whole Spark item in bags, not Spark Dust currency.
+      currency.bagCount = C_Item.GetItemCount(dataCurrency.itemID, false, false, false) or 0
+    end
+    if dataCurrency.itemID and dataCurrency.currencyType ~= "spark" then
       currency.quantity = C_Item.GetItemCount(dataCurrency.itemID, true)
       currency.iconFileID = C_Item.GetItemIconByID(dataCurrency.itemID) or 0
     end
     table.insert(character.currencies, currency)
   end)
+  -- Avoid a new Sync revision and network broadcast on every harmless
+  -- CURRENCY_DISPLAY_UPDATE or item event. Preserve the previous snapshot
+  -- object when equal, including its existing metadata.
+  if CurrencySnapshotEqual(oldCurrencies, character.currencies) then
+    character.currencies = oldCurrencies
+    if oldTrackingVersion == character.alterEgoTrackingVersion
+      and oldKillResetAt == (character.labyrinth and character.labyrinth.killResetAt) then
+      return
+    end
+  end
   self:MarkCharacterSyncChanged(character)
 end
 
@@ -2604,6 +3001,7 @@ function Data:UpdateEquipment()
     local itemPayloadSplit = itemPayload and {strsplit(":", itemPayload)} or {}
     local enchantID = tonumber(itemPayloadSplit[2]) or 0
     local enchantTooltipLine = nil
+    local ascendantVenomforged = false
 
     local tooltipData = C_TooltipInfo.GetInventoryItem("player", slot.id)
     if tooltipData and tooltipData.lines then
@@ -2616,6 +3014,12 @@ function Data:UpdateEquipment()
         end
 
         if not line.leftText then return end
+        if type(line.leftText) == "string" and
+          (not issecretvalue or not issecretvalue(line.leftText)) and
+          (line.leftText:lower():find("ascendant venomforged", 1, true)
+          or line.leftText:lower():find("ascendant voidforged", 1, true)) then
+          ascendantVenomforged = true
+        end
         local match, _, uTrack, uLevel, uMax = line.leftText:find(upgradePattern)
         if not match then return end
         if itemUpgradeTrack == "" then
@@ -2660,6 +3064,7 @@ function Data:UpdateEquipment()
       itemUpgradeLevel = itemUpgradeLevel,
       itemUpgradeMax = itemUpgradeMax,
       itemUpgradeColor = itemUpgradeColor,
+      ascendantVenomforged = ascendantVenomforged,
       enchantID = enchantID,
       enchantTooltipLine = enchantTooltipLine,
       isCrafted = embellishmentInfo.isCrafted,

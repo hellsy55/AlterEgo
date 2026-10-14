@@ -99,6 +99,52 @@ local function fetchRaw()
   return strtrim(raw)
 end
 
+---Classify a Kith'ix bonus-roll source from its actual spell confirmation
+---while inside the raid, never from a guessed source/item identifier.
+local function learnKithixBonusSource(sourceID)
+  if type(sourceID) ~= "number" or sourceID <= 0 then return end
+  -- Use one stable local grouping key even if the Encounter Journal loads
+  -- after some rolls. Mixing an unresolved and resolved EJ ID would split
+  -- the same boss into two different raid headers in Bonus Roll History.
+  Data.bonusRollSources[sourceID] = {
+    kind = "raid", journalInstanceID = -3095,
+    bossName = "Kith'ix", order = 1, kithix = true,
+  }
+  if Data.db then
+    Data.db.global.kithixBonusRollSourceID = sourceID
+  end
+end
+
+---Infer a previously unseen Kith'ix source from an item in SimulationCraft's
+---own export, but ONLY if that item appears in the Kith'ix Encounter Journal
+---loot pool. This also classifies saved history from before the new install.
+---Never use the won item ID itself as the source ID.
+local function learnKithixSourcesFromSimC(entries)
+  if not (EJ_GetNumLoot and EJ_GetLootInfoByIndex and EJ_SelectInstance) then return end
+  local raid
+  for _, candidate in ipairs(Data.raids or {}) do
+    if candidate.instanceID == 3095 then raid = candidate break end
+  end
+  if not raid or not raid.journalInstanceID then return end
+  local relevant = {}
+  for _, entry in ipairs(entries or {}) do
+    if not Data.bonusRollSources[entry.sourceID]
+      and Data.bonusRollRaidContexts[entry.contextID]
+      and type(entry.itemID) == "number" then
+      relevant[entry.itemID] = relevant[entry.itemID] or {}
+      relevant[entry.itemID][entry.sourceID] = true
+    end
+  end
+  if not next(relevant) then return end
+  EJ_SelectInstance(raid.journalInstanceID)
+  for i = 1, EJ_GetNumLoot() or 0 do
+    local itemID = EJ_GetLootInfoByIndex(i)
+    for sourceID in pairs(relevant[itemID] or {}) do
+      learnKithixBonusSource(sourceID)
+    end
+  end
+end
+
 ---Remember the source/context before the bonus-roll result arrives so the exact
 ---won item hyperlink can be associated with the same entry SimulationCraft exports.
 function Module:SPELL_CONFIRMATION_PROMPT(_, spellID)
@@ -111,6 +157,10 @@ function Module:SPELL_CONFIRMATION_PROMPT(_, spellID)
   if not prompts then return end
   for _, prompt in ipairs(prompts) do
     if prompt.spellID == spellID then
+      local _, _, _, _, _, _, _, currentMapID = GetInstanceInfo()
+      if currentMapID == 3095 then
+        learnKithixBonusSource(prompt.displayItemID)
+      end
       self.pendingBonusRoll = {
         currencyID = prompt.currencyID or 0,
         sourceID = prompt.displayItemID or 0,
@@ -196,6 +246,7 @@ function Module:UpdateCharacter(character)
   end
   local saved = character.bonusRoll
   if saved and saved.raw == raw and type(saved.entries) == "table" then
+    learnKithixSourcesFromSimC(saved.entries)
     -- A successful check is still an update even when the roll history itself
     -- did not change. Keep the footer meaningful after the automatic login check.
     saved.updatedAt = time()
@@ -210,6 +261,7 @@ function Module:UpdateCharacter(character)
     updatedAt = time(),
     exactItems = saved and saved.exactItems or {},
   }
+  learnKithixSourcesFromSimC(character.bonusRoll.entries)
   if Data.MarkCharacterSyncChanged then
     Data:MarkCharacterSyncChanged(character)
   end
@@ -347,8 +399,10 @@ local function buildSections(entries)
       local isRaid = source.kind == "raid"
       local dataInstance = findByJournalInstance(isRaid and Data.raids or Data.dungeons, source.journalInstanceID)
       section = isRaid and sections.raids or sections.dungeons
-      local instanceName = dataInstance and dataInstance.name or ("Instance " .. source.journalInstanceID)
-      local instanceOrder = dataInstance and dataInstance.order or 0
+      local instanceName = dataInstance and dataInstance.name
+        or (source.kithix and "The Unbinding of Kith'ix")
+        or ("Instance " .. source.journalInstanceID)
+      local instanceOrder = dataInstance and dataInstance.order or (source.kithix and 3 or 0)
       instance = getInstanceGroup(section.list, section.lookup, tostring(source.journalInstanceID), instanceName, instanceOrder)
       instance.kind = source.kind
       bossKey = source.journalEncounterID or source.bossName or false
@@ -1215,6 +1269,10 @@ function Module:OpenCurrentCharacter()
 end
 
 function Module:OnInitialize()
+  local savedSourceID = Data.db and Data.db.global.kithixBonusRollSourceID
+  if type(savedSourceID) == "number" then
+    learnKithixBonusSource(savedSourceID)
+  end
   self:RegisterChatCommand("bonus", function()
     Module:OpenCurrentCharacter()
   end)

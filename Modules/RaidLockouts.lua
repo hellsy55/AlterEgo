@@ -9,6 +9,7 @@ local Data = addon.Data
 local Constants = addon.Constants
 local LibLiqUI = addon.Libs.LiqUI
 local SetHighlightColor = LibLiqUI.Utils.SetHighlightColor
+local TableGet = LibLiqUI.Utils.TableGet
 
 -- This protocol is deliberately separate from AlterEgo's account-sync protocol.
 -- Raid lockouts are group information, not account data, and must work even when
@@ -80,8 +81,8 @@ local function currentSeasonID()
 end
 
 ---The fixed current-season boss catalog used both by the UI and the wire format.
----Raid order intentionally follows Data:GetRaids(): for Season 18 this places
----all eight The Venomous Abyss bosses first and Nymrissa Wavecaller last.
+---Raid order follows Data:GetRaids(): eight Venomous Abyss bosses,
+---then Nymrissa Wavecaller, followed by Kith'ix.
 local function buildBossCatalog()
   local bosses = {}
   for _, raid in ipairs(Data:GetRaids() or {}) do
@@ -160,7 +161,10 @@ end
 local function parseSharedState(seasonID, total, normalMask, heroicMask, mythicMask)
   local catalog = buildBossCatalog()
   if tonumber(seasonID) ~= currentSeasonID() then return nil end
-  if tonumber(total) ~= #catalog then return nil end
+  local remoteTotal = tonumber(total)
+  -- Season 2 peers running the pre-Kith'ix catalog still report nine bosses.
+  -- Their first nine mask bits remain valid; the new boss is unknown, not alive.
+  if remoteTotal ~= #catalog and not (currentSeasonID() == 18 and remoteTotal == #catalog - 1 and #catalog == 10) then return nil end
 
   local masks = {
     [14] = tonumber(normalMask) or 0,
@@ -174,14 +178,16 @@ local function parseSharedState(seasonID, total, normalMask, heroicMask, mythicM
     local killed = 0
     local mask = masks[difficultyID]
     for i = 1, #catalog do
-      local isKilled = math.floor(mask / (2 ^ (i - 1))) % 2 == 1
-      slots[i] = isKilled
-      if isKilled then killed = killed + 1 end
+      if i <= remoteTotal then
+        local isKilled = math.floor(mask / (2 ^ (i - 1))) % 2 == 1
+        slots[i] = isKilled
+        if isKilled then killed = killed + 1 end
+      end
     end
     parsed[difficultyID] = {
       slots = slots,
       killed = killed,
-      total = #catalog,
+      total = remoteTotal,
     }
   end
   return parsed
@@ -413,6 +419,18 @@ function Module:BroadcastState()
     version,
   }, ";")
   addon.Core:SendCommMessage(COMM_PREFIX, message, "RAID", nil, "ALERT")
+  if state.seasonID == 18 and state.total == 10 then
+    -- Version-12.1 peers require the exact 9-boss catalog. Their nine
+    -- positions are an unchanged prefix of the expanded list.
+    local legacyMessage = table.concat({
+      "S", PROTOCOL_VERSION, state.seasonID, 9,
+      (state.masks[14] or 0) % 512,
+      (state.masks[15] or 0) % 512,
+      (state.masks[16] or 0) % 512,
+      characterKey, version,
+    }, ";")
+    addon.Core:SendCommMessage(COMM_PREFIX, legacyMessage, "RAID", nil, "ALERT")
+  end
   lastStateSentAt = GetTime()
 end
 
@@ -433,6 +451,10 @@ function Module:RequestGroupState()
   local catalog = buildBossCatalog()
   local message = table.concat({"Q", PROTOCOL_VERSION, currentSeasonID(), #catalog}, ";")
   addon.Core:SendCommMessage(COMM_PREFIX, message, "RAID", nil, "ALERT")
+  if currentSeasonID() == 18 and #catalog == 10 then
+    local legacyQuery = table.concat({"Q", PROTOCOL_VERSION, currentSeasonID(), 9}, ";")
+    addon.Core:SendCommMessage(COMM_PREFIX, legacyQuery, "RAID", nil, "ALERT")
+  end
 
   -- Our own row never needs the network, but repaint immediately so a
   -- newly opened window already shows the local lockout while replies arrive.
@@ -448,7 +470,9 @@ function Module:OnRaidLockoutComm(prefix, message, distribution, sender)
 
   if messageType == "Q" then
     if tonumber(seasonID) ~= currentSeasonID() then return end
-    if tonumber(total) ~= #buildBossCatalog() then return end
+    local remoteTotal = tonumber(total)
+    local localTotal = #buildBossCatalog()
+    if remoteTotal ~= localTotal and not (currentSeasonID() == 18 and remoteTotal == 9 and localTotal == 10) then return end
     if not IsInRaid() then return end
 
     -- Refresh the local saved-instance snapshot before answering so expired
@@ -479,6 +503,12 @@ function Module:OnRaidLockoutComm(prefix, message, distribution, sender)
   if key == unitKey("player") then return end
 
   local parsed = parseSharedState(seasonID, total, a, b, c)
+  local oldResponse = responses[key]
+  if oldResponse and oldResponse.state and parsed
+    and (oldResponse.state[14] and oldResponse.state[14].total or 0) > (parsed[14] and parsed[14].total or 0) then
+    -- Do not downgrade a complete 10-boss report to a companion legacy 9-boss report.
+    return
+  end
   responses[key] = {
     state = parsed,
     incompatible = parsed == nil,
@@ -952,6 +982,7 @@ function Module:RefreshWindow()
     WHITE_FONT_COLOR:WrapTextInColorCode(tostring(#rows))))
 
   local bosses = buildBossCatalog()
+  local killIcon = TableGet(Constants.raidKillIcons, "id", Data.db.global.raids.killIcon or "skull") or Constants.raidKillIcons[1]
   local showDifficultyPrefix = #selectedDifficulties > 1
   local rowHeight = math.max(ROW_HEIGHT, #selectedDifficulties * DIFFICULTY_LINE_HEIGHT)
   self.scrollArea:SetWheelPanExtent(rowHeight)
@@ -1000,7 +1031,9 @@ function Module:RefreshWindow()
         icon:ClearAllPoints()
         icon:SetPoint("TOPLEFT", row, "TOPLEFT", BOSSES_X + (bossIndex - 1) * (ICON_SIZE + ICON_GAP), -iconY)
         icon.boss = boss
-        icon.hasData = state.status ~= "nodata"
+        -- Share the Main panel's Skull/Diamond preference in this window too.
+        icon.texture:SetTexture(killIcon.texture)
+        icon.hasData = state.status ~= "nodata" and (state.total or 0) >= bossIndex
         icon.killed = icon.hasData and state.slots[bossIndex] == true
         if icon.killed then
           -- Match the raid rows elsewhere in AlterEgo: difficulty color when
@@ -1069,6 +1102,7 @@ local BOSS_ACHIEVEMENT_IDS = {
   thecoiledaltar = 63529,
   ulatek = 63476,
   nymrissawavecaller = 63682,
+  kithix = 63692,
 }
 
 local function normalizeBossName(name)
@@ -1262,10 +1296,11 @@ function Module:ShowInstanceAlert(raid, difficultyID)
   local difficultyColor = difficulty and difficulty.color or WHITE_FONT_COLOR
   window.subtitle:SetText(format("%s   ·   %s", raid.name or RAID, difficultyColor:WrapTextInColorCode(difficultyName)))
 
+  local bossLabel = total == 1 and "boss" or "bosses"
   if isSaved then
-    window.footer:SetText(format("Saved on %d out of %d %s.", killed, total, total == 1 and "boss" or "bosses"))
+    window.footer:SetText(format("Saved (%d/%d %s)", killed, total, bossLabel))
   else
-    window.footer:SetText(format("Unsaved on all %d %s.", total, total == 1 and "boss" or "bosses"))
+    window.footer:SetText(format("Not saved (0/%d %s)", total, bossLabel))
   end
 
   for _, line in ipairs(alertLines) do line:Hide() end

@@ -12,6 +12,8 @@ Data.raids = {
   {seasonID = 17, seasonDisplayID = 1, instanceID = 1592, journalInstanceID = 1305, order = 4, numEncounters = 1, encounters = {}, loot = {}, modifiedInstanceInfo = nil, abbr = "SF",  name = "Sporefall"},
   {seasonID = 18, seasonDisplayID = 2, instanceID = 2987, journalInstanceID = 1317, order = 2, numEncounters = 1, encounters = {}, loot = {}, modifiedInstanceInfo = nil, abbr = "TG",  name = "The Tidebound Grotto"},
   {seasonID = 18, seasonDisplayID = 2, instanceID = 3004, journalInstanceID = 1320, order = 1, numEncounters = 8, encounters = {}, loot = {}, modifiedInstanceInfo = nil, abbr = "VA",  name = "The Venomous Abyss"},
+  -- Journal ID is resolved by the live Encounter Journal. Keep the boss last, after Nymrissa.
+  {seasonID = 18, seasonDisplayID = 2, instanceID = 3095, journalInstanceID = nil, order = 3, numEncounters = 1, encounters = {}, loot = {}, modifiedInstanceInfo = nil, abbr = "KX", name = "The Unbinding of Kith'ix"},
 }
 
 ---@type AE_RaidDifficulty[]
