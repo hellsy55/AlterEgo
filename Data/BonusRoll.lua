@@ -58,6 +58,9 @@ Data.bonusRollSources = {
   -- The Tidebound Grotto (journalInstanceID 1317)
   [274708] = {kind = "raid", journalInstanceID = 1317, bossName = "Nymrissa Wavecaller", order = 1},
 
+  -- The Unbinding of Kith'ix (instanceID 3095; stable grouping key shared with dynamically detected sources)
+  [286019] = {kind = "raid", journalInstanceID = -3095, bossName = "Kith'ix", order = 1, kithix = true},
+
   -- Dungeons (journalInstanceID from Data/MythicPlus.lua)
   [279618] = {kind = "dungeon", journalInstanceID = 1322}, -- Altar of Fangs
   [279619] = {kind = "dungeon", journalInstanceID = 1309}, -- The Blinding Vale

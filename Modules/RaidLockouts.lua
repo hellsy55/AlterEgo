@@ -335,6 +335,11 @@ local function buildRows(selectedDifficulties, sortColumn, sortAscending)
   end
 
   table.sort(rows, function(a, b)
+    -- Keep the local player first regardless of the selected sort column or direction.
+    if a.member.isSelf ~= b.member.isSelf then
+      return a.member.isSelf
+    end
+
     local comparison
     if sortColumn == "character" then
       comparison = nameCompare(a, b)
@@ -917,13 +922,12 @@ function Module:EnsureRow(index)
           GameTooltip:SetOwner(button, "ANCHOR_TOP")
           GameTooltip:SetText(boss.name or "?", 1, 1, 1)
           if boss.raid and boss.raid.name then
-            GameTooltip:AddLine(boss.raid.name, LIGHTGRAY_FONT_COLOR.r, LIGHTGRAY_FONT_COLOR.g, LIGHTGRAY_FONT_COLOR.b)
+            GameTooltip:AddLine(boss.raid.name, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
           end
           local difficulty = difficultyInfo(button.difficultyID)
           if difficulty then
             GameTooltip:AddLine(format("Difficulty: %s", difficulty.name), difficulty.color.r, difficulty.color.g, difficulty.color.b)
           end
-          GameTooltip:AddLine(" ")
           if button.hasData then
             if button.killed then
               GameTooltip:AddLine("Killed this week", RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
