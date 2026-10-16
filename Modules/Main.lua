@@ -334,6 +334,29 @@ end
 -- Cleared as soon as it's acted on, or the popup is cancelled/dismissed
 -- without a password.
 local pendingSyncAction = nil
+local pendingSyncChannel = nil
+
+-- A first-time Sync setup must not replace the password dialog with the
+-- tutorial. Let the password (and any requested settings confirmation) finish
+-- before showing the guide, which the player may close or follow.
+local pendingSyncTutorialAfterSettings = false
+
+local function ShowFirstSyncTutorialAfterPassword()
+  if Data.db.global.sync.tutorialShown == true then return end
+  -- StaticPopup_OnClick hides its dialog after OnAccept returns. Open the
+  -- tutorial on the next frame so the two windows do not interfere.
+  C_Timer.After(0, function()
+    if Data.db.global.sync.tutorialShown ~= true then
+      Module:ShowSyncTutorial()
+    end
+  end)
+end
+
+local function FinishFirstSyncTutorialAfterSettings()
+  if not pendingSyncTutorialAfterSettings then return end
+  pendingSyncTutorialAfterSettings = false
+  ShowFirstSyncTutorialAfterPassword()
+end
 
 do
   local dialogName = "ALTEREGO_CONFIRM_RESET_TRACKER_ORDER"
@@ -433,6 +456,7 @@ do
           addon.Core:Print("Sync: password cleared -- Enable Sync turned off and Sync stopped immediately.")
         end
         pendingSyncAction = nil
+        pendingSyncChannel = nil
         return
       end
       -- A real password just got confirmed -- act on whatever Enable
@@ -447,16 +471,36 @@ do
       if Data.db.global.sync.enabled and addon.Core.AnnounceSyncPresence then
         addon.Core:AnnounceSyncPresence()
       end
+      if action == "onlyMaxLevel" and Data.db.global.sync.tutorialShown == true then
+        -- Preserve the selected toggle action when a returning user
+        -- needs to restore a password after previously seeing the guide.
+        Data.db.global.sync.onlyMaxLevelCharacters = not (Data.db.global.sync.onlyMaxLevelCharacters ~= false)
+        if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+      elseif action == "syncChannel" and pendingSyncChannel and Data.db.global.sync.tutorialShown == true then
+        Data.db.global.sync.channel = pendingSyncChannel
+        if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+      end
+      pendingSyncChannel = nil
       if action == "syncNow" then
         addon.Core:ForceSyncBroadcast()
       elseif action == "syncSettings" then
+        -- Do not cover the Share Settings confirmation with the tutorial.
+        -- Show it after that confirmation is accepted or declined instead.
+        pendingSyncTutorialAfterSettings = Data.db.global.sync.tutorialShown ~= true
         StaticPopup_Show("ALTEREGO_SYNC_SETTINGS")
+      end
+      if action == "tutorial" then
+        -- Manual Sync Tutorial must reopen even when the one-time guide
+        -- has already been seen; the password dialog closes first.
+        C_Timer.After(0, function() Module:ShowSyncTutorial() end)
+      elseif action ~= "syncSettings" then
+        ShowFirstSyncTutorialAfterPassword()
       end
     end,
     OnCancel = function()
-      -- Dismissed without confirming a password -- whatever Enable
-      -- Sync/Sync Now was waiting on doesn't happen.
+      -- Dismissed without a password: discard the pending action.
       pendingSyncAction = nil
+      pendingSyncChannel = nil
     end,
     EditBoxOnEnterPressed = function(self)
       -- Going through StaticPopup_OnClick (the same dispatcher Blizzard's
@@ -483,23 +527,19 @@ end
 -- moment PLAYER_REGEN_ENABLED fires, below.
 local pendingPasswordPopup = false
 
----Opens the Sync Password popup if (and only if) Sync doesn't have one
----set yet, remembering what to do once a real password is confirmed
----(see pendingSyncAction/OnAccept above). Shared by the Enable Sync
----checkbox and the Sync Now button below -- both are places where
----turning Sync on without a password would otherwise either do nothing
----or, worse, turn Sync on with no way to actually send/receive anything.
----Never pops the dialog up during combat -- the request is remembered
----instead, and honored as soon as combat actually ends.
----@param action "enable"|"syncNow"|"syncSettings"|nil What Enable Sync, Sync Now,
----or Sync Addon Settings was trying to do -- carried out once a password is confirmed.
----@return boolean hadPassword True if a password was already set (no
----popup was needed) -- the caller can go ahead and do `action` itself.
-local function RequestPasswordThen(action)
+---Make every Sync control request a password before proceeding when
+---none is configured. Deferred actions run only after a valid password is
+---confirmed; the tutorial still takes precedence on a true first use.
+---Never show the dialog during combat: defer it until combat ends.
+---@param action "enable"|"syncNow"|"syncSettings"|"onlyMaxLevel"|"syncChannel"|"syncChannelMenu"|"tutorial"|nil
+---@param channel string? Selected Sync Channel option, if any.
+---@return boolean hadPassword True when a password already exists.
+local function RequestPasswordThen(action, channel)
   local password = Data.db.global.sync.password
   if password and password ~= "" then return true end
   pendingSyncAction = action
-  addon.Core:Print("Sync: no password set -- set one to turn Sync on.")
+  pendingSyncChannel = channel
+  addon.Core:Print("Sync: no password set -- configure one to use Sync settings.")
   if InCombatLockdown() then
     pendingPasswordPopup = true
   else
@@ -525,6 +565,10 @@ do
     button2 = CANCEL,
     OnAccept = function()
       addon.Core:ShareSettings()
+      FinishFirstSyncTutorialAfterSettings()
+    end,
+    OnCancel = function()
+      FinishFirstSyncTutorialAfterSettings()
     end,
     timeout = 0,
     whileDead = 1,
@@ -1128,6 +1172,8 @@ local function HideSyncTutorial()
 end
 
 function Module:ShowSyncTutorial()
+  -- Opening the tutorial manually also counts as the one-time introduction.
+  Data.db.global.sync.tutorialShown = true
   if not syncTutorialFrame then
     -- Reuse LiqUI's own Window element so the tutorial inherits AlterEgo's standard titlebar,
     -- border, background, drag behavior, close button, and overall visual language.
@@ -1424,6 +1470,21 @@ function Module:ShowSyncTutorial()
   -- First open in each UI session defaults high on the screen. LiqUI then stores any
   -- user drag in our session-only table, so reopening remembers it until /reload/logout.
   ApplyDefaultSyncTutorialPosition(syncTutorialFrame)
+end
+
+---For settings that do not need a password, show the tutorial on the first
+---interaction and leave that setting unchanged until the next click.
+local function ShowFirstSyncTutorial()
+  if Data.db.global.sync.tutorialShown == true then return false end
+  Module:ShowSyncTutorial()
+  return true
+end
+
+---Actions that used to request a password must still do so on the first click.
+---Once a password exists, the normal first-time tutorial behavior applies.
+local function ShowFirstSyncTutorialIfPasswordReady()
+  local password = Data.db.global.sync.password
+  return password and password ~= "" and ShowFirstSyncTutorial() or false
 end
 
 
@@ -4083,6 +4144,7 @@ function Module:RenderNow()
               function() return Data.db.global.sync.enabled end,
               function()
                 if Data.db.global.sync.enabled then
+                  if ShowFirstSyncTutorial() then return MenuResponse.CloseAll end
                   Data.db.global.sync.enabled = false
                   addon.Core:ResetSyncBatchGuard()
                   addon.Core:Print("Sync: stopped. Nothing will be sent or received until you turn Enable Sync back on.")
@@ -4091,6 +4153,7 @@ function Module:RenderNow()
                   -- instead of looking off while Sync is already disabled.
                   return MenuResponse.Refresh
                 end
+                if ShowFirstSyncTutorialIfPasswordReady() then return MenuResponse.CloseAll end
                 -- Only actually turns on once a password is confirmed --
                 -- RequestPasswordThen enables it itself once that
                 -- happens (see its OnAccept) when one isn't set yet, and
@@ -4119,6 +4182,8 @@ function Module:RenderNow()
               "Only Sync Max Level Characters",
               function() return Data.db.global.sync.onlyMaxLevelCharacters ~= false end,
               function()
+                if not RequestPasswordThen("onlyMaxLevel") then return MenuResponse.CloseAll end
+                if ShowFirstSyncTutorial() then return MenuResponse.CloseAll end
                 Data.db.global.sync.onlyMaxLevelCharacters = not (Data.db.global.sync.onlyMaxLevelCharacters ~= false)
                 if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
                 return MenuResponse.Refresh
@@ -4134,6 +4199,8 @@ function Module:RenderNow()
             local setPasswordButton = menu:CreateButton(
               Data.db.global.sync.password ~= "" and ("Change Password: " .. Data.db.global.sync.password) or "Set Password",
               function()
+                -- Password setup has priority over the first-time tutorial.
+                -- Confirming a non-empty password shows the guide afterward.
                 StaticPopup_Show("ALTEREGO_SYNC_PASSWORD")
                 -- Force the whole settings menu closed here instead of
                 -- relying on the default post-click behavior -- the
@@ -4154,7 +4221,10 @@ function Module:RenderNow()
             local syncChannelNames = { BOTH = "Both", GUILD = "Guild", PARTY = "Party/Raid" }
             local syncChannelButton = menu:CreateButton(
               format("Sync Channel: %s", syncChannelNames[Data.db.global.sync.channel] or "Guild"),
-              function() end
+              function()
+                if not RequestPasswordThen("syncChannelMenu") then return MenuResponse.CloseAll end
+                if ShowFirstSyncTutorial() then return MenuResponse.CloseAll end
+              end
             )
             BindLiveMenuLabel(syncChannelButton)
             syncChannelButton:AddInitializer(function(button, description)
@@ -4173,6 +4243,8 @@ function Module:RenderNow()
                 option.text,
                 function(value) return (Data.db.global.sync.channel or "GUILD") == value end,
                 function(value)
+                  if not RequestPasswordThen("syncChannel", value) then return MenuResponse.CloseAll end
+                  if ShowFirstSyncTutorial() then return MenuResponse.CloseAll end
                   Data.db.global.sync.channel = value
                   if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
                   SetLiveMenuLabel(syncChannelButton, format("Sync Channel: %s", syncChannelNames[value] or "Guild"))
@@ -4184,6 +4256,7 @@ function Module:RenderNow()
             local syncNowButton = menu:CreateButton(
               "Sync Now",
               function()
+                if ShowFirstSyncTutorialIfPasswordReady() then return MenuResponse.CloseAll end
                 -- Clicking Sync Now is a clear enough intent to sync that
                 -- it turns Enable Sync on by itself -- but never without a
                 -- confirmed password: RequestPasswordThen only enables
@@ -4206,6 +4279,7 @@ function Module:RenderNow()
             local syncSettingsButton = menu:CreateButton(
               "Sync Addon Settings",
               function()
+                if ShowFirstSyncTutorialIfPasswordReady() then return MenuResponse.CloseAll end
                 -- Sharing addon settings uses Sync's transport too, so a
                 -- click here carries the same intent as Sync Now: make
                 -- sure a password exists and turn Enable Sync on before
@@ -4230,6 +4304,7 @@ function Module:RenderNow()
             local syncTutorialButton = menu:CreateButton(
               "Sync Tutorial",
               function()
+                if not RequestPasswordThen("tutorial") then return MenuResponse.CloseAll end
                 Module:ShowSyncTutorial()
                 return MenuResponse.CloseAll
               end

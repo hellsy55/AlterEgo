@@ -14,7 +14,7 @@ local TableFind = addon.Libs.LiqUI.Utils.TableFind
 local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
 local TableGet = addon.Libs.LiqUI.Utils.TableGet
 
-Data.dbVersion = 50
+Data.dbVersion = 51
 
 Data.defaultDB = {
   ---@type AE_Global
@@ -138,6 +138,7 @@ Data.defaultDB = {
     useRIOScoreColor = false,
     sync = {
       enabled = false,
+      tutorialShown = false, ---@type boolean Remember whether the one-time Sync tutorial has already been opened
       onlyMaxLevelCharacters = true,
       password = "",
       channel = "GUILD", ---@type "BOTH"|"GUILD"|"PARTY" Which distribution(s) to send on when more than one is available. "GUILD" (default) restricts sends to the guild channel; "PARTY" restricts to party/raid; "BOTH" sends on every channel that applies (see Comm.lua's GetUsableChannels).
@@ -1749,6 +1750,22 @@ function Data:MigrateDB()
           progress.worldVaultProgress = nil
           progress.worldVaultThreshold = nil
         end
+      end
+    end
+    -- Existing Sync users should not be treated as first-time users just
+    -- because older versions did not track whether the tutorial was shown.
+    -- A prior action that left all settings at their defaults is unknowable.
+    if self.db.global.dbVersion == 50 then
+      local sync = self.db.global.sync
+      if sync and (sync.enabled == true
+        or (sync.password or "") ~= ""
+        or sync.onlyMaxLevelCharacters == false
+        or (sync.channel or "GUILD") ~= "GUILD"
+        or (tonumber(sync.lastSuccessfulSyncAt) or 0) > 0
+        or (sync.lastSentRevision and next(sync.lastSentRevision))
+        or (sync.lastConfirmedRevision and next(sync.lastConfirmedRevision))
+        or (sync.passwordAccounts and next(sync.passwordAccounts))) then
+        sync.tutorialShown = true
       end
     end
     self.db.global.dbVersion = self.db.global.dbVersion + 1
