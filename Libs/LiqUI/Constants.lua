@@ -24,6 +24,7 @@ local colors = {
   grayMuted = CreateColorFromHexString("FF999999"),
   grayDark = CreateColorFromHexString("FF2E2E33"),
   grayDarker = CreateColorFromHexString("FF232B31"),
+  grayDisabled = CreateColorFromHexString("FF202024"),
   grayBorder = CreateColorFromHexString("FF595966"),
   grayBorderLight = CreateColorFromHexString("FF73737F"),
   grayHover = CreateColorFromHexString("FF474752"),
@@ -54,9 +55,11 @@ Constants.control = {
   backgroundColor = colors.grayDark,
   backgroundColorHover = colors.grayHover,
   backgroundColorPressed = colors.grayDarker,
+  backgroundColorDisabled = colors.grayDisabled,
   borderColor = colors.grayLight,
   borderColorHighlight = colors.white,
   borderColorFocus = colors.blueFocus,
+  borderColorDisabled = colors.grayBorder,
   backdrop = {
     bgFile = defaultBackdropTexture,
     edgeFile = defaultBackdropTexture,
@@ -81,6 +84,18 @@ Constants.control = {
   buttonWidth = 120,
   dropdownWidth = 180,
   editBoxTextPaddingH = 6,
+}
+
+Constants.button = {
+  backgroundColor = colors.white10,
+  backgroundColorHover = colors.white20,
+  backgroundColorPressed = colors.white05,
+  backgroundColorDisabled = colors.white05,
+  borderColor = colors.white20,
+  borderColorHighlight = colors.white30,
+  borderColorDisabled = colors.white10,
+  padding = 8,
+  height = 24,
 }
 
 Constants.primary = {
@@ -170,4 +185,10 @@ Constants.settings = {
     rowSpacingAfterHeader = 4,
     rowSpacingAfterDescription = 10,
   },
+}
+
+---@enum LiqUI_InventorySlotSideId
+Constants.inventorySlotSides = {
+  LEFT = "LEFT",
+  RIGHT = "RIGHT",
 }

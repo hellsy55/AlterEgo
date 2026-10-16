@@ -8,15 +8,15 @@ addon.Module_Main = Module
 local Data = addon.Data
 local Helpers = addon.Helpers
 local Constants = addon.Constants
-local LibLiqUI = addon.Libs.LiqUI
-local SetBackgroundColor = LibLiqUI.Utils.SetBackgroundColor
-local SetHighlightColor = LibLiqUI.Utils.SetHighlightColor
-local TableCount = LibLiqUI.Utils.TableCount
-local TableFilter = LibLiqUI.Utils.TableFilter
-local TableFind = LibLiqUI.Utils.TableFind
-local TableForEach = LibLiqUI.Utils.TableForEach
-local TableGet = LibLiqUI.Utils.TableGet
-local CreateScrollArea = LibLiqUI.Utils.CreateScrollArea
+local LiqUI = addon.Libs.LiqUI
+local SetBackgroundColor = LiqUI.Utils.SetBackgroundColor
+local SetHighlightColor = LiqUI.Utils.SetHighlightColor
+local TableCount = LiqUI.Utils.TableCount
+local TableFilter = LiqUI.Utils.TableFilter
+local TableFind = LiqUI.Utils.TableFind
+local TableForEach = LiqUI.Utils.TableForEach
+local TableGet = LiqUI.Utils.TableGet
+local CreateScrollArea = LiqUI.Utils.CreateScrollArea
 
 -- Keep the Currencies Show Icons option conditional when that section has no
 -- icon-capable rows. Weeklies and Seasonal Chores always expose their toggle
@@ -76,7 +76,7 @@ local function EnsureNebulousVoidcoreAlertWindow()
   local point, relativePoint, defaultX, defaultY = GetNebulousVoidcoreAlertDefaultPoint()
   storage.point = {point, relativePoint, defaultX, defaultY}
 
-  local window = LibLiqUI:NewElement("Window", {
+  local window = LiqUI:NewElement("Window", {
     name = addon.name .. "NebulousVoidcoreAlert",
     title = "Nebulous Voidcore",
     width = 440,
@@ -1177,7 +1177,7 @@ function Module:ShowSyncTutorial()
   if not syncTutorialFrame then
     -- Reuse LiqUI's own Window element so the tutorial inherits AlterEgo's standard titlebar,
     -- border, background, drag behavior, close button, and overall visual language.
-    local frame = LibLiqUI:NewElement("Window", {
+    local frame = LiqUI:NewElement("Window", {
       name = addon.name .. "SyncTutorial",
       title = "Multi-Account Sync Tutorial",
       icon = Constants.media.LogoTransparent,
@@ -1602,7 +1602,7 @@ local function getMythicPlusVaultItemLevel(keystoneLevel)
   if type(keystoneLevel) ~= "number" or keystoneLevel < vaultMythicPlusMinLevel then
     return nil
   end
-  local seasonID = Data:GetCurrentSeason()
+  local seasonID = LiqUI.Data:GetCurrentSeason()
   local levels = Data.mythicPlusVaultItemLevels[seasonID]
   if not levels then
     return nil
@@ -1633,7 +1633,7 @@ end
 local function getVaultProgressTooltip(infoFrame, character, activityType)
   local loggedCharacter = Data:GetCharacter()
   local difficulties = Data:GetRaidDifficulties(true)
-  local dungeons = Data:GetDungeons()
+  local dungeons = LiqUI.Data:GetDungeons()
   local raids = Data:GetRaids()
   local activities = TableFilter(character.vault.slots or {}, function(activity) return activity.type and activity.type == activityType end)
   local numActivities = TableCount(activities)
@@ -1976,8 +1976,9 @@ end
 ---@param unfiltered boolean?
 ---@return AE_CharacterRows[]
 function Module:GetCharacterInfo(unfiltered)
-  local dungeons = Data:GetDungeons()
-  local _, seasonDisplayID = Data:GetCurrentSeason()
+  local dungeons = LiqUI.Data:GetDungeons()
+  local _, seasonDisplayID = LiqUI.Data:GetCurrentSeason()
+  ---@type AE_Module_Equipment|nil
   local equipmentModule = addon.Core:GetModule("Equipment", true)
   local bonusRollModule = addon.Core:GetModule("BonusRoll", true)
   local vaultPreviewModule = addon.Core:GetModule("VaultPreview", true)
@@ -3353,7 +3354,7 @@ end
 function Module:RenderNow()
   if not self.window then
     local windows = Data.db.global.liqui.windows
-    self.window = LibLiqUI:NewElement("Window", {
+    self.window = LiqUI:NewElement("Window", {
       name = addon.name .. "Main",
       storage = windows.Main,
       title = addon.name,
@@ -4807,7 +4808,7 @@ function Module:RenderNow()
   local mainWindowSettings = Data.db.global.liqui.windows.Main
   local windowScalePercent = self.window and self.window:GetWindowScale() or mainWindowSettings.scale or 100
   local windowScale = math.max(windowScalePercent / 100, 0.01)
-  local windowWidthMax = LibLiqUI.Utils.GetMaxWindowWidth()
+  local windowWidthMax = LiqUI.Utils.GetMaxWindowWidth()
   if windowScale > 1 then
     -- Horizontal character scrolling is always available. Window dimensions are
     -- stored in unscaled UI units, so tighten the viewport whenever scaling would
@@ -4906,7 +4907,7 @@ function Module:RenderNow()
         end)
         affixFrame:SetScript("OnClick", function()
           if not weeklyAffixesModule then return end
-          local affixesWindow = LibLiqUI:GetElement("Window", addon.name .. "Affixes")
+          local affixesWindow = LiqUI:GetElement("Window", addon.name .. "Affixes")
           if affixesWindow then
             affixesWindow:Toggle()
             if affixesWindow:IsVisible() then
@@ -6304,7 +6305,7 @@ function Module:RenderNow()
           totalHeight = totalHeight + RAIDS_ROW_HEIGHT
 
           -- Get all raid encounters
-          ---@type AE_Encounter[]
+          ---@type LiqUI_Encounter[]
           local encounters = {}
           local numEncounters = 0
           TableForEach(raids or {}, function(raid, raidIndex)

@@ -21,5 +21,5 @@ Consumer addons pin this repository under `.pkgmeta` `externals` with a `tag` or
 
 ## Code
 
-- Lua 5.1 — follow `.editorconfig` and `.luarc.json`
+- Lua 5.1 — follow `.editorconfig` and `.wowluarc.json`
 - Open issues and pull requests on GitHub

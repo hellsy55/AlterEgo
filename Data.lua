@@ -7,12 +7,13 @@ addon.Data = Data
 
 local Constants = addon.Constants
 local LibAceDB = addon.Libs.AceDB
-local TableCopy = addon.Libs.LiqUI.Utils.TableCopy
-local TableCount = addon.Libs.LiqUI.Utils.TableCount
-local TableFilter = addon.Libs.LiqUI.Utils.TableFilter
-local TableFind = addon.Libs.LiqUI.Utils.TableFind
-local TableForEach = addon.Libs.LiqUI.Utils.TableForEach
-local TableGet = addon.Libs.LiqUI.Utils.TableGet
+local LiqUI = addon.Libs.LiqUI
+local TableCopy = LiqUI.Utils.TableCopy
+local TableCount = LiqUI.Utils.TableCount
+local TableFilter = LiqUI.Utils.TableFilter
+local TableFind = LiqUI.Utils.TableFind
+local TableForEach = LiqUI.Utils.TableForEach
+local TableGet = LiqUI.Utils.TableGet
 
 Data.dbVersion = 51
 
@@ -241,12 +242,8 @@ Data.defaultCharacter = {
 
 ---@type AE_Cache
 Data.cache = {
-  seasonID = nil,
-  seasonDisplayID = nil,
   ---@type MythicPlusKeystoneAffix[]
   currentAffixes = {},
-  classes = {},
-  specs = {},
 }
 
 ---Initiate AceDB
@@ -282,29 +279,42 @@ end
 ---Get the current Season IDs
 ---@return number, number
 function Data:GetCurrentSeason()
-  if self.cache.seasonID and self.cache.seasonID > 0 and self.cache.seasonDisplayID and self.cache.seasonDisplayID > 0 then
-    return self.cache.seasonID, self.cache.seasonDisplayID
-  end
+  return LiqUI.Data:GetCurrentSeason()
+end
 
-  local seasonID = C_MythicPlus.GetCurrentSeason() or -1
-  local seasonDisplayID = C_MythicPlus.GetCurrentUIDisplaySeason() or -1
-  if seasonID <= 0 or seasonDisplayID <= 0 then
-    return -1, -1
-  end
+---Keep the fork's consumers on the shared dungeon catalog.
+---@return LiqUI_Dungeon[]
+function Data:GetDungeons()
+  return LiqUI.Data:GetDungeons()
+end
 
-  local season = TableGet(self.seasons, "seasonID", seasonID)
-  local currentExpansionLevel = GetExpansionLevel()
-  if season and currentExpansionLevel and season.expansionID < currentExpansionLevel then
-    local nextSeason = TableGet(self.seasons, "expansionID", currentExpansionLevel)
-    if nextSeason then
-      seasonID = nextSeason.seasonID
-      seasonDisplayID = nextSeason.seasonDisplayID
+---Expose the shared raid catalog with this fork's ordering and abbreviations.
+---@return LiqUI_Raid[]
+function Data:GetRaidCatalog()
+  local raids = {}
+  local seasonTwoOrder = {[3004] = 1, [2987] = 2, [3095] = 3}
+  for _, raid in ipairs(LiqUI.Data.raids) do
+    local entry = raid
+    if raid.seasonID == 18 and seasonTwoOrder[raid.instanceID] then
+      entry = {}
+      for key, value in pairs(raid) do entry[key] = value end
+      entry.order = seasonTwoOrder[raid.instanceID]
+      if raid.instanceID == 3095 then entry.abbr = "KX" end
     end
+    raids[#raids + 1] = entry
   end
+  return raids
+end
 
-  self.cache.seasonID = seasonID
-  self.cache.seasonDisplayID = seasonDisplayID
-  return seasonID, seasonDisplayID
+---Preserve the Raid Lockouts boss order without changing the shared catalog.
+---@return LiqUI_Raid[]
+function Data:GetRaids()
+  local seasonID = self:GetCurrentSeason()
+  local raids = TableFilter(self:GetRaidCatalog(), function(raid)
+    return raid.seasonID == seasonID
+  end)
+  table.sort(raids, function(first, second) return first.order < second.order end)
+  return raids
 end
 
 ---Only treat the Season 2 crest acquisition cap as lifted after the REAL
@@ -329,7 +339,7 @@ end
 ---@return AE_CurrencyInfo[]
 function Data:GetCurrencies()
   local currencies = {}
-  local seasonID = self:GetCurrentSeason()
+  local seasonID = LiqUI.Data:GetCurrentSeason()
   TableForEach(self.currencies, function(currency)
     if currency.seasonID ~= nil and currency.seasonID ~= seasonID then
       return
@@ -1134,7 +1144,7 @@ end
 ---@param unfiltered boolean?
 ---@return AE_PreyDifficulty[]
 function Data:GetPreyDifficulties(unfiltered)
-  local seasonID = self:GetCurrentSeason()
+  local seasonID = LiqUI.Data:GetCurrentSeason()
   local result = {}
   for _, difficulty in pairs(self.preyDifficulties) do
     if difficulty.seasonID == seasonID then
@@ -1171,31 +1181,18 @@ function Data:GetPreyQuests(unfiltered)
   return result
 end
 
----Get all of the raids in the current season
+---Get raid difficulties, optionally including ones hidden in settings
 ---@param unfiltered boolean?
----@return AE_RaidDifficulty[]
+---@return LiqUI_RaidDifficulty[]
 function Data:GetRaidDifficulties(unfiltered)
-  local result = {}
-  for _, difficulty in pairs(self.raidDifficulties) do
-    table.insert(result, difficulty)
-  end
-
-  table.sort(result, function(a, b)
-    return a.order < b.order
-  end)
-
+  local difficulties = LiqUI.Data:GetRaidDifficulties()
   if unfiltered then
-    return result
+    return difficulties
   end
-
-  local filtered = {}
-  for _, difficulty in ipairs(result) do
-    if self.db.global.raids.hiddenDifficulties and not self.db.global.raids.hiddenDifficulties[difficulty.id] then
-      table.insert(filtered, difficulty)
-    end
-  end
-
-  return filtered
+  local hiddenDifficulties = self.db.global.raids.hiddenDifficulties
+  return TableFilter(difficulties, function(difficulty)
+    return hiddenDifficulties and not hiddenDifficulties[difficulty.id]
+  end)
 end
 
 ---Get the current affixes of the week
@@ -1222,7 +1219,7 @@ end
 ---Get affix rotation of the current season
 ---@return AE_AffixRotation|nil
 function Data:GetAffixRotation()
-  local seasonID = self:GetCurrentSeason()
+  local seasonID = LiqUI.Data:GetCurrentSeason()
   return TableGet(self.affixRotations, "seasonID", seasonID)
 end
 
@@ -1251,7 +1248,7 @@ end
 ---Get the Keystone ItemID of the current season
 ---@return number|nil
 function Data:GetKeystoneItemID()
-  local seasonID = self:GetCurrentSeason()
+  local seasonID = LiqUI.Data:GetCurrentSeason()
   local keystone = TableGet(self.keystones, "seasonID", seasonID)
 
   if keystone ~= nil then
@@ -1261,36 +1258,6 @@ function Data:GetKeystoneItemID()
   return nil
 end
 
----Get dungeons for the current season
----@return AE_Dungeon[]
-function Data:GetDungeons()
-  local seasonID = self:GetCurrentSeason()
-  local dungeons = TableFilter(self.dungeons, function(dataDungeon)
-    return dataDungeon.seasonID == seasonID
-  end)
-
-  table.sort(dungeons, function(a, b)
-    return strcmputf8i(a.name, b.name) < 0
-  end)
-
-  return dungeons
-end
-
----Get all of the raids in the current season
----@param unfiltered boolean?
----@return AE_Raid[]
-function Data:GetRaids(unfiltered)
-  local seasonID = self:GetCurrentSeason()
-  local raids = TableFilter(self.raids, function(dataRaid)
-    return dataRaid.seasonID == seasonID
-  end)
-
-  table.sort(raids, function(a, b)
-    return a.order < b.order
-  end)
-
-  return raids
-end
 
 ---Set a new character order
 ---@param character AE_Character
@@ -1434,6 +1401,7 @@ end
 
 ---Run database migrations when dbVersion changes
 function Data:MigrateDB()
+  ---@diagnostic disable: undefined-field, inject-field
   if type(self.db.global.dbVersion) ~= "number" then
     self.db.global.dbVersion = self.dbVersion
   end
@@ -1771,6 +1739,7 @@ function Data:MigrateDB()
     self.db.global.dbVersion = self.db.global.dbVersion + 1
     self:MigrateDB()
   end
+  ---@diagnostic enable: undefined-field, inject-field
 end
 
 ---Two WoW accounts can calculate the same regional weekly reset a few seconds
@@ -1867,7 +1836,7 @@ end
 
 ---Perform season reset tasks
 function Data:TaskSeasonReset()
-  local seasonID = self:GetCurrentSeason()
+  local seasonID = LiqUI.Data:GetCurrentSeason()
   if seasonID then
     TableForEach(self.db.global.characters, function(character)
       if character.currentSeason == nil or character.currentSeason < seasonID then
@@ -1910,11 +1879,17 @@ local function loadEncounters(entry)
     local name, description, journalEncounterID, journalEncounterSectionID, journalLink,
       encounterJournalInstanceID, instanceEncounterID, instanceID = EJ_GetEncounterInfoByIndex(encounterIndex, journalInstanceID)
     if not journalEncounterID then break end
-    ---@type AE_Encounter
+    local iconImage
+    if EJ_SelectEncounter and EJ_GetCreatureInfo then
+      EJ_SelectEncounter(journalEncounterID)
+      iconImage = select(5, EJ_GetCreatureInfo(1))
+    end
+    ---@type LiqUI_Encounter
     entry.encounters[encounterIndex] = {
       index = encounterIndex,
       name = name,
       description = description,
+      iconImage = iconImage,
       journalInstanceID = encounterJournalInstanceID,
       journalEncounterID = journalEncounterID,
       journalEncounterSectionID = journalEncounterSectionID,
@@ -1942,14 +1917,14 @@ function Data:loadGameData(onComplete)
   local seasonID = self:GetCurrentSeason()
   local pending = {}
 
-  for _, raid in pairs(self.raids) do
+  for _, raid in ipairs(self:GetRaids()) do
     if raid.seasonID == seasonID then
       raid.modifiedInstanceInfo = C_ModifiedInstance.GetModifiedInstanceInfoFromMapID(raid.instanceID)
       pending[#pending + 1] = raid
     end
   end
 
-  for _, dungeon in pairs(self.dungeons) do
+  for _, dungeon in ipairs(self:GetDungeons()) do
     if dungeon.seasonID == seasonID then
       local dungeonName, _, dungeonTimeLimit, dungeonTexture = C_ChallengeMode.GetMapUIInfo(dungeon.challengeModeID)
       dungeon.name = dungeonName
@@ -2433,7 +2408,7 @@ end
 function Data:UpdateCurrencies()
   local character = self:GetCharacter()
   if not character then return end
-  local seasonID = self:GetCurrentSeason()
+  local seasonID = LiqUI.Data:GetCurrentSeason()
   local oldCurrencies = character.currencies or {}
   local oldTrackingVersion = character.alterEgoTrackingVersion
   local oldKillResetAt = character.labyrinth and character.labyrinth.killResetAt
@@ -2993,7 +2968,7 @@ function Data:UpdateEquipment()
   upgradePattern = upgradePattern:gsub("%%d", "%%s")
   upgradePattern = upgradePattern:format("(.+)", "(%d+)", "(%d+)")
 
-  TableForEach(self.inventory or {}, function(slot)
+  TableForEach(LiqUI.Data:GetInventorySlots(), function(slot)
     local inventoryItemLink = GetInventoryItemLink("player", slot.id)
     if not inventoryItemLink then return end
 
@@ -3093,7 +3068,7 @@ function Data:UpdateEquipment()
       embellishmentItemID = embellishmentInfo.itemID,
       embellishmentTooltipLink = embellishmentInfo.tooltipItemLink,
       itemSlotID = slot.id,
-      itemSlotName = slot.name,
+      itemSlotName = slot.token,
     }
     table.insert(character.equipment, equipment)
   end)
@@ -3108,7 +3083,7 @@ local function isKeystoneAnnounceBlocked()
 end
 
 ---@param itemLink string?
----@param dungeon AE_Dungeon?
+---@param dungeon LiqUI_Dungeon?
 ---@param keystoneLevel number?
 local function sendNewKeystoneAnnounce(itemLink, dungeon, keystoneLevel)
   if isKeystoneAnnounceBlocked() then
@@ -3150,7 +3125,7 @@ function Data:FlushPendingKeystoneAnnounce()
     return
   end
   local keystone = character.mythicplus.keystone
-  local dungeons = self:GetDungeons()
+  local dungeons = LiqUI.Data:GetDungeons()
   local dungeon = TableGet(dungeons, "challengeModeID", keystone.challengeModeID) or TableGet(dungeons, "mapId", keystone.mapId)
   sendNewKeystoneAnnounce(keystone.itemLink, dungeon, keystone.level)
 end
@@ -3159,7 +3134,7 @@ end
 function Data:UpdateKeystoneItem()
   local character = self:GetCharacter()
   if not character then return end
-  local dungeons = self:GetDungeons()
+  local dungeons = LiqUI.Data:GetDungeons()
   local seasonKeystoneItemID = self:GetKeystoneItemID()
   local characterKeystoneMapID = character.mythicplus.keystone.mapId
   local characterKeystoneLevel = character.mythicplus.keystone.level
@@ -3482,7 +3457,7 @@ function Data:UpdateMythicPlus()
   local character = self:GetCharacter()
   if not character then return end
 
-  local dungeons = self:GetDungeons()
+  local dungeons = LiqUI.Data:GetDungeons()
   local ratingSummary = C_PlayerInfo.GetPlayerMythicPlusRatingSummary("player")
   local runHistory = C_MythicPlus.GetRunHistory(true, true)
   local bestSeasonScore, bestSeasonNumber = C_MythicPlus.GetSeasonBestMythicRatingFromThisExpansion()
@@ -3541,52 +3516,3 @@ function Data:UpdateMythicPlus()
   addon.Core:Render()
   self:MarkCharacterSyncChanged(character)
 end
-
--- function Data:GetClasses()
---   if TableCount(Data.cache.classes) > 0 then
---     return Data.cache.classes
---   end
-
---   for classID = 1, GetNumClasses() do
---     local className, classFile = GetClassInfo(classID)
---     if className then
---       table.insert(Data.cache.classes, {
---         ID = classID,
---         name = className,
---         file = classFile,
---         numSpecs = GetNumSpecializationsForClassID(classID)
---       })
---     end
---   end
-
---   return Data.cache.classes
--- end
-
--- function Data:GetSpecs()
---   if TableCount(Data.cache.specs) > 0 then
---     return Data.cache.specs
---   end
-
---   local classes = Data:GetClasses()
---   TableForEach(classes, function(cls)
---     for specIndex = 1, GetNumSpecializationsForClassID(cls.ID) do
---       local specID, name, description, icon, role, isRecommended, isAllowed = GetSpecializationInfoForClassID(cls.ID, specIndex)
---       if specID then
---         table.insert(Data.cache.specs, {
---           ID = specID,
---           name = name,
---           description = description,
---           icon = icon,
---           role = role,
---           isRecommended = isRecommended,
---           isAllowed = isAllowed,
---           classID = cls.ID,
---           className = cls.name,
---           classFile = cls.file
---         })
---       end
---     end
---   end)
-
---   return Data.cache.specs
--- end

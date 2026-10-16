@@ -4,11 +4,15 @@ if not LiqUI then
   return
 end
 
----@class LiqUI_Utils
-local Utils = {}
-LiqUI.Utils = Utils
+LiqUI.Utils = LiqUI.Utils or {}
 
----Merge defaults with options; ensure parent (default UIParent).
+---@class LiqUI_Utils
+local Utils = LiqUI.Utils
+
+---@generic T
+---@param defaults T?
+---@param options T?
+---@return T
 function Utils.PrepareOptions(defaults, options)
   local opts = Utils.MergeDeep(defaults or {parent = UIParent}, options or {})
   opts.parent = opts.parent or UIParent
@@ -20,7 +24,10 @@ function Utils.GetMaxWindowWidth()
   return GetScreenWidth() - LiqUI.Constants.layout.sizes.maxWindowWidthMargin
 end
 
----Create a font string with theme text color. anchor: { point, relativeTo, relativePoint, x, y }.
+---@param parent Frame
+---@param text string?
+---@param anchor LiqUI_LabelAnchor?
+---@return FontString
 function Utils.CreateLabel(parent, text, anchor)
   local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
   if anchor then
@@ -31,11 +38,10 @@ function Utils.CreateLabel(parent, text, anchor)
   return fs
 end
 
----Find a table item by callback
----@generic T
----@param tbl table<any, T>
----@param callback fun(value: T, index: any): boolean
----@return T|nil, any
+---@generic K, V
+---@param tbl table<K, V>
+---@param callback fun(value: V, index: K): boolean
+---@return V|nil, K
 function Utils.TableFind(tbl, callback)
   assert(type(tbl) == "table", "Must be a table!")
   for i, v in pairs(tbl) do
@@ -46,7 +52,6 @@ function Utils.TableFind(tbl, callback)
   return nil, nil
 end
 
----Find a table item by key and value
 ---@generic T
 ---@param tbl table<any, T>
 ---@param key string
@@ -61,11 +66,10 @@ function Utils.TableGet(tbl, key, val)
   end)
 end
 
----Create a new table containing all elements that pass truth test
----@generic T
----@param tbl table<any, T>
----@param callback fun(value: T, index: any): boolean
----@return T[]
+---@generic K, V
+---@param tbl table<K, V>
+---@param callback fun(value: V, index: K): boolean
+---@return V[]
 function Utils.TableFilter(tbl, callback)
   assert(type(tbl) == "table", "Must be a table!")
   local t = {}
@@ -77,8 +81,7 @@ function Utils.TableFilter(tbl, callback)
   return t
 end
 
----Count table items
----@param tbl table<any, any>
+---@param tbl table
 ---@return number
 function Utils.TableCount(tbl)
   assert(type(tbl) == "table", "Must be a table!")
@@ -89,7 +92,6 @@ function Utils.TableCount(tbl)
   return n
 end
 
----Deep merge overlay into base. Nested tables are merged recursively; overlay values override base. Returns new table.
 ---@param base table
 ---@param overlay table
 ---@return table
@@ -105,7 +107,6 @@ function Utils.MergeDeep(base, overlay)
   return result
 end
 
----Deep copy a table
 ---@generic T
 ---@param tbl table<any, T>
 ---@param cache table?
@@ -125,11 +126,10 @@ function Utils.TableCopy(tbl, cache)
   return t
 end
 
----Map each item in a table
----@generic T, V
----@param tbl table<any, T>
----@param callback fun(value: T, index: any): V, any?
----@return table<any, V>
+---@generic K, T, V
+---@param tbl table<K, T>
+---@param callback fun(value: T, index: K): V, K?
+---@return table<K, V>
 function Utils.TableMap(tbl, callback)
   assert(type(tbl) == "table", "Must be a table!")
   local t = {}
@@ -140,11 +140,10 @@ function Utils.TableMap(tbl, callback)
   return t
 end
 
----Run a callback on each table item
----@generic T
----@param tbl table<any, T>
----@param callback fun(value: T, index: any)
----@return table<any, T>
+---@generic K, V
+---@param tbl table<K, V>
+---@param callback fun(value: V, index: K)
+---@return table<K, V>
 function Utils.TableForEach(tbl, callback)
   assert(type(tbl) == "table", "Must be a table!")
   for ik, iv in pairs(tbl) do
@@ -153,9 +152,8 @@ function Utils.TableForEach(tbl, callback)
   return tbl
 end
 
----Iterate table keys sorted by optional order field (AceConfig-style). Yields key.
 ---@param tbl table
----@return fun(): string?, any
+---@return fun(): any
 function Utils.SortedPairs(tbl)
   local keys = {}
   for k in pairs(tbl) do
@@ -176,16 +174,18 @@ function Utils.SortedPairs(tbl)
   end
 end
 
----Highlight mixin: overlay for hover/selection. Use Mixin(frame, LiqUI.Mixins.Highlight).
----Call SetVertexColor(r,g,b,a) then ShowHighlight() / HideHighlight(); does not override frame Show/Hide.
----@class LiqUI_HighlightMixin
----@type LiqUI_Mixins
+---Does not override frame Show/Hide.
+---@class LiqUI_Mixins
 local Mixins = {}
 LiqUI.Mixins = Mixins
----@type LiqUI_HighlightMixin
+---@class LiqUI_HighlightMixin
 local Highlight = {}
 Mixins.Highlight = Highlight
 
+---@param r number?
+---@param g number?
+---@param b number?
+---@param a number?
 function Highlight:SetHighlightColor(r, g, b, a)
   if not self.Highlight then
     self.Highlight = self:CreateTexture("Highlight", "OVERLAY")
@@ -200,13 +200,19 @@ function Highlight:SetHighlightColor(r, g, b, a)
   self.Highlight:SetVertexColor(r, g, b, a)
 end
 
+---@param r number?
+---@param g number?
+---@param b number?
+---@param a number?
 function Highlight:ShowHighlight(r, g, b, a)
   if not self.Highlight then
     self:SetHighlightColor(r, g, b, a)
   elseif r then
     self:SetHighlightColor(r, g, b, a)
   end
-  self.Highlight:Show()
+  if self.Highlight then
+    self.Highlight:Show()
+  end
 end
 
 function Highlight:HideHighlight()
@@ -232,9 +238,10 @@ function Utils.SetBackgroundColor(parent, r, g, b, a)
     r, g, b, a = r.r, r.g, r.b, r.a
   end
 
-  if type(r) == "nil" then
-    r, g, b, a = 0, 0, 0, 0.1
-  end
+  r = r or 0
+  g = g or 0
+  b = b or 0
+  a = a or 0.1
 
   parent.Background:SetVertexColor(r, g, b, a)
 end
@@ -270,7 +277,6 @@ function Utils.SetHighlightColor(parent, r, g, b, a)
   parent.Highlight:SetVertexColor(r, g, b, a)
 end
 
----Merge two table arrays
 ---@generic T
 ---@param tbl1 T[]
 ---@param tbl2 T[]
@@ -289,7 +295,6 @@ function Utils.TableMerge(tbl1, tbl2, preserveKeys)
   return tbl1
 end
 
----Check if a table contains a specific value
 ---@generic T
 ---@param tbl T[]
 ---@param value T
@@ -304,7 +309,6 @@ function Utils.TableContains(tbl, value)
   return false
 end
 
----Toggle a value in a table
 ---@generic T
 ---@param tbl T[]
 ---@param value T
@@ -318,7 +322,6 @@ function Utils.TableToggle(tbl, value)
   return Utils.TableMerge(tbl, {value})
 end
 
----Remove duplicates from a table
 ---@generic T
 ---@param tbl T[]
 ---@return T[]
@@ -422,7 +425,7 @@ local function styleScrollBarThumb(thumb, crossAxisSize, isHorizontal)
   end
 end
 
----@param scrollBar EventFrame
+---@param scrollBar MinimalScrollBar
 function Utils.StyleVerticalScrollBar(scrollBar)
   local scrollbarThickness = LiqUI.Constants.layout.sizes.scrollbar.thickness
   scrollBar:SetWidth(scrollbarThickness)
@@ -434,7 +437,7 @@ function Utils.StyleVerticalScrollBar(scrollBar)
   styleScrollBarThumb(scrollBar:GetThumb(), scrollbarThickness, false)
 end
 
----@param scrollBar EventFrame
+---@param scrollBar EventFrame & WowTrimHorizontalScrollBar
 function Utils.StyleHorizontalScrollBar(scrollBar)
   local scrollbarThickness = LiqUI.Constants.layout.sizes.scrollbar.thickness
   scrollBar:SetHeight(scrollbarThickness)
@@ -448,7 +451,7 @@ end
 
 ---Wheel hits row/column buttons, not the scroll box. Forward to Blizzard scroll APIs on the outer box.
 ---@param frame Frame
----@param scrollBox Frame
+---@param scrollBox WowScrollBox
 function Utils.BindScrollBoxMouseWheel(frame, scrollBox)
   frame:EnableMouseWheel(true)
   frame:SetScript("OnMouseWheel", function(_, delta)
@@ -460,7 +463,7 @@ function Utils.BindScrollBoxMouseWheel(frame, scrollBox)
   end)
 end
 
----@param scrollBox Frame
+---@param scrollBox WowScrollBox
 ---@param panExtent number
 local function applyOuterWheelPanExtent(scrollBox, panExtent)
   if panExtent > 0 then
@@ -468,7 +471,7 @@ local function applyOuterWheelPanExtent(scrollBox, panExtent)
   end
 end
 
----@param scrollBox Frame
+---@param scrollBox WowScrollBox
 local function hideScrollBoxShadows(scrollBox)
   if scrollBox.Shadows then
     scrollBox.Shadows:Hide()
@@ -596,7 +599,6 @@ local function updateScrollAreaLayout(scrollArea, contentWidth, contentHeight)
   end
 end
 
----WowScrollBox viewport with optional horizontal and/or vertical scrolling.
 ---@param parent Frame
 ---@param options LiqUI_ScrollAreaOptions?
 ---@return LiqUI_ScrollArea
@@ -663,7 +665,7 @@ function Utils.CreateScrollArea(parent, options)
     LiqUI.Constants.layout.sizes.scrollbar.horizontalWheelPanExtent
   local wheelPanExtent = (options and options.wheelPanExtent) or defaultPanExtent
 
-  ---@type LiqUI_ScrollArea
+  ---@class LiqUI_ScrollArea
   local scrollArea = {
     container = containerFrame,
     content = contentFrame,
@@ -677,7 +679,7 @@ function Utils.CreateScrollArea(parent, options)
     wheelPanExtent = wheelPanExtent,
   }
 
-  ---@return Frame?
+  ---@return WowScrollBox?
   function scrollArea:GetWheelScrollBox()
     if self.verticalScrollBox then
       return self.verticalScrollBox
@@ -784,7 +786,6 @@ function Utils.CreateScrollArea(parent, options)
   return scrollArea
 end
 
----Read-only scrolling text host (logger pattern). Text and bar share the same body inset; bar sits in the right padding gutter.
 ---@param parent Frame
 ---@param bodyPadding number?
 ---@return LiqUI_ScrollingEditBoxHost
@@ -814,12 +815,10 @@ function Utils.CreateScrollingEditBox(parent, bodyPadding)
   }
 end
 
----Create a scrollable content area using Blizzard WowScrollBox + CreateScrollBoxLinearView + MinimalScrollBar.
----Parent content to .scrollChild and set its height; after content size changes call :FullUpdate(true).
 ---@param parent Frame
 ---@param name string?
----@param options { barWidth?: number }?
----@return Frame scrollBox WowScrollBox with .scrollChild, :FullUpdate(), :ScrollToBegin()
+---@param options LiqUI_ScrollBoxOptions?
+---@return LiqUI_ScrollBox
 function Utils.CreateScrollBox(parent, name, options)
   options = options or {}
   local barWidth = options.barWidth or 12
@@ -828,6 +827,7 @@ function Utils.CreateScrollBox(parent, name, options)
     error("LiqUI.CreateScrollBox requires Blizzard_SharedXML (ScrollUtil, CreateScrollBoxLinearView). Ensure UI is loaded.")
   end
 
+  ---@class LiqUI_ScrollBox
   local scrollBox = CreateFrame("Frame", name, parent, "WowScrollBox")
   local scrollBar = CreateFrame("EventFrame", nil, parent, "MinimalScrollBar")
   scrollBar:SetPoint("TOPLEFT", scrollBox, "TOPRIGHT", 0, 0)
@@ -863,7 +863,6 @@ local function isRegionObject(value)
   return type(value) == "table" and type(value.IsObjectType) == "function"
 end
 
----Merge keys from source into destination; nested plain tables are merged recursively.
 ---@param destination table
 ---@param source table?
 ---@return table

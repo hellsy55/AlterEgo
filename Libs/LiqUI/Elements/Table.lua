@@ -13,6 +13,16 @@ local TableMergeOptions = LiqUI.Utils.TableMergeOptions
 
 local HEADER_BACKGROUND_ALPHA = 0.3
 
+---@param frame Frame
+---@param scrollArea LiqUI_ScrollArea
+local function bindTableMouseWheel(frame, scrollArea)
+  local wheelScrollBox = scrollArea:GetWheelScrollBox()
+  if not wheelScrollBox then
+    return
+  end
+  BindScrollBoxMouseWheel(frame, wheelScrollBox)
+end
+
 ---@param value table
 ---@return boolean
 local function isExtendedTable(value)
@@ -109,8 +119,8 @@ local function createTable(options)
   end
 
   local instanceName = options.name
-  ---@type LiqUI_TableInstance
-  local frame = CreateFrame("Frame", "LiqUITable" .. instanceName:gsub("[^%w]", "")) ---@diagnostic disable-line:assign-type-mismatch
+  ---@class LiqUI_TableInstance
+  local frame = CreateFrame("Frame", "LiqUITable" .. instanceName:gsub("[^%w]", ""))
 
   ---@type LiqUI_TableOptions
   local defaultOptions = {
@@ -374,7 +384,7 @@ local function createTable(options)
       if not headerRowFrame then
         headerRowFrame = CreateFrame("Frame", "$parentHeaderRow", frame)
         headerRowFrame.cells = {}
-        BindScrollBoxMouseWheel(headerRowFrame, scrollArea:GetWheelScrollBox())
+        bindTableMouseWheel(headerRowFrame, scrollArea)
         frame.headerRowFrame = headerRowFrame
       end
 
@@ -382,7 +392,9 @@ local function createTable(options)
         headerRowFrame:SetParent(frame)
         headerRowFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
         headerRowFrame:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
-        headerRowFrame:SetFrameLevel(scrollArea.verticalScrollBar:GetFrameLevel() + 2)
+        if scrollArea.verticalScrollBar then
+          headerRowFrame:SetFrameLevel(scrollArea.verticalScrollBar:GetFrameLevel() + 2)
+        end
         scrollArea:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -headerHeight)
         scrollArea:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
       else
@@ -411,7 +423,7 @@ local function createTable(options)
           headerCellFrame.label = headerCellFrame:CreateFontString("$parentLabel", "OVERLAY")
           headerCellFrame.label:SetWordWrap(false)
           headerCellFrame.tableFrame = frame
-          BindScrollBoxMouseWheel(headerCellFrame, scrollArea:GetWheelScrollBox())
+          bindTableMouseWheel(headerCellFrame, scrollArea)
           headerRowFrame.cells[columnIndex] = headerCellFrame
         end
 
@@ -495,7 +507,7 @@ local function createTable(options)
         ---@type LiqUI_TableRowFrame
         rowFrame = CreateFrame("Frame", "$parentRow" .. rowIndex, scrollArea.content)
         rowFrame.cells = {}
-        BindScrollBoxMouseWheel(rowFrame, scrollArea:GetWheelScrollBox())
+        bindTableMouseWheel(rowFrame, scrollArea)
         frame.rowFrames[rowIndex] = rowFrame
       end
 
@@ -538,7 +550,7 @@ local function createTable(options)
           bodyCellFrame.label = bodyCellFrame:CreateFontString("$parentLabel", "OVERLAY")
           bodyCellFrame.label:SetWordWrap(false)
           bodyCellFrame.tableFrame = frame
-          BindScrollBoxMouseWheel(bodyCellFrame, scrollArea:GetWheelScrollBox())
+          bindTableMouseWheel(bodyCellFrame, scrollArea)
           rowFrame.cells[columnIndex] = bodyCellFrame
         end
 

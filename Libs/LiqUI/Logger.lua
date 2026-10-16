@@ -4,26 +4,23 @@ if not LiqUI then
   return
 end
 
+LiqUI.Logger = LiqUI.Logger or {
+  handles = {},
+  selectedAddonName = nil,
+  window = nil,
+  refreshPending = false,
+}
+
 ---@class LiqUI_Logger
-local Logger = {}
-LiqUI.Logger = Logger
-
+local Logger = LiqUI.Logger
 local CreateScrollingEditBox = LiqUI.Utils.CreateScrollingEditBox
-
 local LINES_MAX = 200
 local WINDOW_WIDTH = 1200
 local WINDOW_HEIGHT = 600
 local BODY_PADDING = LiqUI.Constants.layout.sizes.padding
 local CLEAR_ICON_SIZE = 12
 
----@type table<string, LiqUI_LoggerHandle>
-local handles = {}
-
-local selectedAddonName = nil
-local window = nil
-local refreshPending = false
-
----@param textBox Frame
+---@param textBox ScrollingEditBoxTemplate
 ---@param text string
 ---@param scrollToEnd boolean|nil
 local function applyLogText(textBox, text, scrollToEnd)
@@ -66,7 +63,7 @@ end
 local function getLoggerHandles()
   ---@type LiqUI_LoggerHandle[]
   local list = {}
-  for _, handle in pairs(handles) do
+  for _, handle in pairs(Logger.handles) do
     table.insert(list, handle)
   end
   table.sort(list, function(a, b)
@@ -81,14 +78,14 @@ local function getSelectedHandle()
   if #list == 0 then
     return nil
   end
-  if selectedAddonName then
+  if Logger.selectedAddonName then
     for index = 1, #list do
-      if list[index].name == selectedAddonName then
+      if list[index].name == Logger.selectedAddonName then
         return list[index]
       end
     end
   end
-  selectedAddonName = list[1].name
+  Logger.selectedAddonName = list[1].name
   return list[1]
 end
 
@@ -113,7 +110,7 @@ local function appendLine(handle, level, prefixOrMessage, message)
   table.insert(storage.lines, lineText)
   trimLoggerLines(storage)
   if storage.autoShow then
-    selectedAddonName = handle.name
+    Logger.selectedAddonName = handle.name
     Logger:Show()
   end
   Logger:QueueRefresh()
@@ -134,14 +131,14 @@ function LiqUI:NewLogger(options)
 
   ensureLoggerStorage(options.storage)
 
-  local existing = handles[options.name]
+  local existing = Logger.handles[options.name]
   if existing then
     existing.title = options.title or existing.title or options.name
     existing.storage = options.storage
     return existing
   end
 
-  ---@type LiqUI_LoggerHandle
+  ---@class LiqUI_LoggerHandle
   local handle = {
     name = options.name,
     title = options.title or options.name,
@@ -166,18 +163,18 @@ function LiqUI:NewLogger(options)
 
   function handle:Clear()
     wipe(self.storage.lines)
-    selectedAddonName = self.name
+    Logger.selectedAddonName = self.name
     Logger:QueueRefresh()
   end
 
   ---@param state boolean|nil
   function handle:Toggle(state)
-    selectedAddonName = self.name
+    Logger.selectedAddonName = self.name
     Logger:Toggle(state)
   end
 
   function handle:Show()
-    selectedAddonName = self.name
+    Logger.selectedAddonName = self.name
     Logger:Show()
   end
 
@@ -185,7 +182,7 @@ function LiqUI:NewLogger(options)
     Logger:Hide()
   end
 
-  handles[options.name] = handle
+  Logger.handles[options.name] = handle
   return handle
 end
 
@@ -199,24 +196,25 @@ function Logger:Clear()
 end
 
 function Logger:QueueRefresh()
-  if refreshPending then
+  if Logger.refreshPending then
     return
   end
-  refreshPending = true
+  Logger.refreshPending = true
   C_Timer.After(0, function()
-    refreshPending = false
+    Logger.refreshPending = false
     self:Refresh()
   end)
 end
 
 function Logger:Refresh()
-  if not window then
+  local loggerWindow = Logger.window
+  if not loggerWindow then
     return
   end
-  if not window:IsVisible() then
+  if not loggerWindow:IsVisible() then
     return
   end
-  local textBox = window.body.textBox
+  local textBox = loggerWindow.body.textBox
   if not textBox then
     return
   end
@@ -225,11 +223,11 @@ function Logger:Refresh()
   local autoScroll = handle and handle.storage.autoScroll
   local text = table.concat(lines, "\n")
   applyLogText(textBox, text, autoScroll)
-  window:SetTitle(handle and handle.title or "Log")
+  loggerWindow:SetTitle(handle and handle.title or "Log")
 end
 
 function Logger:Render()
-  if not window then
+  if not Logger.window then
     ---@type LiqUI_WindowOptions
     local windowOptions = {
       name = "LiqUILogger",
@@ -249,10 +247,10 @@ function Logger:Render()
               rootMenu:CreateRadio(
                 handle.title,
                 function()
-                  return selectedAddonName == handle.name
+                  return Logger.selectedAddonName == handle.name
                 end,
                 function()
-                  selectedAddonName = handle.name
+                  Logger.selectedAddonName = handle.name
                   Logger:Refresh()
                 end
               )
@@ -271,14 +269,15 @@ function Logger:Render()
         },
       },
     }
-    window = LiqUI:NewElement("Window", windowOptions)
-    window:SetScript("OnShow", function()
-      window:Render()
+    local loggerWindow = LiqUI:NewElement("Window", windowOptions)
+    Logger.window = loggerWindow
+    loggerWindow:SetScript("OnShow", function()
+      loggerWindow:Render()
       Logger:Refresh()
     end)
 
     ---@type LiqUI_WindowBody
-    local body = window.body
+    local body = loggerWindow.body
     local scrollHost = CreateScrollingEditBox(body, BODY_PADDING)
     local textBox = scrollHost.textBox
     textBox:SetFontObject("ChatFontSmall")
@@ -296,8 +295,8 @@ function Logger:Render()
       end
     end)
 
-    window.body.textBox = textBox
-    window.body.scrollBar = scrollHost.scrollBar
+    loggerWindow.body.textBox = textBox
+    loggerWindow.body.scrollBar = scrollHost.scrollBar
   end
 
   self:Refresh()
@@ -306,11 +305,12 @@ end
 ---@param state boolean|nil
 function Logger:Toggle(state)
   self:Render()
-  if not window then
+  local loggerWindow = Logger.window
+  if not loggerWindow then
     return
   end
-  window:Toggle(state)
-  if window:IsVisible() then
+  loggerWindow:Toggle(state)
+  if loggerWindow:IsVisible() then
     self:Refresh()
   end
 end

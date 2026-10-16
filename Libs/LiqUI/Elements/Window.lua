@@ -90,6 +90,9 @@ local function applyOverlayStyle(window, showOptions)
   end
   local backgroundColor = showOptions and showOptions.backgroundColor or window.options.overlayBackgroundColor
     or window:GetWindowColor()
+  if not backgroundColor then
+    return
+  end
   SetBackgroundColor(window.overlay, backgroundColor.r, backgroundColor.g, backgroundColor.b, backgroundColor.a)
 end
 
@@ -177,7 +180,7 @@ local function createWindow(options)
 
   local frameName = "LiqUIWindow" .. windowName:gsub("[^%w]", "")
 
-  ---@type LiqUI_WindowInstance
+  ---@class LiqUI_WindowInstance
   local window = CreateFrame("Frame", frameName, UIParent)
 
   ---@type LiqUI_WindowOptions
@@ -237,7 +240,9 @@ local function createWindow(options)
   ---Set the title of the window
   ---@param title string
   function window:SetTitle(title)
-    if not window.options.titlebar then return end
+    if not window.titlebar then
+      return
+    end
     window.titlebar.title:SetText(title)
   end
 
@@ -317,10 +322,12 @@ local function createWindow(options)
 
     local button
     if buttonConfig.onMenu then
-      button = CreateFrame("DropdownButton", "$parent" .. buttonName, window.titlebar)
-      button.menuGenerator = function(_, rootMenu)
+      ---@class LiqUI_WindowTitlebarDropdownButton
+      local menuButton = CreateFrame("DropdownButton", "$parent" .. buttonName, window.titlebar)
+      menuButton.menuGenerator = function(_, rootMenu)
         buttonConfig.onMenu(window, rootMenu)
       end
+      button = menuButton
     else
       button = CreateFrame("Button", "$parent" .. buttonName, window.titlebar)
       button:RegisterForClicks("AnyUp")
@@ -498,7 +505,7 @@ local function createWindow(options)
     window:ApplySettings()
   end
 
-  ---@param rootMenu table
+  ---@param rootMenu RootMenuDescriptionProxy
   ---@param onRefresh fun()|nil
   function window:AppendWindowOptionsMenu(rootMenu, onRefresh)
     rootMenu:CreateTitle("Window")
@@ -526,10 +533,14 @@ local function createWindow(options)
     end
 
     local windowColor = window:GetWindowColor()
+    if not windowColor then
+      return
+    end
     local colorInfo = {
       r = windowColor.r,
       g = windowColor.g,
       b = windowColor.b,
+      a = windowColor.a,
       opacity = windowColor.a,
       swatchFunc = function()
         local r, g, b = ColorPickerFrame:GetColorRGB()
@@ -604,57 +615,59 @@ local function createWindow(options)
   end
 
   if window.options.titlebar then
-    window.titlebar = CreateFrame("Frame", "$parentTitleBar", window)
-    window.titlebar:EnableMouse(true)
-    window.titlebar:RegisterForDrag("LeftButton")
-    window.titlebar:SetScript("OnDragStart", function() window:StartMoving() end)
-    window.titlebar:SetScript("OnDragStop", function()
+    ---@class LiqUI_WindowTitlebar
+    local titlebar = CreateFrame("Frame", "$parentTitleBar", window)
+    window.titlebar = titlebar
+    titlebar:EnableMouse(true)
+    titlebar:RegisterForDrag("LeftButton")
+    titlebar:SetScript("OnDragStart", function() window:StartMoving() end)
+    titlebar:SetScript("OnDragStop", function()
       window:StopMovingOrSizing()
       window:SaveSettings()
     end)
-    window.titlebar:SetPoint("TOPLEFT", window, "TOPLEFT")
-    window.titlebar:SetPoint("TOPRIGHT", window, "TOPRIGHT")
-    window.titlebar:SetHeight(LiqUI.Constants.layout.sizes.titlebar.height)
-    SetBackgroundColor(window.titlebar, 0, 0, 0, 0.5)
-    window.titlebar.icon = window.titlebar:CreateTexture("$parentIcon", "ARTWORK")
-    window.titlebar.icon:SetPoint("LEFT", window.titlebar, "LEFT", 6, 0)
-    window.titlebar.icon:SetSize(20, 20)
+    titlebar:SetPoint("TOPLEFT", window, "TOPLEFT")
+    titlebar:SetPoint("TOPRIGHT", window, "TOPRIGHT")
+    titlebar:SetHeight(LiqUI.Constants.layout.sizes.titlebar.height)
+    SetBackgroundColor(titlebar, 0, 0, 0, 0.5)
+    titlebar.icon = titlebar:CreateTexture("$parentIcon", "ARTWORK")
+    titlebar.icon:SetPoint("LEFT", titlebar, "LEFT", 6, 0)
+    titlebar.icon:SetSize(20, 20)
     if window.options.icon then
-      window.titlebar.icon:SetTexture(window.options.icon)
+      titlebar.icon:SetTexture(window.options.icon)
     else
-      window.titlebar.icon:Hide()
+      titlebar.icon:Hide()
     end
-    window.titlebar.title = window.titlebar:CreateFontString("$parentText", "OVERLAY")
+    titlebar.title = titlebar:CreateFontString("$parentText", "OVERLAY")
     local titleLeft = window.options.icon and (20 + LiqUI.Constants.layout.sizes.padding) or
       LiqUI.Constants.layout.sizes.padding
-    window.titlebar.title:SetPoint("LEFT", window.titlebar, "LEFT", titleLeft, 0)
-    window.titlebar.title:SetFontObject("SystemFont_Med3")
-    window.titlebar.title:SetText(window.options.title or window.options.name)
-    window.titlebar.CloseButton = CreateFrame("Button", "$parentCloseButton", window.titlebar)
-    window.titlebar.CloseButton:SetPoint("RIGHT", window.titlebar, "RIGHT", 0, 0)
-    window.titlebar.CloseButton:SetSize(LiqUI.Constants.layout.sizes.titlebar.height,
+    titlebar.title:SetPoint("LEFT", titlebar, "LEFT", titleLeft, 0)
+    titlebar.title:SetFontObject("SystemFont_Med3")
+    titlebar.title:SetText(window.options.title or window.options.name)
+    titlebar.CloseButton = CreateFrame("Button", "$parentCloseButton", titlebar)
+    titlebar.CloseButton:SetPoint("RIGHT", titlebar, "RIGHT", 0, 0)
+    titlebar.CloseButton:SetSize(LiqUI.Constants.layout.sizes.titlebar.height,
                                         LiqUI.Constants.layout.sizes.titlebar.height)
-    window.titlebar.CloseButton:RegisterForClicks("AnyUp")
-    window.titlebar.CloseButton:SetScript("OnClick", function()
+    titlebar.CloseButton:RegisterForClicks("AnyUp")
+    titlebar.CloseButton:SetScript("OnClick", function()
       window:Close()
     end)
-    window.titlebar.CloseButton.Icon = window.titlebar.CloseButton:CreateTexture(nil, "ARTWORK")
-    window.titlebar.CloseButton.Icon:SetPoint("CENTER", window.titlebar.CloseButton, "CENTER")
-    window.titlebar.CloseButton.Icon:SetSize(10, 10)
-    window.titlebar.CloseButton.Icon:SetTexture(LiqUI.Constants.layout.media.iconClose)
-    window.titlebar.CloseButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
-    window.titlebar.CloseButton:SetScript("OnEnter", function()
-      window.titlebar.CloseButton.Icon:SetVertexColor(1, 1, 1, 1)
-      SetBackgroundColor(window.titlebar.CloseButton, 1, 0, 0, 0.2)
+    titlebar.CloseButton.Icon = titlebar.CloseButton:CreateTexture(nil, "ARTWORK")
+    titlebar.CloseButton.Icon:SetPoint("CENTER", titlebar.CloseButton, "CENTER")
+    titlebar.CloseButton.Icon:SetSize(10, 10)
+    titlebar.CloseButton.Icon:SetTexture(LiqUI.Constants.layout.media.iconClose)
+    titlebar.CloseButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
+    titlebar.CloseButton:SetScript("OnEnter", function()
+      titlebar.CloseButton.Icon:SetVertexColor(1, 1, 1, 1)
+      SetBackgroundColor(titlebar.CloseButton, 1, 0, 0, 0.2)
       GameTooltip:ClearAllPoints()
       GameTooltip:ClearLines()
-      GameTooltip:SetOwner(window.titlebar.CloseButton, "ANCHOR_TOP")
+      GameTooltip:SetOwner(titlebar.CloseButton, "ANCHOR_TOP")
       GameTooltip:SetText("Close the window", 1, 1, 1, 1, true)
       GameTooltip:Show()
     end)
-    window.titlebar.CloseButton:SetScript("OnLeave", function()
-      window.titlebar.CloseButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
-      SetBackgroundColor(window.titlebar.CloseButton, 1, 1, 1, 0)
+    titlebar.CloseButton:SetScript("OnLeave", function()
+      titlebar.CloseButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
+      SetBackgroundColor(titlebar.CloseButton, 1, 1, 1, 0)
       GameTooltip:Hide()
     end)
 
@@ -662,55 +675,56 @@ local function createWindow(options)
       error("LiqUI Window: windowOptionsMenu was removed; use onSettingsMenu or omit for window-only menu", 2)
     end
 
-    window.titlebar.SettingsButton = CreateFrame("DropdownButton", "$parentSettingsButton", window.titlebar)
-    window.titlebar.SettingsButton.menuGenerator = function(_, rootMenu)
+    ---@class LiqUI_WindowTitlebarDropdownButton
+    titlebar.SettingsButton = CreateFrame("DropdownButton", "$parentSettingsButton", titlebar)
+    titlebar.SettingsButton.menuGenerator = function(_, rootMenu)
       if window.options.onSettingsMenu then
         window.options.onSettingsMenu(window, rootMenu)
       end
       window:AppendWindowOptionsMenu(rootMenu)
     end
-    window.titlebar.SettingsButton.Icon = window.titlebar.SettingsButton:CreateTexture(nil, "ARTWORK")
-    window.titlebar.SettingsButton.Icon:SetPoint("CENTER", window.titlebar.SettingsButton, "CENTER")
-    window.titlebar.SettingsButton.Icon:SetSize(12, 12)
-    window.titlebar.SettingsButton.Icon:SetTexture(LiqUI.Constants.layout.media.iconSettings)
-    window.titlebar.SettingsButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
-    window.titlebar.SettingsButton:SetSize(LiqUI.Constants.layout.sizes.titlebar.height,
+    titlebar.SettingsButton.Icon = titlebar.SettingsButton:CreateTexture(nil, "ARTWORK")
+    titlebar.SettingsButton.Icon:SetPoint("CENTER", titlebar.SettingsButton, "CENTER")
+    titlebar.SettingsButton.Icon:SetSize(12, 12)
+    titlebar.SettingsButton.Icon:SetTexture(LiqUI.Constants.layout.media.iconSettings)
+    titlebar.SettingsButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
+    titlebar.SettingsButton:SetSize(LiqUI.Constants.layout.sizes.titlebar.height,
                                            LiqUI.Constants.layout.sizes.titlebar.height)
-    window.titlebar.SettingsButton:SetScript("OnEnter", function()
-      window.titlebar.SettingsButton.Icon:SetVertexColor(0.9, 0.9, 0.9, 1)
-      SetBackgroundColor(window.titlebar.SettingsButton, 1, 1, 1, 0.05)
-      GameTooltip:SetOwner(window.titlebar.SettingsButton, "ANCHOR_TOP")
+    titlebar.SettingsButton:SetScript("OnEnter", function()
+      titlebar.SettingsButton.Icon:SetVertexColor(0.9, 0.9, 0.9, 1)
+      SetBackgroundColor(titlebar.SettingsButton, 1, 1, 1, 0.05)
+      GameTooltip:SetOwner(titlebar.SettingsButton, "ANCHOR_TOP")
       GameTooltip:SetText("Settings", 1, 1, 1, 1, true)
       GameTooltip:AddLine("Window scale, color, and border.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g,
                           NORMAL_FONT_COLOR.b, true)
       GameTooltip:Show()
     end)
-    window.titlebar.SettingsButton:SetScript("OnLeave", function()
-      window.titlebar.SettingsButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
-      SetBackgroundColor(window.titlebar.SettingsButton, 1, 1, 1, 0)
+    titlebar.SettingsButton:SetScript("OnLeave", function()
+      titlebar.SettingsButton.Icon:SetVertexColor(0.7, 0.7, 0.7, 1)
+      SetBackgroundColor(titlebar.SettingsButton, 1, 1, 1, 0)
       GameTooltip:Hide()
     end)
-    window.titlebar.SettingsButton:HookScript("OnClick", function()
+    titlebar.SettingsButton:HookScript("OnClick", function()
       -- Blizzard builds the dropdown after the click handler. Style it on the
       -- next frame, then once more shortly after in case scroll mode creates
       -- its scrollbar during deferred menu layout.
       C_Timer.After(0, StyleOpenSettingsMenuScrollBars)
       C_Timer.After(0.05, StyleOpenSettingsMenuScrollBars)
     end)
-    window.titlebar.SettingsButton:Show()
+    titlebar.SettingsButton:Show()
   end
 
   local topOffset = window.options.titlebar and -LiqUI.Constants.layout.sizes.titlebar.height or 0
 
   -- Body
-  ---@type LiqUI_WindowBody
+  ---@class LiqUI_WindowBody
   local body = CreateFrame("Frame", "$parentBody", window)
   window.body = body
   applyWindowContentLayout(body, window, topOffset)
   SetBackgroundColor(body, 0, 0, 0, 0)
 
   do
-    ---@type LiqUI_WindowOverlay
+    ---@class LiqUI_WindowOverlay
     local overlay = CreateFrame("Frame", "$parentOverlay", window)
     window.overlay = overlay
     applyWindowContentLayout(overlay, window, topOffset)

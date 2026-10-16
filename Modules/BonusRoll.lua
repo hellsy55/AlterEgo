@@ -122,7 +122,7 @@ end
 local function learnKithixSourcesFromSimC(entries)
   if not (EJ_GetNumLoot and EJ_GetLootInfoByIndex and EJ_SelectInstance) then return end
   local raid
-  for _, candidate in ipairs(Data.raids or {}) do
+  for _, candidate in ipairs(Data:GetRaidCatalog()) do
     if candidate.instanceID == 3095 then raid = candidate break end
   end
   if not raid or not raid.journalInstanceID then return end
@@ -397,7 +397,7 @@ local function buildSections(entries)
     local section, instance, bossKey, bossName, bossOrder
     if source then
       local isRaid = source.kind == "raid"
-      local dataInstance = findByJournalInstance(isRaid and Data.raids or Data.dungeons, source.journalInstanceID)
+      local dataInstance = findByJournalInstance(isRaid and Data:GetRaidCatalog() or LibLiqUI.Data.dungeons, source.journalInstanceID)
       section = isRaid and sections.raids or sections.dungeons
       local instanceName = dataInstance and dataInstance.name
         or (source.kithix and "The Unbinding of Kith'ix")

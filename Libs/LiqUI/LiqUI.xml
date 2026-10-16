@@ -3,7 +3,17 @@
   <Script file="LiqUI.lua" />
   <Script file="Constants.lua" />
   <Script file="Utils.lua" />
+  <Script file="Events.lua" />
+  <Script file="Data.lua" />
+  <Script file="Data/Dungeons.lua" />
+  <Script file="Data/Raids.lua" />
+  <Script file="Data/Seasons.lua" />
+  <Script file="Data/Expansions.lua" />
+  <Script file="Data/Inventory.lua" />
+  <Script file="Data/UpgradeTracks.lua" />
   <Script file="Elements/Window.lua" />
   <Script file="Elements/Table.lua" />
-  <Script file="Modules/Logger.lua" />
+  <Script file="Elements/Button.lua" />
+  <Script file="Logger.lua" />
+  <Script file="EJScan.lua" />
 </Ui>

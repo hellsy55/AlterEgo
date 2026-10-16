@@ -33,7 +33,7 @@ Data.bonusRollKeystoneContexts = {
 ---sourceID -> where the bonus roll was spent.
 ---
 ---  kind                "raid" or "dungeon"
----  journalInstanceID   matches Data.raids / Data.dungeons (that is where the instance name comes from)
+---  journalInstanceID   matches the LiqUI raid / dungeon catalog (that is where the instance name comes from)
 ---  journalEncounterID  (optional) boss, the name is read from the Encounter Journal
 ---  bossName            (optional) used instead of the Encounter Journal name
 ---  order               (optional) boss order inside the instance (lower first)

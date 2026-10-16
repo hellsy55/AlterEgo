@@ -1,6 +1,6 @@
 assert(LibStub, "LiqUI requires LibStub")
 
-local MAJOR, MINOR = "LiqUI-1.0", 4
+local MAJOR, MINOR = "LiqUI-1.0", 5
 ---@class LiqUI
 local LiqUI = LibStub:NewLibrary(MAJOR, MINOR)
 if not LiqUI then
@@ -11,9 +11,9 @@ LiqUI.minor = MINOR
 
 _G.LiqUI = LiqUI
 
-LiqUI.elements = {}
-LiqUI.created = {}
-LiqUI.registeredAddons = {}
+LiqUI.elements = LiqUI.elements or {}
+LiqUI.created = LiqUI.created or {}
+LiqUI.registeredAddons = LiqUI.registeredAddons or {}
 
 ---@param elementType string
 ---@param createFn fun(options: table): any

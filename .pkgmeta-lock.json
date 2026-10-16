@@ -9,10 +9,34 @@
   },
   "Libs/LibSerialize": {
     "kind": "git-tag",
-    "value": "v1.2.2"
+    "value": "v1.2.3"
   },
   "Libs/LibDBIcon-1.0": {
     "kind": "svn-tag",
-    "value": "v12.0.3"
+    "value": "v12.1.1"
+  },
+  "Libs/LiqUI": {
+    "kind": "git-tag",
+    "value": "v1.3.1"
+  },
+  "Libs/AceAddon-3.0": {
+    "kind": "svn-tag",
+    "value": "Release-r1403"
+  },
+  "Libs/AceTimer-3.0": {
+    "kind": "svn-tag",
+    "value": "Release-r1403"
+  },
+  "Libs/AceDB-3.0": {
+    "kind": "svn-tag",
+    "value": "Release-r1403"
+  },
+  "Libs/AceConsole-3.0": {
+    "kind": "svn-tag",
+    "value": "Release-r1403"
+  },
+  "Libs/AceComm-3.0": {
+    "kind": "svn-tag",
+    "value": "Release-r1403"
   }
 }
