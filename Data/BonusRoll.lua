@@ -11,7 +11,7 @@ local Data = addon.Data
 -- keyLevel only matters when the source is a dungeon (Mythic+ keystone level).
 -- For raid sources it is ignored.
 
----Item creation contexts -> raid difficultyID (see Data.raidDifficulties).
+---Item creation contexts -> raid difficultyID (see Data:GetRaidDifficulties).
 ---Uses Enum.ItemCreationContext when the client provides it, with fallback numbers.
 ---@type table<number, number>
 Data.bonusRollRaidContexts = {}

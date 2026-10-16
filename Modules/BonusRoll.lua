@@ -325,7 +325,7 @@ end
 ---@param difficultyID number
 ---@return table?
 local function getDifficulty(difficultyID)
-  for _, difficulty in ipairs(Data.raidDifficulties) do
+  for _, difficulty in ipairs(Data:GetRaidDifficulties(true)) do
     if difficulty.id == difficultyID then return difficulty end
   end
 end
@@ -486,7 +486,7 @@ local function getInstanceTooltipLines(instance)
     end
     table.insert(lines, {format("Rolls used: %d", instance.count), 1, 1, 1})
     local difficulties = {}
-    for _, difficulty in ipairs(Data.raidDifficulties) do
+    for _, difficulty in ipairs(Data:GetRaidDifficulties(true)) do
       table.insert(difficulties, difficulty)
     end
     table.sort(difficulties, function(a, b) return a.order < b.order end)
@@ -1237,7 +1237,7 @@ end
 function Module:GetOrderedDifficulties()
   if not self.orderedDifficulties then
     local list = {}
-    for _, difficulty in ipairs(Data.raidDifficulties) do
+    for _, difficulty in ipairs(Data:GetRaidDifficulties(true)) do
       table.insert(list, difficulty)
     end
     table.sort(list, function(a, b) return a.order < b.order end)
