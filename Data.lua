@@ -82,6 +82,7 @@ Data.defaultDB = {
     },
     dungeons = {
       enabled = true,
+      teleportOnLevelClick = false,
     },
     world = {
       enabled = true,

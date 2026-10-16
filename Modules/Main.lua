@@ -1551,6 +1551,22 @@ local function LayoutTimewalkingRaidIcons(timewalkingFrame, numBosses, columnWid
 end
 
 local dungeonPortalUnlockLevel = 10
+
+-- Dungeon teleport buttons contain secure spell actions. Apply changes to
+-- their attributes and visibility outside combat, just like Row Labels.
+local pendingDungeonTeleportRefresh = false
+addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+  if pendingDungeonTeleportRefresh then
+    pendingDungeonTeleportRefresh = false
+    Module:Render()
+  end
+end, true)
+
+local function GetKnownDungeonTeleportSpellID(dungeon)
+  return TableFind(dungeon.teleports or {}, function(spellID)
+    return C_SpellBook.IsSpellInSpellBook(spellID)
+  end)
+end
 local vaultMythicPlusMinLevel = 2
 local vaultMaxLevelRewardMythic = 10
 local vaultMaxLevelRewardWorld = 8
@@ -3754,6 +3770,18 @@ function Module:RenderNow()
               tooltip:AddLine("Show Mythic+ dungeon information!", nil, nil, nil, true)
             end)
             menu:CreateCheckbox(
+              "Click levels to teleport",
+              function() return Data.db.global.dungeons.teleportOnLevelClick end,
+              function()
+                Data.db.global.dungeons.teleportOnLevelClick = not Data.db.global.dungeons.teleportOnLevelClick
+                self:Render()
+                return MenuResponse.Refresh
+              end
+            ):SetTooltip(function(tooltip, elm)
+              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+              tooltip:AddLine("Left-click a dungeon level in any character column to teleport there when your current character knows the spell. Dungeon ratings remain non-clickable.", nil, nil, nil, true)
+            end)
+            menu:CreateCheckbox(
               "Show icons",
               function() return Data.db.global.showTiers end,
               function()
@@ -5160,9 +5188,7 @@ function Module:RenderNow()
             self.window.body.sidebar.mpluslabels[dungeonIndex] = dungeonFrame
           end
 
-          local knownTeleportSpellID = TableFind(dungeon.teleports or {}, function(spellID)
-            return C_SpellBook.IsSpellInSpellBook(spellID)
-          end)
+          local knownTeleportSpellID = GetKnownDungeonTeleportSpellID(dungeon)
 
           if knownTeleportSpellID then
             if not InCombatLockdown() then
@@ -6218,7 +6244,10 @@ function Module:RenderNow()
             dungeonFrame.Score:SetText("")
           end
 
-          dungeonFrame:SetScript("OnEnter", function()
+          local knownTeleportSpellID = Data.db.global.dungeons.teleportOnLevelClick
+            and GetKnownDungeonTeleportSpellID(dungeon)
+
+          local function ShowDungeonTooltip()
             GameTooltip:SetOwner(dungeonFrame, "ANCHOR_RIGHT")
             GameTooltip:SetText(dungeon.name, 1, 1, 1)
 
@@ -6249,14 +6278,59 @@ function Module:RenderNow()
             GameTooltip:AddLine("|A:Professions-ChatIcon-Quality-Tier1:14:14:0:0|a " .. SecondsToClock(Helpers:calculateDungeonTimer(dungeon.time, dungeonLevel, 1, seasonID), false), 1, 1, 1)
             GameTooltip:AddLine("|A:Professions-ChatIcon-Quality-Tier2:16:16:0:0|a " .. SecondsToClock(Helpers:calculateDungeonTimer(dungeon.time, dungeonLevel, 2, seasonID), false), 1, 1, 1)
             GameTooltip:AddLine("|A:Professions-ChatIcon-Quality-Tier3:16:16:0:0|a " .. SecondsToClock(Helpers:calculateDungeonTimer(dungeon.time, dungeonLevel, 3, seasonID), false), 1, 1, 1)
+            if knownTeleportSpellID and dungeonFrame.teleportButton and dungeonFrame.teleportButton:IsShown() then
+              GameTooltip:AddLine(" ")
+              GameTooltip:AddLine("<Click to Teleport>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+            end
             GameTooltip:Show()
-
             SetHighlightColor(dungeonFrame, 1, 1, 1, 0.05)
-          end)
-          dungeonFrame:SetScript("OnLeave", function()
+          end
+          local function HideDungeonTooltip()
             GameTooltip:Hide()
             SetHighlightColor(dungeonFrame, 1, 1, 1, 0)
-          end)
+          end
+          dungeonFrame:SetScript("OnEnter", ShowDungeonTooltip)
+          dungeonFrame:SetScript("OnLeave", HideDungeonTooltip)
+
+          -- Limit the clickable region to the dungeon level, not its rating.
+          -- When the level is centered, the whole row serves as its hitbox.
+          if not InCombatLockdown() then
+            local teleportButton = dungeonFrame.teleportButton
+            if knownTeleportSpellID and not teleportButton then
+              teleportButton = CreateFrame("Button", "$parentTeleport", dungeonFrame, "InsecureActionButtonTemplate")
+              -- Match the Row Labels spell action and support either click
+              -- stroke, while only registering the left mouse button.
+              teleportButton:RegisterForClicks("LeftButtonDown", "LeftButtonUp")
+              teleportButton:EnableMouse(true)
+              dungeonFrame.teleportButton = teleportButton
+            end
+            if teleportButton then
+              teleportButton:Hide()
+              teleportButton:SetAttribute("type", nil)
+              teleportButton:SetAttribute("spell", nil)
+              if knownTeleportSpellID then
+                teleportButton:ClearAllPoints()
+                teleportButton:SetPoint("TOPLEFT", dungeonFrame, "TOPLEFT")
+                -- Every tracked character uses the same left-side level hitbox,
+                -- even when that character has no recorded run. The spell is
+                -- always checked against the currently logged-in character.
+                if Data.db.global.showScores then
+                  teleportButton:SetPoint("BOTTOMRIGHT", dungeonFrame, "BOTTOM")
+                else
+                  teleportButton:SetPoint("BOTTOMRIGHT", dungeonFrame, "BOTTOMRIGHT")
+                end
+                -- Use the same spell attributes as the working Row Labels.
+                -- RegisterForClicks limits the action to left mouse clicks.
+                teleportButton:SetAttribute("type", "spell")
+                teleportButton:SetAttribute("spell", knownTeleportSpellID)
+                teleportButton:SetScript("OnEnter", ShowDungeonTooltip)
+                teleportButton:SetScript("OnLeave", HideDungeonTooltip)
+                teleportButton:Show()
+              end
+            end
+          elseif knownTeleportSpellID or dungeonFrame.teleportButton then
+            pendingDungeonTeleportRefresh = true
+          end
 
           SetBackgroundColor(dungeonFrame, 1, 1, 1, dungeonIndex % 2 == 0 and 0.01 or 0)
           dungeonFrame:SetPoint("TOPLEFT", characterFrame, "TOPLEFT", 0, -totalHeight)
