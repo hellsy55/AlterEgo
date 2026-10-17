@@ -45,10 +45,10 @@ function Core:OnInitialize()
   Data:Initialize()
   Data:MigrateDB()
 
-  local function toggleDailyDelves()
-    local module = addon.Core:GetModule("DailyDelves", true)
+  local function openCurrentBonusRoll()
+    local module = addon.Core:GetModule("BonusRoll", true)
     if module then
-      module:Toggle()
+      module:OpenCurrentCharacter()
     end
   end
 
@@ -67,7 +67,7 @@ function Core:OnInitialize()
         elseif mouseButton == "MiddleButton" then
           self:ToggleRaidLockouts()
         elseif mouseButton == "RightButton" then
-          toggleDailyDelves()
+          openCurrentBonusRoll()
         else
           self:ToggleWindow()
         end
@@ -78,7 +78,7 @@ function Core:OnInitialize()
     OnTooltipShow = function(tooltip)
       tooltip:SetText(addon.title, 1, 1, 1)
       tooltip:AddLine("|cff00ff00Left click|r to open AlterEgo.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-      tooltip:AddLine("|cff00ff00Right click|r to open Daily Delves.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+      tooltip:AddLine("|cff00ff00Right click|r to open Bonus Roll.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
       tooltip:AddLine("|cff00ff00Middle click|r to open Raid Group Lockouts.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
       tooltip:AddLine("|cff00ff00Shift+Left click|r to open your character equipment.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
       tooltip:AddLine("|cff00ff00Shift+Right click|r to open the Great Vault.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
