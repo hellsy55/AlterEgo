@@ -14,6 +14,31 @@ local TableForEach = LiqUI.Utils.TableForEach
 local EQUIPMENT_HEADER_HEIGHT = 30
 local CRAFTED_QUALITY_MAX = 5
 
+---Format one stat label and percentage in its color, leaving the numeric rating white.
+local function formatColoredSecondaryStat(name, rating, percent, color)
+  return color:WrapTextInColorCode(name .. ": ")
+    .. WHITE_FONT_COLOR:WrapTextInColorCode(format("%d", rating))
+    .. color:WrapTextInColorCode(format(" (%.2f%%)", percent))
+end
+
+---Format a stored (and therefore non-secret) secondary-stat snapshot.
+---@param stats table?
+---@return string
+local function formatSecondaryStatsTitle(stats)
+  if type(stats) ~= "table" then return "" end
+  for _, key in ipairs({
+    "critRating", "critPercent", "hasteRating", "hastePercent",
+    "masteryRating", "masteryPercent", "versatilityRating", "versatilityPercent",
+  }) do
+    if type(stats[key]) ~= "number" then return "" end
+  end
+  return format(" - %s - %s - %s - %s",
+    formatColoredSecondaryStat("Crit", stats.critRating, stats.critPercent, RED_FONT_COLOR),
+    formatColoredSecondaryStat("Haste", stats.hasteRating, stats.hastePercent, RARE_BLUE_COLOR),
+    formatColoredSecondaryStat("Mastery", stats.masteryRating, stats.masteryPercent, EPIC_PURPLE_COLOR),
+    formatColoredSecondaryStat("Versatility", stats.versatilityRating, stats.versatilityPercent, GREEN_FONT_COLOR))
+end
+
 -- Equipment columns should follow the content that is actually displayed instead
 -- of reserving large fixed widths. Text-bearing columns are recalculated for every
 -- character render so long values expand the table rather than being clipped, while
@@ -632,6 +657,24 @@ function Module:OnEnable()
     end
   )
 
+  -- Keep snapshots current after buffs/spec changes, but never overwrite a
+  -- good snapshot with secret combat values. The shared event bucket coalesces
+  -- frequent rating/stat updates without rescanning every equipment slot.
+  addon.Events:RegisterEvent({
+    "COMBAT_RATING_UPDATE",
+    "UNIT_STATS",
+    "PLAYER_DAMAGE_DONE_MODS",
+    "PLAYER_SPECIALIZATION_CHANGED",
+    "PLAYER_ENTERING_WORLD",
+    "PLAYER_REGEN_ENABLED",
+  }, function(_, event, unit)
+    if (event == "UNIT_STATS" or event == "PLAYER_DAMAGE_DONE_MODS"
+      or event == "PLAYER_SPECIALIZATION_CHANGED") and unit ~= "player" then return end
+    if Data:UpdateSecondaryStats() and self.window and self.window:IsVisible() then
+      self:Render()
+    end
+  end)
+
   -- Hyperlink tooltips for offline characters may become available shortly
   -- after item data finishes loading. Re-render the open equipment window as
   -- soon as that happens instead of waiting for another unrelated UI update.
@@ -669,6 +712,20 @@ function Module:Render()
       title = "Character",
       onShow = function()
         Module:Render()
+      end,
+      onWindowOptionsAfterScaling = function(_, menu)
+        menu:CreateCheckbox(
+          "Show secondary stats in equipment title",
+          function() return windows.Equipment.showSecondaryStats == true end,
+          function()
+            windows.Equipment.showSecondaryStats = not windows.Equipment.showSecondaryStats
+            Module:Render()
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Show the saved Critical Strike, Haste, Mastery and Versatility ratings and percentages in this window's title.", nil, nil, nil, true)
+        end)
       end,
     })
     self.dataTable = LiqUI:NewElement("Table", {
@@ -1023,9 +1080,22 @@ function Module:Render()
     embellishmentStatusText = " - " .. DIM_RED_FONT_COLOR:WrapTextInColorCode(missingLabel)
   end
 
-  self.window:SetTitle(format("%s%s (%s)%s%s", positionPrefix, nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText, embellishmentStatusText))
+  local statsText = ""
+  if Data.db.global.liqui.windows.Equipment.showSecondaryStats then
+    statsText = formatSecondaryStatsTitle(character.secondaryStats)
+  end
+  self.window:SetTitle(format("%s%s (%s)%s%s%s", positionPrefix, nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText, embellishmentStatusText, statsText))
   sizeEquipmentColumnsToContent(self.dataTable, rows)
   self.dataTable:SetData(rows)
   local bodyWidth, bodyHeight = self.dataTable:GetSize()
-  self.window:SetBodySize(bodyWidth > 0 and bodyWidth or tableWidth, bodyHeight)
+  local requiredWidth = bodyWidth > 0 and bodyWidth or tableWidth
+  if statsText ~= "" and self.window.titlebar then
+    -- Reserve the measured title width plus the native Settings/Close buttons
+    -- instead of allowing the longer header to overlap the controls.
+    local titleWidth = self.window.titlebar.title:GetStringWidth() or 0
+    local titlebarHeight = LiqUI.Constants.layout.sizes.titlebar.height
+    local padding = LiqUI.Constants.layout.sizes.padding
+    requiredWidth = math.max(requiredWidth, math.ceil(titleWidth + padding * 2 + titlebarHeight * 2))
+  end
+  self.window:SetBodySize(requiredWidth, bodyHeight)
 end

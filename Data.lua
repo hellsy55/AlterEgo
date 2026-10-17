@@ -126,7 +126,7 @@ Data.defaultDB = {
         },
         Affixes = {},
         DailyDelves = {},
-        Equipment = {},
+        Equipment = {showSecondaryStats = false},
         VaultPreview = {},
         RaidLockouts = {},
         BonusRoll = {},
@@ -147,6 +147,7 @@ Data.defaultDB = {
       passwordAccounts = {}, ---@type table<string, string> Which WoW Account each password's synced characters land in
       lastSentRevision = {}, ---@type table<string, number> Per-character GUID -> sync revision last fully broadcast, so unchanged characters are not resent
       lastConfirmedRevision = {}, ---@type table<string, number> Per-character GUID -> sync revision most recently confirmed by another Sync peer via ACK
+      receivedFingerprints = {}, ---@type table<string, {revision:number, hash:string}> Authoritative content hash from each remote source
       lastSuccessfulSyncAt = 0, ---@type number Epoch timestamp of the most recent character sync confirmed by a peer (sent or received)
       lastSuccessfulSyncPeer = "", ---@type string Last peer character name involved in a confirmed character sync
     },
@@ -201,6 +202,7 @@ Data.defaultCharacter = {
     },
   },
   equipment = {},
+  secondaryStats = {}, -- Latest readable secondary-stat snapshot for this character
   money = 0,
   currencies = {},
   prey = {
@@ -818,6 +820,9 @@ function Data:DeleteCharacter(characterOrGUID)
   end
   if sync and sync.lastConfirmedRevision then
     sync.lastConfirmedRevision[GUID] = nil
+  end
+  if sync and sync.receivedFingerprints then
+    sync.receivedFingerprints[GUID] = nil
   end
   -- Clean legacy bookkeeping too if it still exists in an upgraded SavedVariables file.
   if sync and sync.lastSentUpdate then sync.lastSentUpdate[GUID] = nil end
@@ -2958,11 +2963,70 @@ function Data:GetEquipmentEmbellishmentInfo(itemLink, tooltipData, storedItem)
   return result
 end
 
+---Capture a secondary-stat snapshot while this character is online. Values
+---can become secret in Midnight's restricted combat states; never persist,
+---compare or format a secret value. Keep the last good snapshot for alts.
+---@return boolean changed
+function Data:UpdateSecondaryStats()
+  local character = self:GetCharacter()
+  if not character then return false end
+
+  local ok, values = pcall(function()
+    return {
+      critRating = GetCombatRating(CR_CRIT_MELEE),
+      critPercent = GetCritChance(),
+      hasteRating = GetCombatRating(CR_HASTE_MELEE),
+      hastePercent = GetHaste(),
+      masteryRating = GetCombatRating(CR_MASTERY),
+      masteryPercent = GetMasteryEffect(),
+      versatilityRating = GetCombatRating(CR_VERSATILITY_DAMAGE_DONE),
+      versatilityRatingPercent = GetCombatRatingBonus(CR_VERSATILITY_DAMAGE_DONE),
+      versatilityExtraPercent = GetVersatilityBonus(CR_VERSATILITY_DAMAGE_DONE),
+    }
+  end)
+  if not ok or type(values) ~= "table" then return false end
+  for _, key in ipairs({
+    "critRating", "critPercent", "hasteRating", "hastePercent",
+    "masteryRating", "masteryPercent", "versatilityRating",
+    "versatilityRatingPercent", "versatilityExtraPercent",
+  }) do
+    local value = values[key]
+    if (issecretvalue and issecretvalue(value)) or type(value) ~= "number" then
+      return false
+    end
+  end
+
+  local snapshot = {
+    critRating = values.critRating,
+    critPercent = math.floor(values.critPercent * 100 + 0.5) / 100,
+    hasteRating = values.hasteRating,
+    hastePercent = math.floor(values.hastePercent * 100 + 0.5) / 100,
+    masteryRating = values.masteryRating,
+    masteryPercent = math.floor(values.masteryPercent * 100 + 0.5) / 100,
+    versatilityRating = values.versatilityRating,
+    versatilityPercent = math.floor((values.versatilityRatingPercent + values.versatilityExtraPercent) * 100 + 0.5) / 100,
+  }
+  local previous = character.secondaryStats
+  local changed = type(previous) ~= "table"
+  for key, value in pairs(snapshot) do
+    if not previous or previous[key] ~= value then
+      changed = true
+      break
+    end
+  end
+  if not changed then return false end
+
+  character.secondaryStats = snapshot
+  self:MarkCharacterSyncChanged(character)
+  return true
+end
+
 ---Refresh equipment from the API
 function Data:UpdateEquipment()
   local character = self:GetCharacter()
   if not character then return end
 
+  self:UpdateSecondaryStats()
   character.equipment = wipe(character.equipment or {})
 
   local upgradePattern = ITEM_UPGRADE_TOOLTIP_FORMAT_STRING

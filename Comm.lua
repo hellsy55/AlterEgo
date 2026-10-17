@@ -38,6 +38,9 @@ local COMM_PREFIX = "AEv1"
 -- Presence/version negotiation uses a separate prefix so a multi-part HELLO cannot
 -- collide with a multi-part character record in AceComm's receive spool.
 local CONTROL_PREFIX = "AEv1Sync"
+-- Settings use their own receive spool; NORMAL messages must never interrupt
+-- a BULK character record on the shared AEv1 prefix.
+local SETTINGS_PREFIX = "AEv1Set"
 
 -- Peer discovery/reconciliation is intentionally session-local. Nothing received from
 -- another player is ever re-broadcast as a relay: each client only advertises versions
@@ -49,7 +52,7 @@ local HELLO_RESPONSE_MIN_INTERVAL_SECONDS = 8
 local MANUAL_RECONCILE_WAIT_SECONDS = 3
 local ACK_TIMEOUT_SECONDS = 45
 local ACK_RETRY_MAX = 2
-local syncPeers = {} -- [sender] = {lastSeen, distribution, versions = { [GUID] = syncRevision }}
+local syncPeers = {} -- [sender] = {lastSeen, distribution, versions, fingerprints}
 local catchupPendingGUIDs = {} -- own/Main characters a peer explicitly reported missing/stale
 local pendingConfirmations = {} -- [transmissionId] = {GUID, revision, manual, batchId}
 local confirmationRetryCounts = {} -- [GUID|syncRevision] = number of automatic ACK-timeout retries this session
@@ -69,7 +72,10 @@ local syncHeartbeatTicker = nil
 local manualReconcileRequestId = nil
 local manualReconcileResponders = nil
 local manualReconcileTimer = nil
+local pendingSettingsShares = {}
+local pendingCombatSettings = {}
 
+local FingerprintCharacter
 local SendSyncHello
 local ScheduleSyncHello
 local QueueCatchUpFromPeerVersions
@@ -306,7 +312,7 @@ end
 ---@param sender string
 ---@param distribution string?
 ---@param versions table<string, number>?
-local function MarkPeerSeen(sender, distribution, versions)
+local function MarkPeerSeen(sender, distribution, versions, fingerprints)
   if not sender or sender == "" then return end
   local peer = syncPeers[sender] or { versions = {} }
   syncPeers[sender] = peer
@@ -316,6 +322,9 @@ local function MarkPeerSeen(sender, distribution, versions)
     peer.versions = versions
   elseif type(peer.versions) ~= "table" then
     peer.versions = {}
+  end
+  if type(fingerprints) == "table" then
+    peer.fingerprints = fingerprints
   end
 end
 
@@ -370,6 +379,8 @@ local function SendCharacterRecord(character, password, channels, forced, batchI
     batchId = batchId,
     batchTotal = batchTotal,
     transmissionId = transmissionId,
+    fingerprint = FingerprintCharacter(character),
+    bonusRollSourceID = Data.db.global.kithixBonusRollSourceID,
   }
 
   local encoded = EncodeSyncPayload(payload)
@@ -474,6 +485,80 @@ local function GetCharacterRevision(character)
     return Data:GetCharacterSyncRevision(character)
   end
   return type(character) == "table" and (tonumber(character.syncRevision) or tonumber(character.lastUpdate) or 0) or 0
+end
+
+-- Stable (order-independent) fingerprint for comparing equal-revision snapshots.
+-- Never hash local roster organization: recipients are meant to keep those fields.
+-- This is a divergence check, not an authentication or cryptographic checksum.
+FingerprintCharacter = function(character)
+  if type(character) ~= "table" then return nil end
+  local hash = 5381
+  local visited = {}
+  local function append(value)
+    for i = 1, #value do
+      hash = (hash * 33 + string.byte(value, i)) % 2147483647
+    end
+  end
+  local function walk(value, depth)
+    local valueType = type(value)
+    if valueType == "table" then
+      if visited[value] or depth > 24 then append("cycle;") return end
+      visited[value] = true
+      append("{")
+      local keys = {}
+      for key in pairs(value) do
+        if type(key) == "string" or type(key) == "number" then
+          if depth ~= 0 or (key ~= "accountId" and key ~= "enabled" and key ~= "order") then
+            keys[#keys + 1] = key
+          end
+        end
+      end
+      table.sort(keys, function(a, b)
+        if type(a) ~= type(b) then return type(a) < type(b) end
+        return a < b
+      end)
+      for _, key in ipairs(keys) do
+        walk(key, depth + 1)
+        walk(value[key], depth + 1)
+      end
+      append("}")
+      visited[value] = nil
+    elseif valueType == "string" then
+      append("s" .. #value .. ":" .. value)
+    elseif valueType == "number" then
+      append("n" .. format("%.17g", value) .. ";")
+    elseif valueType == "boolean" then
+      append(value and "b1" or "b0")
+    else
+      append("z")
+    end
+  end
+  walk(character, 0)
+  return tostring(hash)
+end
+
+-- The receiver sometimes preserves fields that older versions omitted. Keep
+-- the original owner's hash separately so those protected fields don't cause
+-- endless equal-revision repair loops after reloads.
+local function GetKnownCharacterFingerprint(character)
+  if not character then return nil end
+  local sync = Data.db.global.sync
+  local fingerprints = sync and sync.receivedFingerprints
+  local saved = fingerprints and fingerprints[character.GUID]
+  if saved and not Data:IsCharacterSyncAuthoritative(character)
+    and saved.revision == GetCharacterRevision(character) and type(saved.hash) == "string" then
+    return saved.hash
+  end
+  return FingerprintCharacter(character)
+end
+
+local function RememberReceivedFingerprint(character, hash)
+  if not hash then return end
+  local sync = Data.db.global.sync
+  sync.receivedFingerprints = sync.receivedFingerprints or {}
+  sync.receivedFingerprints[character.GUID] = {
+    revision = GetCharacterRevision(character), hash = hash,
+  }
 end
 
 ---Has this character actually changed since the last time we told anyone
@@ -607,6 +692,16 @@ local function GetCurrentlyEligibleCharacter(GUID)
   return character
 end
 
+local function BuildKnownCharacterFingerprints()
+  local fingerprints = {}
+  for GUID, character in pairs(Data.db.global.characters or {}) do
+    if type(GUID) == "string" and type(character) == "table" then
+      fingerprints[GUID] = GetKnownCharacterFingerprint(character)
+    end
+  end
+  return fingerprints
+end
+
 local function BuildKnownCharacterVersions()
   local versions = {}
   for GUID, character in pairs(Data.db.global.characters or {}) do
@@ -621,7 +716,10 @@ local function PeerNeedsCharacter(peer, character)
   if not peer or type(peer.versions) ~= "table" then return true end
   local remoteVersion = tonumber(peer.versions[character.GUID])
   local localVersion = GetCharacterRevision(character)
-  return remoteVersion == nil or remoteVersion < localVersion
+  if remoteVersion == nil or remoteVersion < localVersion then return true end
+  if remoteVersion ~= localVersion then return false end
+  local peerHash = type(peer.fingerprints) == "table" and peer.fingerprints[character.GUID]
+  return type(peerHash) == "string" and peerHash ~= GetKnownCharacterFingerprint(character)
 end
 
 ---@param character AE_Character
@@ -683,13 +781,16 @@ local function ArmConfirmationTimeout(transmissionId)
   end)
 end
 
-QueueCatchUpFromPeerVersions = function(versions)
+QueueCatchUpFromPeerVersions = function(versions, fingerprints)
   if type(versions) ~= "table" then return end
   local queued = false
   for _, character in ipairs(GetBroadcastCandidates()) do
     local remoteVersion = tonumber(versions[character.GUID])
     local localVersion = GetCharacterRevision(character)
-    if remoteVersion == nil or remoteVersion < localVersion then
+    local remoteHash = type(fingerprints) == "table" and fingerprints[character.GUID]
+    if remoteVersion == nil or remoteVersion < localVersion
+      or (remoteVersion == localVersion and type(remoteHash) == "string"
+        and remoteHash ~= GetKnownCharacterFingerprint(character)) then
       catchupPendingGUIDs[character.GUID] = true
       queued = true
     end
@@ -717,6 +818,8 @@ SendSyncHello = function(target, responseTo, requestId, force)
     responseTo = responseTo,
     requestId = requestId,
     versions = BuildKnownCharacterVersions(),
+    fingerprints = BuildKnownCharacterFingerprints(),
+    bonusRollSourceID = Data.db.global.kithixBonusRollSourceID,
   }
 
   if target then
@@ -1070,6 +1173,8 @@ function addon.Core:ResetSyncBatchGuard()
   activeBatchConfirmedBy = {}
   manualReconcileRequestId = nil
   manualReconcileResponders = nil
+  wipe(pendingSettingsShares)
+  wipe(pendingCombatSettings)
   if manualReconcileTimer then
     manualReconcileTimer:Cancel()
     manualReconcileTimer = nil
@@ -1140,30 +1245,84 @@ end
 -- cause. Two entries (minimap, liqui) are handled separately below
 -- instead of listed here, because only PART of each is a shareable
 -- preference -- the rest is per-client screen position/size that would
--- look wrong copied onto a different monitor/resolution.
+-- look wrong copied onto a different monitor/resolution. Daily Delves
+-- caches and per-character progress are also kept local; only its three
+-- display/tracking preferences are shared. Labyrinth shares only 'enabled'.
+-- LiqUI shares column visibility and explicitly approved window preferences,
+-- never a complete per-window storage table or geometry.
 local SHAREABLE_SETTINGS_KEYS = {
   "sorting", "showTiers", "showScores", "showAffixColors", "showAffixHeader",
   "showNonMaxLevelCharacters", "showZeroRatedCharacters", "showItemLevel",
   "showEquippedItemLevel", "showItemLevelDecimals", "showRealms",
-  "showGuildInformation", "showRating", "showCurrentKeystone", "currentCharacterMarker",
-  "currentCharacterMarkerColor", "announceKeystones", "announceResets",
+  "showGuildInformation", "showRating", "showCurrentKeystone", "showCharacterPosition",
+  "showDailyDelves", "currentCharacterMarker", "currentCharacterMarkerColor",
+  "announceKeystones", "announceResets",
   "vault", "prey", "raids", "dungeons", "world", "currencies", "weeklies",
   "seasonalChores", "trackerOverrides", "useRIOScoreColor", "interface",
 }
 
 ---Builds the settings blob "Sync Addon Settings" sends -- every key in
----SHAREABLE_SETTINGS_KEYS, plus just the toggle parts of minimap (not its
----screen position) and liqui (just column-visibility, not window
----position/size).
+---SHAREABLE_SETTINGS_KEYS, plus explicitly selected preferences in minimap,
+---dailyDelves, labyrinth and liqui; never their tracking caches, UI state,
+---screen position or window geometry.
 ---@return table
 local function BuildSettingsPayload()
   local settings = {}
   for _, key in ipairs(SHAREABLE_SETTINGS_KEYS) do
     settings[key] = Data.db.global[key]
   end
+  -- An explicit flag distinguishes "reset marker to the default colour" from
+  -- an omitted value in a partial/legacy settings payload.
+  settings.currentCharacterMarkerColorDefault = Data.db.global.currentCharacterMarkerColor == nil
   settings.minimap = { hide = Data.db.global.minimap.hide, lock = Data.db.global.minimap.lock }
-  settings.liqui = { tables = Data.db.global.liqui.tables }
+  local delves = Data.db.global.dailyDelves
+  settings.dailyDelves = {
+    showOnlyHighTier = delves.showOnlyHighTier == true,
+    listAllStories = delves.listAllStories == true,
+    checkBountifulDone = delves.checkBountifulDone == true,
+  }
+  settings.labyrinth = { enabled = Data.db.global.labyrinth.enabled == true }
+  local mainWindow = Data.db.global.liqui.windows.Main
+  settings.liqui = {
+    tables = Data.db.global.liqui.tables,
+    windows = {
+      Main = {
+        logoIconOnly = mainWindow.logoIconOnly == true,
+        showCharacterScrollArrows = mainWindow.showCharacterScrollArrows ~= false,
+        collapsingRowLabelsDisplaysAllIcons = mainWindow.collapsingRowLabelsDisplaysAllIcons ~= false,
+      },
+      Equipment = { showSecondaryStats = Data.db.global.liqui.windows.Equipment.showSecondaryStats == true },
+      RaidLockouts = {
+        checkOnEntrance = Data.db.global.liqui.windows.RaidLockouts.checkOnEntrance == true,
+        sortColumn = Data.db.global.liqui.windows.RaidLockouts.sortColumn or "status",
+        sortAscending = Data.db.global.liqui.windows.RaidLockouts.sortAscending ~= false,
+      },
+      RaidLockoutAlert = {
+        bossListLayout = (Data.db.global.liqui.windows.RaidLockoutAlert or {}).bossListLayout == "columns"
+          and "columns" or "single",
+      },
+    },
+  }
   return settings
+end
+
+-- Merge known structured preferences rather than replacing entire tables:
+-- future-version keys survive receipt of an older sender's settings. Sets
+-- (hidden columns/currencies/difficulties) are replaced as whole maps so
+-- unchecking a previously selected item still propagates.
+local REPLACE_PREFERENCE_MAPS = {
+  hiddenColumns = true, hiddenCurrencies = true, hiddenDifficulties = true,
+  trackerOverrides = true,
+}
+local function MergeSettingsTable(target, incoming)
+  for key, value in pairs(incoming) do
+    if type(value) == "table" and type(target[key]) == "table"
+      and not REPLACE_PREFERENCE_MAPS[key] then
+      MergeSettingsTable(target[key], value)
+    elseif type(value) ~= "function" and type(value) ~= "userdata" then
+      target[key] = value
+    end
+  end
 end
 
 ---Applies a received settings blob (see BuildSettingsPayload) onto this
@@ -1173,18 +1332,76 @@ end
 local function ApplySettingsPayload(settings)
   for _, key in ipairs(SHAREABLE_SETTINGS_KEYS) do
     if settings[key] ~= nil then
-      Data.db.global[key] = settings[key]
+      if type(settings[key]) == "table" and type(Data.db.global[key]) == "table"
+        and not REPLACE_PREFERENCE_MAPS[key] then
+        MergeSettingsTable(Data.db.global[key], settings[key])
+      elseif type(settings[key]) == type(Data.db.global[key]) or Data.db.global[key] == nil then
+        Data.db.global[key] = settings[key]
+      end
     end
   end
-  if settings.minimap then
-    Data.db.global.minimap.hide = settings.minimap.hide
-    Data.db.global.minimap.lock = settings.minimap.lock
+  if settings.currentCharacterMarkerColorDefault == true then
+    Data.db.global.currentCharacterMarkerColor = nil
+  end
+  if type(settings.minimap) == "table" then
+    if type(settings.minimap.hide) == "boolean" then Data.db.global.minimap.hide = settings.minimap.hide end
+    if type(settings.minimap.lock) == "boolean" then Data.db.global.minimap.lock = settings.minimap.lock end
     if addon.Libs.LibDBIcon then
       addon.Libs.LibDBIcon:Refresh(addon.name, Data.db.global.minimap)
     end
   end
-  if settings.liqui and settings.liqui.tables then
-    Data.db.global.liqui.tables = settings.liqui.tables
+  -- Merge selected booleans only: receiving older/partial settings must
+  -- preserve unmentioned preferences and non-shareable tracking caches.
+  if type(settings.dailyDelves) == "table" then
+    for _, key in ipairs({ "showOnlyHighTier", "listAllStories", "checkBountifulDone" }) do
+      if type(settings.dailyDelves[key]) == "boolean" then
+        Data.db.global.dailyDelves[key] = settings.dailyDelves[key]
+      end
+    end
+  end
+  if type(settings.labyrinth) == "table" and type(settings.labyrinth.enabled) == "boolean" then
+    Data.db.global.labyrinth.enabled = settings.labyrinth.enabled
+  end
+  if type(settings.liqui) == "table" and type(settings.liqui.tables) == "table" then
+    MergeSettingsTable(Data.db.global.liqui.tables, settings.liqui.tables)
+  end
+  local sharedWindows = type(settings.liqui) == "table" and settings.liqui.windows
+  local mainSettings = type(sharedWindows) == "table" and sharedWindows.Main
+  if type(mainSettings) == "table" then
+    local mainWindow = Data.db.global.liqui.windows.Main
+    for _, key in ipairs({ "logoIconOnly", "showCharacterScrollArrows", "collapsingRowLabelsDisplaysAllIcons" }) do
+      if type(mainSettings[key]) == "boolean" then
+        mainWindow[key] = mainSettings[key]
+      end
+    end
+  end
+  local equipmentSettings = type(sharedWindows) == "table" and sharedWindows.Equipment
+  if type(equipmentSettings) == "table" and type(equipmentSettings.showSecondaryStats) == "boolean" then
+    Data.db.global.liqui.windows.Equipment.showSecondaryStats = equipmentSettings.showSecondaryStats
+  end
+  local raidShared = type(sharedWindows) == "table" and sharedWindows.RaidLockouts
+  if type(raidShared) == "table" then
+    local raidLocal = Data.db.global.liqui.windows.RaidLockouts
+    if type(raidShared.checkOnEntrance) == "boolean" then
+      raidLocal.checkOnEntrance = raidShared.checkOnEntrance
+    end
+    if raidShared.sortColumn == "character" or raidShared.sortColumn == "status"
+      or raidShared.sortColumn == "bosses" then
+      raidLocal.sortColumn = raidShared.sortColumn
+    end
+    if type(raidShared.sortAscending) == "boolean" then
+      raidLocal.sortAscending = raidShared.sortAscending
+    end
+  end
+  local alertShared = type(sharedWindows) == "table" and sharedWindows.RaidLockoutAlert
+  if type(alertShared) == "table" and
+    (alertShared.bossListLayout == "columns" or alertShared.bossListLayout == "single") then
+    local alertLocal = Data.db.global.liqui.windows.RaidLockoutAlert or {}
+    Data.db.global.liqui.windows.RaidLockoutAlert = alertLocal
+    alertLocal.bossListLayout = alertShared.bossListLayout
+  end
+  if addon.Module_RaidLockouts and addon.Module_RaidLockouts.RefreshSharedSyncSettings then
+    addon.Module_RaidLockouts:RefreshSharedSyncSettings()
   end
   addon.Core:Render()
 end
@@ -1197,29 +1414,91 @@ end
 ---Addon Settings" button's confirmation popup -- there is no automatic
 ---path to this, ever, unlike character sync's per-change background
 ---broadcast. Respects the same combat lockout as everything else here.
+local SETTINGS_ACK_TIMEOUT_SECONDS = 45
+local SETTINGS_RETRY_MAX = 1
+local processedSettingsShares = {}
+-- pendingCombatSettings[sender|shareId] stores a verified settings snapshot.
+
+local function SendSettingsAck(sender, password, shareId)
+  SendPayload(SETTINGS_PREFIX, {
+    password = password, settingsAck = true, shareId = shareId,
+  }, "WHISPER", "ALERT", sender)
+end
+
+local function AllSettingsPeersConfirmed(request)
+  local hasPeer = false
+  for sender in pairs(request.peers) do
+    hasPeer = true
+    if not request.acknowledged[sender] then return false end
+  end
+  return hasPeer
+end
+
+local QueueSettingsShare
+QueueSettingsShare = function(shareId)
+  local request = pendingSettingsShares[shareId]
+  if not request or not Data.db.global.sync.enabled then return end
+  if InCombatLockdown() then
+    C_Timer.After(10, function() QueueSettingsShare(shareId) end)
+    return
+  end
+  local channels = GetUsableChannels(false)
+  if #channels == 0 then
+    pendingSettingsShares[shareId] = nil
+    addon.Core:Print("Sync: settings delivery could not be confirmed; no Sync channel is available.")
+    return
+  end
+  local encoded = EncodeSyncPayload(request.payload)
+  local remaining = #channels
+  local hadFailure = false
+  for _, channel in ipairs(channels) do
+    local failed = false
+    SendOnChannel(SETTINGS_PREFIX, encoded, channel, "NORMAL", function(_, sent, total, didSend)
+      if not didSend then failed = true end
+      if sent < total then return end
+      if failed then hadFailure = true end
+      remaining = remaining - 1
+      if remaining ~= 0 then return end
+      -- Begin the ACK timeout after all fragments have left the client.
+      C_Timer.After(SETTINGS_ACK_TIMEOUT_SECONDS, function()
+        if pendingSettingsShares[shareId] ~= request then return end
+        if AllSettingsPeersConfirmed(request)
+          or (not next(request.peers) and next(request.acknowledged)) then
+          pendingSettingsShares[shareId] = nil
+          return
+        end
+        if request.retries < SETTINGS_RETRY_MAX then
+          request.retries = request.retries + 1
+          addon.Core:Print("Sync: retrying addon settings delivery (confirmation missing).")
+          QueueSettingsShare(shareId)
+        else
+          pendingSettingsShares[shareId] = nil
+          addon.Core:Print(hadFailure and
+            "Sync: some settings fragments could not be sent; delivery unconfirmed." or
+            "Sync: addon settings delivery not confirmed by all detected peers.")
+        end
+      end)
+    end, nil)
+  end
+end
+
 function addon.Core:ShareSettings()
   if InCombatLockdown() then
     addon.Core:Print("Sync: not sharing settings, you're in combat.")
     return
   end
-
   local password, channels = GetUsablePassword(true)
   if not password then return end
-
-  local payload = {
-    password = password,
-    settingsShare = true,
-    settings = BuildSettingsPayload(),
+  local shareId = NewSyncId("S")
+  local peers = {}
+  for sender in pairs(GetActiveSyncPeers()) do peers[sender] = true end
+  pendingSettingsShares[shareId] = {
+    payload = {password = password, settingsShare = true,
+      shareId = shareId, settings = BuildSettingsPayload()},
+    peers = peers, acknowledged = {}, retries = 0,
   }
-  local serialized = LibSerialize:Serialize(payload)
-  local compressed = LibDeflate:CompressDeflate(serialized)
-  local encoded = LibDeflate:EncodeForWoWAddonChannel(compressed)
-
-  for _, channel in ipairs(channels) do
-    SendOnChannel(COMM_PREFIX, encoded, channel, "NORMAL")
-  end
-
-  addon.Core:Print(format("Sync: sent your addon settings over %s.", JoinWithAnd(channels)))
+  QueueSettingsShare(shareId)
+  addon.Core:Print(format("Sync: sent your addon settings over %s (awaiting confirmation).", JoinWithAnd(channels)))
 end
 
 -- Received characters that arrived while you were in combat -- held here
@@ -1254,6 +1533,8 @@ function addon.Core:ForgetSyncCharacterMetadata(GUID)
 
   pendingCombatApplies[GUID] = nil
   catchupPendingGUIDs[GUID] = nil
+  local sync = Data.db.global.sync
+  if sync and sync.receivedFingerprints then sync.receivedFingerprints[GUID] = nil end
   for transmissionId, confirmation in pairs(pendingConfirmations) do
     if confirmation.GUID == GUID then
       pendingConfirmations[transmissionId] = nil
@@ -1261,6 +1542,7 @@ function addon.Core:ForgetSyncCharacterMetadata(GUID)
   end
   for _, peer in pairs(syncPeers) do
     if peer.versions then peer.versions[GUID] = nil end
+    if peer.fingerprints then peer.fingerprints[GUID] = nil end
   end
 
   local prefix = GUID .. "|"
@@ -1446,6 +1728,13 @@ end
 local function PreserveModernTrackingFromOlderPeer(remote, existing)
   if type(remote) ~= "table" or type(existing) ~= "table" then return end
   local trackingVersion = tonumber(remote.alterEgoTrackingVersion) or 0
+  -- Secondary stats were introduced after the version-3 tracking schema:
+  -- a sender that omits them must not erase a readable local snapshot.
+  if type(remote.secondaryStats) ~= "table" or not next(remote.secondaryStats) then
+    if type(existing.secondaryStats) == "table" and next(existing.secondaryStats) then
+      remote.secondaryStats = existing.secondaryStats
+    end
+  end
   if trackingVersion < 3 and type(existing.labyrinth) == "table" then
     remote.labyrinth = remote.labyrinth or {}
     local source = existing.labyrinth
@@ -1593,6 +1882,17 @@ local function RespondForCharacter(remote, sender, distribution, payload, status
 end
 
 addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+  for key, pendingSettings in pairs(pendingCombatSettings) do
+    if Data.db.global.sync.enabled
+      and pendingSettings.password == Data.db.global.sync.password then
+      ApplySettingsPayload(pendingSettings.settings)
+      processedSettingsShares[key] = true
+      C_Timer.After(600, function() processedSettingsShares[key] = nil end)
+      addon.Core:Print(format("Sync: |cff33ff99applied addon settings|r shared by %s.", tostring(pendingSettings.sender)))
+      SendSettingsAck(pendingSettings.sender, pendingSettings.password, pendingSettings.shareId)
+    end
+    pendingCombatSettings[key] = nil
+  end
   for GUID, pending in pairs(pendingCombatApplies) do
     -- Another local update or a manual deletion could change authority while
     -- we were in combat. Never overwrite a local or newer record at flush time.
@@ -1602,10 +1902,12 @@ addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
     local protected = existing and mainAccountId and existing.accountId == mainAccountId
     local status = protected and "rejected"
       or (existingRevision > GetCharacterRevision(pending.character) and "rejected")
-      or (existingRevision == GetCharacterRevision(pending.character) and "alreadyCurrent")
+      or (existingRevision == GetCharacterRevision(pending.character)
+        and GetKnownCharacterFingerprint(existing) == pending.fingerprint and "alreadyCurrent")
       or "applied"
     if status == "applied" then
       ApplyReceivedCharacter(pending.character, pending.isNew)
+      RememberReceivedFingerprint(pending.character, pending.fingerprint)
       processedUpdates[GUID .. "|" .. tostring(GetCharacterRevision(pending.character))] = true
     end
     for index, ack in ipairs(pending.acks) do
@@ -1658,22 +1960,20 @@ SendAck = function(remote, sender, password, batchId, transmissionId, manual, st
   SendPayload(COMM_PREFIX, payload, "WHISPER", "ALERT", sender)
 end
 
----Same idea as SendAck, but for a "Sync Addon Settings" push -- whispers
----confirmation back to whoever shared their settings, once this client
----has actually applied them, so the sender's chat shows the other side
----really got it.
----@param sender string
----@param password string
-local function SendSettingsAck(sender, password)
-  local payload = {
-    password = password,
-    settingsAck = true,
-  }
-  SendPayload(COMM_PREFIX, payload, "WHISPER", "ALERT", sender)
+
+-- Kith'ix source classification is installation-wide metadata. Advertise it in
+-- HELLO as well as character packets, so peers with identical revisions still
+-- learn an existing classification without forcing an unrelated character update.
+local function ApplySharedBonusRollSource(value)
+  local sourceID = tonumber(value)
+  if sourceID and sourceID > 0 and sourceID == math.floor(sourceID)
+    and addon.Module_BonusRoll and addon.Module_BonusRoll.LearnKithixBonusSource then
+    addon.Module_BonusRoll:LearnKithixBonusSource(sourceID)
+  end
 end
 
 function addon.Core:OnCommReceived(prefix, message, distribution, sender)
-  if prefix ~= COMM_PREFIX and prefix ~= CONTROL_PREFIX then return end
+  if prefix ~= COMM_PREFIX and prefix ~= CONTROL_PREFIX and prefix ~= SETTINGS_PREFIX then return end
   if not Data.db.global.sync.enabled then return end
 
   -- WoW echoes your own outgoing GUILD/PARTY/RAID (and even WHISPER-to-
@@ -1728,7 +2028,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     return
   end
 
-  MarkPeerSeen(sender, distribution, payload.versions)
+  MarkPeerSeen(sender, distribution, payload.versions, payload.fingerprints)
 
   -- Presence/version negotiation lives on its own prefix so it can never disturb
   -- character reassembly. A HELLO never changes settings or character ownership; it
@@ -1736,6 +2036,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   -- missing/outdated. Responses are direct whispers and never relayed onward.
   if prefix == CONTROL_PREFIX then
     if payload.hello then
+      ApplySharedBonusRollSource(payload.bonusRollSourceID)
       if payload.helloId then
         local helloKey = tostring(sender) .. "|" .. tostring(payload.helloId)
         if processedHelloIds[helloKey] then return end
@@ -1746,7 +2047,7 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
         manualReconcileResponders = manualReconcileResponders or {}
         manualReconcileResponders[sender] = true
       end
-      QueueCatchUpFromPeerVersions(payload.versions)
+      QueueCatchUpFromPeerVersions(payload.versions, payload.fingerprints)
       if not payload.response then
         local now = GetTime()
         local lastResponse = helloResponseAt[sender] or 0
@@ -1759,6 +2060,41 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
           end
         end
       end
+    end
+    return
+  end
+
+  -- A separate prefix prevents a settings push from stealing the character
+  -- record receive spool. Acks name the specific share, not just its sender.
+  if prefix == SETTINGS_PREFIX then
+    if payload.settingsAck then
+      local request = type(payload.shareId) == "string" and pendingSettingsShares[payload.shareId]
+      if request and not request.acknowledged[sender] then
+        request.acknowledged[sender] = true
+        addon.Core:Print(format("Sync: %s |cff33ff99confirmed|r applying addon settings.", tostring(sender)))
+        if AllSettingsPeersConfirmed(request) then pendingSettingsShares[payload.shareId] = nil end
+      end
+      return
+    end
+    if payload.settingsShare and type(payload.settings) == "table" then
+      local shareId = type(payload.shareId) == "string" and payload.shareId or nil
+      local key = tostring(sender) .. "|" .. tostring(shareId)
+      if shareId and processedSettingsShares[key] then
+        SendSettingsAck(sender, password, shareId)
+        return
+      end
+      if InCombatLockdown() then
+        pendingCombatSettings[key] = {sender = sender, password = password,
+          shareId = shareId, settings = payload.settings}
+        return
+      end
+      ApplySettingsPayload(payload.settings)
+      if shareId then
+        processedSettingsShares[key] = true
+        C_Timer.After(600, function() processedSettingsShares[key] = nil end)
+      end
+      addon.Core:Print(format("Sync: |cff33ff99applied addon settings|r shared by %s.", tostring(sender)))
+      SendSettingsAck(sender, password, shareId)
     end
     return
   end
@@ -1796,6 +2132,9 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
       if peer then
         peer.versions = peer.versions or {}
         peer.versions[GUID] = confirmedRevision
+        peer.fingerprints = peer.fingerprints or {}
+        local localCharacter = Data.db.global.characters[GUID]
+        if localCharacter then peer.fingerprints[GUID] = GetKnownCharacterFingerprint(localCharacter) end
       end
       MarkSuccessfulSync(sender)
     end
@@ -1822,31 +2161,17 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     return
   end
 
-  -- Same, but for a "Sync Addon Settings" push.
-  if payload.settingsAck then
-    addon.Core:Print(format("Sync: %s |cff33ff99confirmed|r receiving your addon settings.", tostring(sender)))
-    return
-  end
-
-  -- Shared addon settings from "Sync Addon Settings" -- see
-  -- ApplySettingsPayload for exactly what this does and doesn't touch
-  -- (never characters, never Sync's own password/enabled/channel).
-  if payload.settingsShare then
-    if type(payload.settings) == "table" then
-      ApplySettingsPayload(payload.settings)
-      addon.Core:Print(format("Sync: |cff33ff99applied addon settings|r shared by %s.", tostring(sender)))
-      SendSettingsAck(sender, password)
-    end
-    return
-  end
-
   local remote = payload.character
   if type(remote) ~= "table" or type(remote.GUID) ~= "string" or remote.GUID == "" then return end
   if remote.GUID == UnitGUID("player") then return end -- shouldn't happen, but never let a record overwrite the live character
 
   local remoteRevision = GetCharacterRevision(remote)
+  -- Recompute on decoded contents: a supplied hash is advisory, not trusted.
+  local incomingHash = FingerprintCharacter(remote)
   local updateKey = remote.GUID .. "|" .. tostring(remoteRevision)
   local current = Data.db.global.characters[remote.GUID]
+  local differsAtSameRevision = current and GetCharacterRevision(current) == remoteRevision
+    and incomingHash ~= GetKnownCharacterFingerprint(current)
   local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
   if current and mainAccountId and current.accountId == mainAccountId then
     RespondForCharacter(remote, sender, distribution, payload, "rejected", "main-account-authority", false)
@@ -1855,7 +2180,8 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
 
   -- Previously applied versions only count as current while they are STILL
   -- the version stored. The same GUID may have advanced later this session.
-  if processedUpdates[updateKey] and current and GetCharacterRevision(current) == remoteRevision then
+  if processedUpdates[updateKey] and current and GetCharacterRevision(current) == remoteRevision
+    and not differsAtSameRevision then
     RespondForCharacter(remote, sender, distribution, payload, "alreadyCurrent", nil, false)
     return
   end
@@ -1865,19 +2191,19 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   local pending = pendingCombatApplies[remote.GUID]
   if pending then
     local pendingRevision = GetCharacterRevision(pending.character)
-    if remoteRevision <= pendingRevision then
-      if remoteRevision == pendingRevision then
-        if not payload.transmissionId or not pending.seen[payload.transmissionId] then
-          if payload.transmissionId then pending.seen[payload.transmissionId] = true end
-          table.insert(pending.acks, {sender = sender, distribution = distribution, payload = payload})
-        end
-      else
-        RespondForCharacter(remote, sender, distribution, payload, "rejected", "superseded", false)
+    if remoteRevision < pendingRevision then
+      RespondForCharacter(remote, sender, distribution, payload, "rejected", "superseded", false)
+      return
+    end
+    if remoteRevision == pendingRevision and incomingHash == pending.fingerprint then
+      if not payload.transmissionId or not pending.seen[payload.transmissionId] then
+        if payload.transmissionId then pending.seen[payload.transmissionId] = true end
+        table.insert(pending.acks, {sender = sender, distribution = distribution, payload = payload})
       end
       return
     end
-    -- A newer revision supersedes the queued older one. Do not acknowledge
-    -- the old batch as applied; tell the sender that it was superseded.
+    -- Newer revision or different authoritative contents at the same revision.
+    -- The queued snapshot is superseded and must not receive a positive ACK.
     for _, ack in ipairs(pending.acks) do
       RespondForCharacter(pending.character, ack.sender, ack.distribution,
         ack.payload, "rejected", "superseded", false)
@@ -1892,7 +2218,8 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   -- Equal revisions are already current and do not need reapplication.
   if existing then
     local existingRevision = GetCharacterRevision(existing)
-    if remoteRevision <= existingRevision then
+    if remoteRevision < existingRevision or
+      (remoteRevision == existingRevision and not differsAtSameRevision) then
       local status = remoteRevision == existingRevision and "alreadyCurrent" or "rejected"
       RespondForCharacter(remote, sender, distribution, payload, status,
         status == "rejected" and "stale-revision" or nil, false)
@@ -1938,6 +2265,11 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
     end
   end
 
+  -- Only propagate the learned Kith'ix source when the character record
+  -- actually passes ownership/revision validation, never from an arbitrary
+  -- control/settings packet. Other sources remain locally classified.
+  ApplySharedBonusRollSource(payload.bonusRollSourceID)
+
   -- Old senders do not know the new Labyrinth/item/weekly fields. Preserve
   -- those fields locally without overriding fields supplied by modern peers.
   PreserveModernTrackingFromOlderPeer(remote, existing)
@@ -1953,11 +2285,13 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
       isNew = isNew,
       acks = {{sender = sender, distribution = distribution, payload = payload}},
       seen = payload.transmissionId and {[payload.transmissionId] = true} or {},
+      fingerprint = incomingHash,
     }
     return
   end
 
   ApplyReceivedCharacter(remote, isNew)
+  RememberReceivedFingerprint(remote, incomingHash)
   processedUpdates[updateKey] = true
   RespondForCharacter(remote, sender, distribution, payload, "applied", nil, isNew)
 end
@@ -1982,3 +2316,4 @@ end
 
 addon.Core:RegisterComm(COMM_PREFIX)
 addon.Core:RegisterComm(CONTROL_PREFIX)
+addon.Core:RegisterComm(SETTINGS_PREFIX)

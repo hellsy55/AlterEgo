@@ -101,8 +101,9 @@ end
 
 ---Classify a Kith'ix bonus-roll source from its actual spell confirmation
 ---while inside the raid, never from a guessed source/item identifier.
-local function learnKithixBonusSource(sourceID)
+local function learnKithixBonusSource(sourceID, fromSync)
   if type(sourceID) ~= "number" or sourceID <= 0 then return end
+  local changed = Data.db and Data.db.global.kithixBonusRollSourceID ~= sourceID
   -- Use one stable local grouping key even if the Encounter Journal loads
   -- after some rolls. Mixing an unresolved and resolved EJ ID would split
   -- the same boss into two different raid headers in Bonus Roll History.
@@ -112,7 +113,16 @@ local function learnKithixBonusSource(sourceID)
   }
   if Data.db then
     Data.db.global.kithixBonusRollSourceID = sourceID
+    if changed and not fromSync and Data.MarkCharacterSyncChanged then
+      Data:MarkCharacterSyncChanged(Data:GetCharacter())
+    end
   end
+end
+
+---Use the same validated classification path for IDs learned from an
+---authorized Multi-Account Sync character record.
+function Module:LearnKithixBonusSource(sourceID)
+  learnKithixBonusSource(sourceID, true)
 end
 
 ---Infer a previously unseen Kith'ix source from an item in SimulationCraft's
@@ -1271,7 +1281,7 @@ end
 function Module:OnInitialize()
   local savedSourceID = Data.db and Data.db.global.kithixBonusRollSourceID
   if type(savedSourceID) == "number" then
-    learnKithixBonusSource(savedSourceID)
+    learnKithixBonusSource(savedSourceID, true)
   end
   self:RegisterChatCommand("bonus", function()
     Module:OpenCurrentCharacter()

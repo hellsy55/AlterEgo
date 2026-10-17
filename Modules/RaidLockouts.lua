@@ -1171,6 +1171,20 @@ local function refreshVisibleAlertLayout(window)
   end
 end
 
+---Refresh an already open window when a peer shares display preferences.
+---Do not copy geometry or local difficulty selection from the peer.
+function Module:RefreshSharedSyncSettings()
+  if self.window and self.window:IsShown() then
+    self.sortColumn, self.sortAscending = getSavedSortState()
+    if self.entranceCheckButton then
+      self.entranceCheckButton:SetChecked(self:IsEntranceCheckEnabled())
+    end
+    self:RefreshSortHeaders()
+    self:RefreshWindow()
+  end
+  refreshVisibleAlertLayout(alertWindow)
+end
+
 local function ensureAlertWindow()
   if alertWindow then return alertWindow end
 
