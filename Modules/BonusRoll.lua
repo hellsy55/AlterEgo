@@ -16,7 +16,7 @@ local HEADER_HEIGHT = 24
 local FOOTER_HEIGHT = 20
 local ROW_HEIGHT = 22
 local DIFFICULTY_COLUMN_WIDTH = 60
-local MAX_COLUMNS = 5 -- LFR, Normal, Heroic, Mythic + keystone
+local MAX_COLUMNS = 5 -- four raid difficulties + one overlapping dungeon column
 local ICON_SIZE = 18
 local TEXT_RIGHT_RESERVE = 44 -- space between row text and the difficulty columns (spec/roll-count area + padding)
 local WINDOW_EDGE_MARGIN = 80 -- keep dynamically sized windows inside the usable screen width when possible
@@ -471,21 +471,9 @@ end
 local function getInstanceTooltipLines(instance)
   local lines = {}
   if instance.kind == "dungeon" then
-    local perLevel, levels = {}, {}
-    for _, boss in ipairs(instance.bosses) do
-      for _, entry in ipairs(boss.entries) do
-        if not perLevel[entry.keyLevel] then
-          perLevel[entry.keyLevel] = 0
-          table.insert(levels, entry.keyLevel)
-        end
-        perLevel[entry.keyLevel] = perLevel[entry.keyLevel] + 1
-      end
-    end
-    table.sort(levels, function(a, b) return a > b end)
+    -- Keystone levels are intentionally not separated in Bonus Roll History.
+    -- Preserve them on the underlying entries for accurate item tooltips.
     table.insert(lines, {format("Rolls used: %d", instance.count), 1, 1, 1})
-    for _, level in ipairs(levels) do
-      table.insert(lines, {format("+%d: %d", level, perLevel[level]), 0.8, 0.8, 0.8})
-    end
   else
     local perDifficulty = {}
     for _, boss in ipairs(instance.bosses) do
@@ -521,7 +509,7 @@ local function buildRows(sections, collapsedSections, collapsedInstances)
   local function addSection(sectionKey, title, section)
     if #section.list == 0 then return end
 
-    local sectionCollapsible = sectionKey == "raids"
+    local sectionCollapsible = sectionKey == "raids" or sectionKey == "dungeons"
     local sectionCollapsed = sectionCollapsible and collapsedSections[sectionKey] == true
     table.insert(rows, {
       type = "header",
@@ -534,7 +522,8 @@ local function buildRows(sections, collapsedSections, collapsedInstances)
     if sectionCollapsed then return end
 
     for _, instance in ipairs(section.list) do
-      local instanceCollapsible = sectionKey == "raids" and instance.kind == "raid"
+      local instanceCollapsible = (sectionKey == "raids" and instance.kind == "raid")
+        or (sectionKey == "dungeons" and instance.kind == "dungeon")
       local instanceCollapsed = instanceCollapsible and collapsedInstances[instance.key] == true
       table.insert(rows, {
         type = "instance",
@@ -766,7 +755,8 @@ end
 local function showInstanceTooltip(row)
   local instance = row.data.instance
   GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
-  GameTooltip:AddLine(instance.name, 1, 1, 1)
+  -- Match the yellow instance titles in the Bonus Roll list.
+  GameTooltip:AddLine(instance.name, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
   for _, line in ipairs(getInstanceTooltipLines(instance)) do
     GameTooltip:AddLine(line[1], line[2], line[3], line[4])
   end
@@ -869,10 +859,11 @@ end
 
 ---@param data table
 function Module:ToggleCollapsedRow(data)
-  if data.type == "header" and data.sectionKey == "raids" then
+  if data.type == "header" and (data.sectionKey == "raids" or data.sectionKey == "dungeons") then
     self.collapsedSections = self.collapsedSections or {}
-    self.collapsedSections.raids = not self.collapsedSections.raids
-  elseif data.type == "instance" and data.instanceKey and data.instance and data.instance.kind == "raid" then
+    self.collapsedSections[data.sectionKey] = not self.collapsedSections[data.sectionKey]
+  elseif data.type == "instance" and data.instanceKey
+    and data.instance and (data.instance.kind == "raid" or data.instance.kind == "dungeon") then
     self.collapsedInstances = self.collapsedInstances or {}
     self.collapsedInstances[data.instanceKey] = not self.collapsedInstances[data.instanceKey]
   else
@@ -982,20 +973,21 @@ function Module:ScheduleRender()
   end)
 end
 
----Which column a roll belongs to: "key" (keystone level) or a raid difficultyID.
+---Which column a roll belongs to: the shared dungeon column or a raid difficultyID.
 ---@param entry table
 ---@param instanceKind string?
 ---@return "key"|number|nil
 local function getEntryColumn(entry, instanceKind)
   local isKeystone = instanceKind == "dungeon" or Data.bonusRollKeystoneContexts[entry.contextID]
   if isKeystone then
-    if entry.keyLevel and entry.keyLevel > 0 then return "key" end
-    return nil
+    -- Any dungeon roll belongs to the same cell, regardless of keystone level.
+    return "key"
   end
   return getRaidDifficultyID(entry)
 end
 
----Only the difficulties that actually had a roll get a column, plus "+#" if any keystone roll exists.
+---Show used raid difficulties at their native spacing, with a dungeon cell
+---drawn independently at the center of the raid difficulty area.
 ---@param rows table[]
 ---@return table[] columns, table<string|number, number> columnIndex
 function Module:BuildColumns(rows)
@@ -1016,7 +1008,9 @@ function Module:BuildColumns(rows)
     end
   end
   if used.key then
-    table.insert(columns, {id = "key", label = "+#"})
+    -- Do not reserve a fifth difficulty slot for the dungeon column.
+    -- It shares the horizontal center without moving any raid difficulty.
+    table.insert(columns, {id = "key", label = ""})
     columnIndex.key = #columns
   end
   return columns, columnIndex
@@ -1058,7 +1052,8 @@ function Module:Render()
   local rows = buildRows(sections, self.collapsedSections, self.collapsedInstances)
   local columns, columnIndex = self:BuildColumns(allRows)
   local numColumns = #columns
-  local columnsWidth = numColumns * DIFFICULTY_COLUMN_WIDTH
+  local numRaidColumns = numColumns - (columnIndex.key and 1 or 0)
+  local columnsWidth = math.max(numRaidColumns, columnIndex.key and 1 or 0) * DIFFICULTY_COLUMN_WIDTH
 
   -- Recalculate the Loot side from the actual content so long raid, boss, dungeon,
   -- and item names expand the window instead of escaping the body or colliding with
@@ -1117,8 +1112,21 @@ function Module:Render()
     row.count:SetPoint("CENTER", row.specIcon, "CENTER", 0, 0)
     for cellIndex, cell in ipairs(row.cells) do
       cell:ClearAllPoints()
-      cell:SetPoint("CENTER", row, "RIGHT", -((numColumns - cellIndex) * DIFFICULTY_COLUMN_WIDTH + DIFFICULTY_COLUMN_WIDTH / 2), 0)
-      cell:Show()
+      local column = columns[cellIndex]
+      if column then
+        local centerFromRight
+        if column.id == "key" then
+          -- Dungeon is centered within the raid columns, without widening
+          -- the N/H gap or shifting the L/N/H/M positions.
+          centerFromRight = columnsWidth / 2
+        else
+          centerFromRight = (numRaidColumns - cellIndex + 0.5) * DIFFICULTY_COLUMN_WIDTH
+        end
+        cell:SetPoint("CENTER", row, "RIGHT", -centerFromRight, 0)
+        cell:Show()
+      else
+        cell:Hide()
+      end
     end
 
     if data.type == "header" then
@@ -1192,13 +1200,9 @@ function Module:Render()
         if cell and not cell.entry then
           cell.entry = entry
           cell:EnableMouse(true)
-          if column == "key" then
-            local levelText = "+" .. entry.keyLevel
-            local levelColor = C_ChallengeMode and C_ChallengeMode.GetKeystoneLevelRarityColor and C_ChallengeMode.GetKeystoneLevelRarityColor(entry.keyLevel)
-            cell.text:SetText(levelColor and levelColor:WrapTextInColorCode(levelText) or levelText)
-          else
-            cell.text:SetText(CHECK_MARKUP)
-          end
+          -- A dungeon cell is a checkmark, just like a raid difficulty cell.
+          -- More than one roll of this item may share this same cell.
+          cell.text:SetText(CHECK_MARKUP)
         end
       end
     end
