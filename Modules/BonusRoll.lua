@@ -18,6 +18,7 @@ local ROW_HEIGHT = 22
 local DIFFICULTY_COLUMN_WIDTH = 60
 local MAX_COLUMNS = 5 -- four raid difficulties + one overlapping dungeon column
 local ICON_SIZE = 18
+local RENDER_BATCH_SIZE = 6 -- limit frame work when showing long histories
 local TEXT_RIGHT_RESERVE = 44 -- space between row text and the difficulty columns (spec/roll-count area + padding)
 local WINDOW_EDGE_MARGIN = 80 -- keep dynamically sized windows inside the usable screen width when possible
 
@@ -201,18 +202,32 @@ function Module:BONUS_ROLL_RESULT(_, typeIdentifier, itemLink, _, specID)
   local keyLevel = pending.keyLevel or 0
   specID = resolveLootSpecID(specID)
 
-  if character then
-    local saved = character.bonusRoll
-    if not saved then
-      saved = {raw = "", entries = {}, updatedAt = time(), exactItems = {}}
-      character.bonusRoll = saved
-    end
-    saved.exactItems = saved.exactItems or {}
-    saved.exactItems[getEntryKeyValues(currencyID, sourceID, contextID, keyLevel, itemID, specID)] = itemLink
-    saved.updatedAt = time()
-    if Data.MarkCharacterSyncChanged then
-      Data:MarkCharacterSyncChanged(character)
-    end
+  -- Save the complete roll immediately. A character switch can happen before
+  -- the next SimulationCraft profile fetch; saving only its item link would
+  -- leave the offline character with no history entry to display.
+  local seasonID = Data:GetCurrentSeason()
+  local saved = character.bonusRoll
+  if type(saved) ~= "table" or (saved.seasonID and seasonID and saved.seasonID ~= seasonID) then
+    saved = {raw = "", entries = {}, exactItems = {}, pendingEntries = {}}
+    character.bonusRoll = saved
+  end
+  saved.entries = saved.entries or {}
+  saved.exactItems = saved.exactItems or {}
+  saved.pendingEntries = saved.pendingEntries or {}
+  local entry = {
+    currencyID = currencyID, sourceID = sourceID, contextID = contextID,
+    keyLevel = keyLevel, itemID = itemID, specID = specID,
+    ts = C_DateAndTime and C_DateAndTime.GetServerTimeLocal
+      and C_DateAndTime.GetServerTimeLocal() or time(),
+  }
+  saved.displayVersion = (saved.displayVersion or 0) + 1
+  table.insert(saved.entries, entry)
+  table.insert(saved.pendingEntries, entry)
+  saved.exactItems[getEntryKey(entry)] = itemLink
+  saved.seasonID = seasonID
+  saved.updatedAt = time()
+  if Data.MarkCharacterSyncChanged then
+    Data:MarkCharacterSyncChanged(character)
   end
 
   self.pendingBonusRoll = nil
@@ -245,33 +260,176 @@ local function parseRaw(raw)
   return entries
 end
 
----Fetch fresh data for the logged in character and save it if it changed.
+---Return only the entries added by SimulationCraft since the last fetch.
+---A count per full key preserves repeat rolls of the same item.
+local function getNewExportEntries(previousRaw, currentEntries)
+  local previousCounts = {}
+  for _, entry in ipairs(parseRaw(previousRaw or "")) do
+    local key = getEntryKey(entry)
+    previousCounts[key] = (previousCounts[key] or 0) + 1
+  end
+  local added = {}
+  for _, entry in ipairs(currentEntries) do
+    local key = getEntryKey(entry)
+    local count = previousCounts[key] or 0
+    if count > 0 then
+      previousCounts[key] = count - 1
+    else
+      table.insert(added, entry)
+    end
+  end
+  return added
+end
+
+---Match a locally captured result to the same newly exported SimC roll.
+---The prompt can be missing on one side, so source/context may differ; an
+---item and a compatible loot spec are enough when both records are new.
+---Read dated roll records from SimulationCraft's SavedVariables. The profile
+---export omits timestamps, so import them from the same character's AceDB data.
+---Use exact full roll keys to avoid attributing a date to another difficulty
+---or loot spec when an item was won more than once.
+local function importRollTimestamps(character)
+  local simc = getSimulationCraft()
+  if not simc or type(simc.GetCurrentSeasonId) ~= "function" then return false end
+  local ok, simcSeason = pcall(simc.GetCurrentSeasonId, simc)
+  if not ok or type(simcSeason) ~= "number" then return false end
+
+  local info = character.info
+  local rolls
+  if info and type(info.name) == "string" and info.name ~= ""
+    and type(info.realm) == "string" and info.realm ~= "" then
+    local db = _G.SimulationCraftDB
+    local charDB = type(db) == "table" and db.char
+    local simcCharacter = type(charDB) == "table" and charDB[info.name .. " - " .. info.realm]
+    rolls = type(simcCharacter) == "table" and simcCharacter.bonusRolls
+  end
+  if character.GUID == UnitGUID("player") and simc.db and simc.db.char then
+    rolls = simc.db.char.bonusRolls or rolls
+  end
+  if type(rolls) ~= "table" then return false end
+
+  local saved = character.bonusRoll
+  if not saved or type(saved.entries) ~= "table" then return false end
+  local buckets = {}
+  for _, roll in ipairs(rolls) do
+    if type(roll) == "table" and roll.season == simcSeason
+      and type(roll.ts) == "number" and roll.ts > 0 then
+      local key = getEntryKeyValues(roll.currency, roll.source, roll.context,
+        roll.keyLevel, roll.itemId, roll.spec)
+      buckets[key] = buckets[key] or {}
+      table.insert(buckets[key], roll.ts)
+    end
+  end
+  for _, bucket in pairs(buckets) do table.sort(bucket) end
+  local offsets = {}
+  local changed = false
+  for _, entry in ipairs(saved.entries) do
+    local key = getEntryKey(entry)
+    local bucket = buckets[key]
+    local nextIndex = (offsets[key] or 0) + 1
+    offsets[key] = nextIndex
+    local timestamp = bucket and bucket[nextIndex]
+    if timestamp and entry.ts ~= timestamp then
+      entry.ts = timestamp
+      changed = true
+    end
+  end
+  if changed then
+    saved.displayVersion = (saved.displayVersion or 0) + 1
+    if Data.MarkCharacterSyncChanged then Data:MarkCharacterSyncChanged(character) end
+  end
+  return changed
+end
+
+local function sameBonusRollResult(first, second)
+  return first.itemID == second.itemID
+    and (first.specID == second.specID or first.specID == 0 or second.specID == 0)
+end
+
+---Fetch fresh data for the logged in character and reconcile locally captured
+---rolls that SimulationCraft has not exported yet (or could not export).
 ---@param character AE_Character
 ---@return string? err
 function Module:UpdateCharacter(character)
   if not Data:IsMaxLevelCharacter(character) then return nil end
   local raw, err = fetchRaw()
   if raw == nil then
+    importRollTimestamps(character)
     return err
   end
+
+  local seasonID = Data:GetCurrentSeason()
   local saved = character.bonusRoll
+  if type(saved) ~= "table" or (saved.seasonID and seasonID and saved.seasonID ~= seasonID) then
+    saved = nil -- SimulationCraft exports only the current season.
+  end
+
+  -- A temporarily empty or truncated same-season export must not erase
+  -- entries already confirmed by an earlier SimulationCraft snapshot.
+  local entries = parseRaw(raw)
+  if saved and saved.raw and #entries < #parseRaw(saved.raw) then
+    importRollTimestamps(character)
+    return "incomplete"
+  end
+
   if saved and saved.raw == raw and type(saved.entries) == "table" then
     learnKithixSourcesFromSimC(saved.entries)
     -- A successful check is still an update even when the roll history itself
     -- did not change. Keep the footer meaningful after the automatic login check.
     saved.updatedAt = time()
+    saved.seasonID = seasonID
+    importRollTimestamps(character)
     if Data.MarkCharacterSyncChanged then
       Data:MarkCharacterSyncChanged(character)
     end
     return nil
   end
+
+  local pendingEntries = saved and saved.pendingEntries or {}
+  local exactItems = saved and saved.exactItems or {}
+  local newExportEntries = getNewExportEntries(saved and saved.raw, entries)
+
+  -- Only match new SimC records against locally recorded results. Comparing
+  -- with all historical records would consume a new roll on an older copy of
+  -- the same item, dropping a legitimate repeat roll from the history.
+  for _, exported in ipairs(newExportEntries) do
+    local matchIndex
+    for i, pending in ipairs(pendingEntries) do
+      if getEntryKey(pending) == getEntryKey(exported) then
+        matchIndex = i
+        break
+      end
+    end
+    if not matchIndex then
+      for i, pending in ipairs(pendingEntries) do
+        if sameBonusRollResult(pending, exported) then
+          matchIndex = i
+          break
+        end
+      end
+    end
+    if matchIndex then
+      local pending = table.remove(pendingEntries, matchIndex)
+      local link = exactItems[getEntryKey(pending)]
+      if link then exactItems[getEntryKey(exported)] = link end
+      exported.ts = pending.ts
+    end
+  end
+  for _, pending in ipairs(pendingEntries) do
+    table.insert(entries, pending)
+  end
+
   character.bonusRoll = {
     raw = raw,
-    entries = parseRaw(raw),
+    entries = entries,
+    pendingEntries = pendingEntries,
+    seasonID = seasonID,
     updatedAt = time(),
-    exactItems = saved and saved.exactItems or {},
+    exactItems = exactItems,
+    displayVersion = (saved and saved.displayVersion or 0) + 1,
   }
-  learnKithixSourcesFromSimC(character.bonusRoll.entries)
+  importRollTimestamps(character)
+  learnKithixSourcesFromSimC(entries)
   if Data.MarkCharacterSyncChanged then
     Data:MarkCharacterSyncChanged(character)
   end
@@ -303,11 +461,16 @@ function Module:RefreshOnInitialLogin()
     end
 
     if not Data:IsMaxLevelCharacter(character) then return end
+    if InCombatLockdown and InCombatLockdown() then
+      self.loginSyncDeferredGUID = guid
+      self.combatRefreshPending = true
+      return
+    end
 
     local err = self:UpdateCharacter(character)
     if not err then
       if self.window and self.window:IsVisible() and self.character and self.character.GUID == guid then
-        self:Render()
+        self:ScheduleRender()
       end
       return
     end
@@ -441,14 +604,29 @@ local function buildSections(entries)
         table.sort(boss.entries, sortEntries)
         boss.items = {}
         local itemLookup = {}
+        local itemOrder = {}
         for _, entry in ipairs(boss.entries) do
-          local item = itemLookup[entry.itemID]
+          local group = itemLookup[entry.itemID]
+          if not group then
+            group = {specs = {}, order = {}}
+            itemLookup[entry.itemID] = group
+            table.insert(itemOrder, group)
+          end
+          local specID = entry.specID or 0
+          local item = group.specs[specID]
           if not item then
-            item = {itemID = entry.itemID, entries = {}}
-            itemLookup[entry.itemID] = item
-            table.insert(boss.items, item)
+            item = {itemID = entry.itemID, specID = specID, entries = {}}
+            group.specs[specID] = item
+            table.insert(group.order, item)
           end
           table.insert(item.entries, entry)
+        end
+        -- Keep matching items together while showing each loot spec on its
+        -- own row. Rolls in other difficulties still share that spec's row.
+        for _, group in ipairs(itemOrder) do
+          for _, item in ipairs(group.order) do
+            table.insert(boss.items, item)
+          end
         end
       end
       table.sort(instance.bosses, function(a, b)
@@ -581,9 +759,10 @@ end
 
 ---@param rows table[]
 ---@return number leftWidth
-local function calculateLeftWidth(rows)
-  local required = LEFT_WIDTH
-  for _, data in ipairs(rows) do
+local function calculateLeftWidth(rows, firstIndex, lastIndex, required)
+  required = required or LEFT_WIDTH
+  for index = firstIndex or 1, lastIndex or #rows do
+    local data = rows[index]
     local text, indent, fontObject, leadingWidth
     leadingWidth = 0
     if data.type == "header" then
@@ -616,16 +795,26 @@ end
 ---@param itemID number
 ---@return string name, string? icon, table? color
 getItemDisplay = function(itemID)
+  Module.itemDisplayCache = Module.itemDisplayCache or {}
+  local cached = Module.itemDisplayCache[itemID]
+  if cached then return cached[1], cached[2], cached[3] end
   local name = C_Item.GetItemNameByID(itemID)
   local icon = select(5, C_Item.GetItemInfoInstant(itemID))
   local quality = C_Item.GetItemQualityByID(itemID)
   local color = quality and ITEM_QUALITY_COLORS[quality] and ITEM_QUALITY_COLORS[quality].color
   if not name then
-    -- Not cached yet: ask for it and redraw when it arrives.
-    Item:CreateFromItemID(itemID):ContinueOnItemLoad(function()
-      Module:ScheduleRender()
-    end)
+    Module.itemLoadPending = Module.itemLoadPending or {}
+    if not Module.itemLoadPending[itemID] then
+      Module.itemLoadPending[itemID] = true
+      Item:CreateFromItemID(itemID):ContinueOnItemLoad(function()
+        Module.itemLoadPending[itemID] = nil
+        Module.itemDisplayCache[itemID] = nil
+        Module:ScheduleRender()
+      end)
+    end
     name = "Item " .. itemID
+  else
+    Module.itemDisplayCache[itemID] = {name, icon, color}
   end
   return name, icon, color
 end
@@ -751,6 +940,22 @@ local function showItemTooltip(row, entry)
   GameTooltip:Show()
 end
 
+---Show acquisition history only on the item row; difficulty checkmarks
+---retain their unmodified Blizzard item tooltip.
+local function showAcquisitionTooltip(row)
+  local data = row.data
+  if not data or not data.item then return end
+  local name = getItemDisplay(data.item.itemID)
+  GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+  GameTooltip:AddLine(name or ("Item " .. data.item.itemID), 1, 0.82, 0)
+  for _, entry in ipairs(data.item.entries) do
+    local acquired = type(entry.ts) == "number" and entry.ts > 0
+      and date("%d/%m/%Y %H:%M", entry.ts) or "Date unavailable"
+    GameTooltip:AddDoubleLine(getDifficultyText(entry), acquired, 1, 1, 1, 0.9, 0.9, 0.9)
+  end
+  GameTooltip:Show()
+end
+
 ---@param row Button
 local function showInstanceTooltip(row)
   local instance = row.data.instance
@@ -815,6 +1020,7 @@ local function createRow(content)
     if not data then return end
     if data.type == "item" then
       SetHighlightColor(self, 1, 1, 1, 0.10)
+      showAcquisitionTooltip(self)
     elseif data.type == "instance" or data.type == "boss" then
       SetHighlightColor(self, 1, 1, 1, 0.05)
       showInstanceTooltip(self)
@@ -853,8 +1059,10 @@ local function resetRow(row)
 end
 
 function Module:ResetCollapsedRows()
+  local hadCollapsed = next(self.collapsedSections or {}) or next(self.collapsedInstances or {})
   self.collapsedSections = {}
   self.collapsedInstances = {}
+  if hadCollapsed then self.renderedCharacter = nil end
 end
 
 ---@param data table
@@ -881,8 +1089,12 @@ function Module:CreateWindow()
     storage = windows.BonusRoll,
     title = "Bonus Roll",
     onShow = function()
-      Module:ResetCollapsedRows()
-      Module:Refresh()
+      if InCombatLockdown and InCombatLockdown() then
+        Module:ShowCombatSnapshot()
+      else
+        Module:ResetCollapsedRows()
+        Module:Refresh()
+      end
     end,
   })
   self.window:SetBodySize(LEFT_WIDTH, MIN_WINDOW_HEIGHT)
@@ -951,17 +1163,62 @@ local ERROR_TEXT = {
   no_api = "Could not talk to SimulationCraft. Showing saved data.",
   failed = "SimulationCraft returned an error. Showing saved data.",
   no_line = "SimulationCraft did not report any bonus roll data. Showing saved data.",
+  incomplete = "SimulationCraft returned incomplete bonus roll history. Showing saved data.",
 }
 
----Re-check the data (current character only) and redraw.
+---During combat, reuse the already completed view. Never show another
+---character's rows when opening a character that has not been rendered yet.
+function Module:ShowCombatSnapshot()
+  if not self.window or not self.character then return end
+  self.combatRefreshPending = true
+  self.renderSerial = (self.renderSerial or 0) + 1
+  if self.renderedCharacter == self.character.GUID then
+    self.header:Show()
+    self.content:Show()
+    self.empty:Hide()
+    return
+  end
+  self.content:Hide()
+  self.header:Hide()
+  self.empty:SetText("Bonus Roll will load after combat.")
+  self.empty:Show()
+  self.footer:SetText("")
+end
+
+---Re-check the data (current character only) and redraw when necessary.
 function Module:Refresh()
   if not self.window or not self.character then return end
+  if InCombatLockdown and InCombatLockdown() then
+    self:ShowCombatSnapshot()
+    return
+  end
   local character = self.character
   self.updateError = nil
   if Data:IsMaxLevelCharacter(character) and character.GUID == UnitGUID("player") then
     self.updateError = self:UpdateCharacter(character)
+  else
+    importRollTimestamps(character)
   end
-  self:Render()
+  local saved = character.bonusRoll
+  if self.renderedCharacter ~= character.GUID
+    or self.renderedEntries ~= (saved and saved.entries)
+    or self.renderedVersion ~= (saved and saved.displayVersion or 0)
+    or self.renderedError ~= self.updateError
+    or not self.content:IsShown() then
+    -- A profile fetch and full layout must not share one long Lua frame.
+    -- Keep the previous character's rows hidden until the new view is ready.
+    if self.renderedCharacter ~= character.GUID then
+      self.content:Hide()
+      self.header:Hide()
+      self.empty:SetText("Loading bonus roll history...")
+      self.empty:Show()
+    end
+    self:ScheduleRender()
+  else
+    if saved and saved.updatedAt then
+      self.footer:SetText(format("Updated on: %s", date("%d/%m - %H:%M", saved.updatedAt)))
+    end
+  end
 end
 
 function Module:ScheduleRender()
@@ -1018,7 +1275,15 @@ end
 
 function Module:Render()
   if not self.window or not self.window:IsVisible() or not self.character then return end
+  if InCombatLockdown and InCombatLockdown() then
+    self:ShowCombatSnapshot()
+    return
+  end
+  self.renderSerial = (self.renderSerial or 0) + 1
+  local renderSerial = self.renderSerial
   local character = self.character
+  self.header:Show()
+  self.content:Show()
   self.window:SetTitle(getTitle(character))
 
   if not Data:IsMaxLevelCharacter(character) then
@@ -1040,6 +1305,10 @@ function Module:Render()
     self.scroll:SetVerticalScroll(0)
     self.window:SetBodySize(LEFT_WIDTH, MIN_WINDOW_HEIGHT)
     self.content:SetSize(LEFT_WIDTH, 1)
+    self.renderedCharacter = character.GUID
+    self.renderedEntries = character.bonusRoll and character.bonusRoll.entries
+    self.renderedVersion = character.bonusRoll and character.bonusRoll.displayVersion or 0
+    self.renderedError = self.updateError
     return
   end
 
@@ -1060,7 +1329,13 @@ function Module:Render()
   -- Difficulty/Rolls. Keep a minimum width, but cap growth to the usable screen width.
   -- The text FontStrings remain bounded by their LEFT/RIGHT anchors, so even at the
   -- screen cap they cannot render outside the window or over the fixed columns.
-  local desiredLeftWidth = calculateLeftWidth(allRows)
+  local function applyLayout(desiredLeftWidth)
+  if self.renderSerial ~= renderSerial or not self.window:IsVisible()
+    or self.character ~= character then return end
+  if InCombatLockdown and InCombatLockdown() then
+    self:ShowCombatSnapshot()
+    return
+  end
   local screenWidth = UIParent and UIParent:GetWidth() or (LEFT_WIDTH + columnsWidth + WINDOW_EDGE_MARGIN)
   local maxBodyWidth = math.max(LEFT_WIDTH + columnsWidth, screenWidth - WINDOW_EDGE_MARGIN)
   local maxLeftWidth = math.max(LEFT_WIDTH, maxBodyWidth - columnsWidth)
@@ -1092,123 +1367,131 @@ function Module:Render()
   local specOffset = columnsWidth + 12
   local textRight = -(columnsWidth + TEXT_RIGHT_RESERVE)
   local totalHeight = 0
-  for index, data in ipairs(rows) do
-    local row = self.rows[index]
-    if not row then
-      row = createRow(self.content)
-      self.rows[index] = row
+  local rowIndex = 1
+  local function renderNextRows()
+    if self.renderSerial ~= renderSerial or not self.window:IsVisible()
+      or self.character ~= character then return end
+    if InCombatLockdown and InCombatLockdown() then
+      self:ShowCombatSnapshot()
+      return
     end
-    resetRow(row)
-    row.data = data
-    row:ClearAllPoints()
-    row:SetPoint("TOPLEFT", self.content, "TOPLEFT", 0, -totalHeight)
-    row:SetPoint("TOPRIGHT", self.content, "TOPRIGHT", 0, -totalHeight)
+    local lastIndex = math.min(#rows, rowIndex + RENDER_BATCH_SIZE - 1)
+    for index = rowIndex, lastIndex do
+      local data = rows[index]
+      local row = self.rows[index]
+      if not row then
+        row = createRow(self.content)
+        self.rows[index] = row
+      end
+      resetRow(row)
+      row.data = data
+      row:ClearAllPoints()
+      row:SetPoint("TOPLEFT", self.content, "TOPLEFT", 0, -totalHeight)
+      row:SetPoint("TOPRIGHT", self.content, "TOPRIGHT", 0, -totalHeight)
 
-    row.specIcon:ClearAllPoints()
-    row.specIcon:SetPoint("RIGHT", row, "RIGHT", -specOffset, 0)
-    row.count:ClearAllPoints()
-    -- The instance roll count occupies the same visual column as the item spec
-    -- icons. Center it on the icon instead of aligning its right edge there.
-    row.count:SetPoint("CENTER", row.specIcon, "CENTER", 0, 0)
-    for cellIndex, cell in ipairs(row.cells) do
-      cell:ClearAllPoints()
-      local column = columns[cellIndex]
-      if column then
-        local centerFromRight
-        if column.id == "key" then
-          -- Dungeon is centered within the raid columns, without widening
-          -- the N/H gap or shifting the L/N/H/M positions.
-          centerFromRight = columnsWidth / 2
+      row.specIcon:ClearAllPoints()
+      row.specIcon:SetPoint("RIGHT", row, "RIGHT", -specOffset, 0)
+      row.count:ClearAllPoints()
+      -- The instance roll count occupies the same visual column as the item spec
+      -- icons. Center it on the icon instead of aligning its right edge there.
+      row.count:SetPoint("CENTER", row.specIcon, "CENTER", 0, 0)
+      for cellIndex, cell in ipairs(row.cells) do
+        cell:ClearAllPoints()
+        local column = columns[cellIndex]
+        if column then
+          local centerFromRight
+          if column.id == "key" then
+            -- Dungeon is centered within the raid columns, without widening
+            -- the N/H gap or shifting the L/N/H/M positions.
+            centerFromRight = columnsWidth / 2
+          else
+            centerFromRight = (numRaidColumns - cellIndex + 0.5) * DIFFICULTY_COLUMN_WIDTH
+          end
+          cell:SetPoint("CENTER", row, "RIGHT", -centerFromRight, 0)
+          cell:Show()
         else
-          centerFromRight = (numRaidColumns - cellIndex + 0.5) * DIFFICULTY_COLUMN_WIDTH
+          cell:Hide()
         end
-        cell:SetPoint("CENTER", row, "RIGHT", -centerFromRight, 0)
-        cell:Show()
-      else
-        cell:Hide()
       end
-    end
 
-    if data.type == "header" then
-      SetBackgroundColor(row, 0, 0, 0, 0.3)
-      row.text:SetFontObject("GameFontNormal")
-      row.text:SetPoint("LEFT", row, "LEFT", INDENT.header, 0)
-      row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
-      row.text:SetText(data.collapsible and ((data.collapsed and "+ " or "- ") .. data.text) or data.text)
-      if data.sectionKey == "raids" or data.sectionKey == "dungeons" then
-        row.count:SetFontObject("GameFontNormal")
-        row.count:SetText("Rolls")
-      end
-      -- Column labels only for columns this section really uses
-      local usedHere = {}
-      for _, instance in ipairs(data.sectionInstances or {}) do
-        for _, boss in ipairs(instance.bosses) do
-          for _, entry in ipairs(boss.entries) do
-            local column = getEntryColumn(entry, instance.kind)
-            if column then usedHere[column] = true end
+      if data.type == "header" then
+        SetBackgroundColor(row, 0, 0, 0, 0.3)
+        row.text:SetFontObject("GameFontNormal")
+        row.text:SetPoint("LEFT", row, "LEFT", INDENT.header, 0)
+        row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
+        row.text:SetText(data.collapsible and ((data.collapsed and "+ " or "- ") .. data.text) or data.text)
+        if data.sectionKey == "raids" or data.sectionKey == "dungeons" then
+          row.count:SetFontObject("GameFontNormal")
+          row.count:SetText("Rolls")
+        end
+        -- Column labels only for columns this section really uses
+        local usedHere = {}
+        for _, instance in ipairs(data.sectionInstances or {}) do
+          for _, boss in ipairs(instance.bosses) do
+            for _, entry in ipairs(boss.entries) do
+              local column = getEntryColumn(entry, instance.kind)
+              if column then usedHere[column] = true end
+            end
+          end
+        end
+        for _, column in ipairs(columns) do
+          if usedHere[column.id] then
+            row.cells[columnIndex[column.id]].text:SetText(column.label)
+          end
+        end
+      elseif data.type == "instance" then
+        row.text:SetFontObject("GameFontHighlight_NoShadow")
+        row.text:SetPoint("LEFT", row, "LEFT", INDENT.instance, 0)
+        row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
+        local instanceText = data.collapsible and ((data.collapsed and "+ " or "- ") .. data.text) or data.text
+        row.text:SetText(NORMAL_FONT_COLOR:WrapTextInColorCode(instanceText))
+        row.count:SetText(format("%d", data.count))
+      elseif data.type == "boss" then
+        row.text:SetFontObject("GameFontHighlight_NoShadow")
+        row.text:SetPoint("LEFT", row, "LEFT", INDENT.boss, 0)
+        row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
+        row.text:SetText(data.text)
+      elseif data.type == "item" then
+        local item = data.item
+        local name, icon, color = getItemDisplay(item.itemID)
+        row.itemIcon:ClearAllPoints()
+        row.itemIcon:SetPoint("LEFT", row, "LEFT", data.indent, 0)
+        row.itemIcon:SetTexture(icon)
+        row.itemIcon:Show()
+        row.text:SetFontObject("GameFontHighlight_NoShadow")
+        row.text:SetPoint("LEFT", row.itemIcon, "RIGHT", 6, 0)
+        row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
+        row.text:SetText(color and color:WrapTextInColorCode(name) or name)
+
+        local _, specIcon = getSpecDisplay(item.specID)
+        if specIcon then
+          row.specIcon:SetTexture(specIcon)
+          row.specIcon:Show()
+        end
+
+        for _, entry in ipairs(item.entries) do
+          local column = getEntryColumn(entry, data.instance.kind)
+          local cell = column and row.cells[columnIndex[column]]
+          -- Each item/spec pair occupies its own row. Within that spec, each
+          -- populated difficulty cell owns the exact roll variant. Repeated
+          -- rolls in the same cell keep the first tooltip (sorted above).
+          if cell and not cell.entry then
+            cell.entry = entry
+            cell:EnableMouse(true)
+            -- A dungeon cell is a checkmark, just like a raid difficulty cell.
+            -- More than one roll of this item may share this same cell.
+            cell.text:SetText(CHECK_MARKUP)
           end
         end
       end
-      for _, column in ipairs(columns) do
-        if usedHere[column.id] then
-          row.cells[columnIndex[column.id]].text:SetText(column.label)
-        end
-      end
-    elseif data.type == "instance" then
-      row.text:SetFontObject("GameFontHighlight_NoShadow")
-      row.text:SetPoint("LEFT", row, "LEFT", INDENT.instance, 0)
-      row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
-      local instanceText = data.collapsible and ((data.collapsed and "+ " or "- ") .. data.text) or data.text
-      row.text:SetText(NORMAL_FONT_COLOR:WrapTextInColorCode(instanceText))
-      row.count:SetText(format("%d", data.count))
-    elseif data.type == "boss" then
-      row.text:SetFontObject("GameFontHighlight_NoShadow")
-      row.text:SetPoint("LEFT", row, "LEFT", INDENT.boss, 0)
-      row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
-      row.text:SetText(data.text)
-    elseif data.type == "item" then
-      local item = data.item
-      local name, icon, color = getItemDisplay(item.itemID)
-      row.itemIcon:ClearAllPoints()
-      row.itemIcon:SetPoint("LEFT", row, "LEFT", data.indent, 0)
-      row.itemIcon:SetTexture(icon)
-      row.itemIcon:Show()
-      row.text:SetFontObject("GameFontHighlight_NoShadow")
-      row.text:SetPoint("LEFT", row.itemIcon, "RIGHT", 6, 0)
-      row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
-      row.text:SetText(color and color:WrapTextInColorCode(name) or name)
-
-      local sharedSpecID = item.entries[1] and item.entries[1].specID or 0
-      for entryIndex = 2, #item.entries do
-        if item.entries[entryIndex].specID ~= sharedSpecID then
-          sharedSpecID = 0
-          break
-        end
-      end
-      local _, specIcon = getSpecDisplay(sharedSpecID)
-      if specIcon then
-        row.specIcon:SetTexture(specIcon)
-        row.specIcon:Show()
-      end
-
-      for _, entry in ipairs(item.entries) do
-        local column = getEntryColumn(entry, data.instance.kind)
-        local cell = column and row.cells[columnIndex[column]]
-        -- One item occupies one row. Each populated difficulty cell owns the
-        -- exact roll variant for that difficulty. If old data somehow has more
-        -- than one entry in one cell, keep the first (the list is already sorted).
-        if cell and not cell.entry then
-          cell.entry = entry
-          cell:EnableMouse(true)
-          -- A dungeon cell is a checkmark, just like a raid difficulty cell.
-          -- More than one roll of this item may share this same cell.
-          cell.text:SetText(CHECK_MARKUP)
-        end
-      end
+      row:Show()
+      totalHeight = totalHeight + ROW_HEIGHT
     end
-    row:Show()
-    totalHeight = totalHeight + ROW_HEIGHT
-  end
+    rowIndex = lastIndex + 1
+    if rowIndex <= #rows then
+      C_Timer.After(0, renderNextRows)
+      return
+    end
 
   -- Empty / status messages
   if #rows == 0 then
@@ -1245,6 +1528,35 @@ function Module:Render()
   self.window:SetBodySize(width, height)
   self.content:SetSize(width, math.max(1, totalHeight))
   self.scroll:SetVerticalScroll(0)
+  self.renderedCharacter = character.GUID
+  self.renderedEntries = saved and saved.entries
+  self.renderedVersion = saved and saved.displayVersion or 0
+  self.renderedError = self.updateError
+  end
+  renderNextRows()
+  end
+
+  -- Font measurement can be more expensive than creating a row. Measure in
+  -- small batches too, so long histories cannot exhaust a single script frame.
+  local nextMeasureIndex = 1
+  local requiredWidth = LEFT_WIDTH
+  local function measureNextBatch()
+    if self.renderSerial ~= renderSerial or not self.window:IsVisible()
+      or self.character ~= character then return end
+    if InCombatLockdown and InCombatLockdown() then
+      self:ShowCombatSnapshot()
+      return
+    end
+    local lastIndex = math.min(#allRows, nextMeasureIndex + 11)
+    requiredWidth = calculateLeftWidth(allRows, nextMeasureIndex, lastIndex, requiredWidth)
+    nextMeasureIndex = lastIndex + 1
+    if nextMeasureIndex <= #allRows then
+      C_Timer.After(0, measureNextBatch)
+    else
+      applyLayout(requiredWidth)
+    end
+  end
+  measureNextBatch()
 end
 
 ---@return table[]
@@ -1300,5 +1612,19 @@ function Module:OnInitialize()
   end, true)
   addon.Events:RegisterEvent("BONUS_ROLL_RESULT", function(_, _, typeIdentifier, itemLink, quantity, specID)
     Module:BONUS_ROLL_RESULT(nil, typeIdentifier, itemLink, quantity, specID)
+  end, true)
+  addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+    local guid = Module.loginSyncDeferredGUID
+    Module.loginSyncDeferredGUID = nil
+    if guid and guid == UnitGUID("player") then
+      local character = Data:GetCharacter(guid)
+      if character and Data:IsMaxLevelCharacter(character) then
+        Module:UpdateCharacter(character)
+      end
+    end
+    if Module.combatRefreshPending then
+      Module.combatRefreshPending = nil
+      if Module.window and Module.window:IsVisible() then Module:Refresh() end
+    end
   end, true)
 end

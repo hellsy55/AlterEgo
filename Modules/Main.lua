@@ -6018,6 +6018,13 @@ function Module:RenderNow()
             return characterQuestsCompleted[quest.questID]
           end)
           numQuestsCompleted = TableCount(questsCompleted)
+          local weeklyProgress = 0
+          if difficulty.id == 3 then
+            weeklyProgress = character.prey and character.prey.nightmareWeeklyProgress or 0
+            -- The weekly objective overlaps individual hunt quests; never add
+            -- the two counts together or the same hunt may be counted twice.
+            numQuestsCompleted = math.max(numQuestsCompleted, weeklyProgress)
+          end
 
           if numQuestsCompleted >= preyWeeklyHuntCap then
             textValue = format("%d / %d", numQuestsCompleted, preyWeeklyHuntCap)
@@ -6038,12 +6045,16 @@ function Module:RenderNow()
             else
               GameTooltip:AddDoubleLine("Hunts Completed:", format("%d / %d", numQuestsCompleted, preyWeeklyHuntCap), nil, nil, nil, textColor.r, textColor.g, textColor.b)
             end
-            if numQuestsCompleted > 0 then
+            if #questsCompleted > 0 then
               GameTooltip:AddLine(" ")
               GameTooltip:AddLine("Quests Done:")
               TableForEach(questsCompleted, function(quest)
                 GameTooltip:AddLine(quest.name, 1, 1, 1)
               end)
+            end
+            if weeklyProgress > 0 then
+              GameTooltip:AddLine(" ")
+              GameTooltip:AddDoubleLine("A Nightmarish Task:", format("%d / 3", weeklyProgress), nil, nil, nil, 1, 1, 1)
             end
             GameTooltip:Show()
             SetHighlightColor(difficultyFrame, 1, 1, 1, 0.05)

@@ -8,6 +8,9 @@ local PREY_DIFFICULTY_NORMAL = 1
 local PREY_DIFFICULTY_HARD = 2
 local PREY_DIFFICULTY_NIGHTMARE = 3
 
+-- Three Nightmare hunts are required by the weekly quest A Nightmarish Task.
+Data.preyNightmareWeeklyQuestID = 94446
+
 local PREY_AFFIX_AMBUSH = 1
 local PREY_AFFIX_TORMENT = 2
 local PREY_AFFIX_HUNTERS_MOMENTUM = 3

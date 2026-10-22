@@ -207,6 +207,7 @@ Data.defaultCharacter = {
   currencies = {},
   prey = {
     questsCompleted = {},
+    nightmareWeeklyProgress = 0,
   },
   labyrinth = {},
   raids = {
@@ -1817,8 +1818,9 @@ function Data:TaskWeeklyReset()
         progress.weeklyResetAt = nil
         -- A weekly reset does not end an active physical Labyrinth run.
       end
-      -- Reset Prey Hunts
+      -- Reset Prey Hunts, including the Nightmare weekly quest fallback.
       character.prey.questsCompleted = wipe(character.prey.questsCompleted or {})
+      character.prey.nightmareWeeklyProgress = 0
       character.vault.activityEncounterInfo = wipe(character.vault.activityEncounterInfo or {})
       character.vault.slots = wipe(character.vault.slots or {})
       character.vault.worldActivityProgress = wipe(character.vault.worldActivityProgress or {})
@@ -2215,7 +2217,29 @@ function Data:UpdatePreyProgress()
   TableForEach(self.preyQuests, function(quest)
     character.prey.questsCompleted[quest.questID] = C_QuestLog.IsQuestFlaggedCompleted(quest.questID)
   end)
+
+  -- Some hunts accelerated by soul items advance the Nightmare weekly
+  -- objective without flagging the individual Prey quest as completed.
+  -- Remember the weekly objective for other characters and after turn-in.
+  local weeklyQuestID = self.preyNightmareWeeklyQuestID
+  local previousProgress = character.prey.nightmareWeeklyProgress or 0
+  local weeklyProgress = 0
+  if C_QuestLog.IsQuestFlaggedCompleted(weeklyQuestID)
+    or (C_QuestLog.IsComplete and C_QuestLog.IsComplete(weeklyQuestID)) then
+    weeklyProgress = 3
+  elseif C_QuestLog.GetQuestObjectives then
+    local objectives = C_QuestLog.GetQuestObjectives(weeklyQuestID)
+    for _, objective in ipairs(objectives or {}) do
+      if objective.numRequired == 3 then
+        weeklyProgress = math.max(weeklyProgress, math.min(3, objective.numFulfilled or 0))
+      end
+    end
+  end
+  character.prey.nightmareWeeklyProgress = math.max(previousProgress, weeklyProgress)
   self:MarkCharacterSyncChanged(character)
+  if character.prey.nightmareWeeklyProgress ~= previousProgress then
+    addon.Core:Render()
+  end
 end
 
 ---Compute the character's equipped item level and its "including bags" counterpart using the same
