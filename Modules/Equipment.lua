@@ -273,8 +273,9 @@ local function resolveCraftedUpgradeTrack(itemLevel, craftedQuality)
 
   local roundedItemLevel = floor(itemLevel + 0.5)
   if craftedQuality == CRAFTED_QUALITY_MAX then
-    if roundedItemLevel == 325 then return "Hero" end
-    if roundedItemLevel == 338 then return "Myth" end
+    -- Recognize both current Venomforged levels and saved pre-hotfix levels.
+    if roundedItemLevel == 324 or roundedItemLevel == 325 then return "Hero" end
+    if roundedItemLevel == 337 or roundedItemLevel == 338 then return "Myth" end
   end
 
   -- Prefer the exact quality + item-level pair so overlapping boundary levels
@@ -342,8 +343,13 @@ local function isUpgradeFromPreviousSeason(seasonID)
   return seasonID ~= currentSeason
 end
 
--- Patch 12.1.5 Ascendant Venomstone equipment conversion levels.
+-- Patch 12.1.5 Ascendant Venomstone conversion levels after the hotfix.
 local ASCENDANT_ITEM_LEVELS = {
+  Hero = {crafted = 324, normal = 328},
+  Myth = {crafted = 337, normal = 341},
+}
+-- Keep recognizing older offline snapshots captured before the hotfix.
+local ASCENDANT_PRE_HOTFIX_ITEM_LEVELS = {
   Hero = {crafted = 325, normal = 328},
   Myth = {crafted = 338, normal = 340},
 }
@@ -365,11 +371,12 @@ local function venomstoneStatus(item, track, level, maximum, crafted, seasonID)
   local _, _, _, interface = GetBuildInfo()
   if (tonumber(interface) or 0) < 120105 then return nil, nil end
   if not crafted and (not item.itemLevel or item.itemLevel < 305) then return nil, nil end
-  local ascendedLevel = ASCENDANT_ITEM_LEVELS[track]
+  local kind = crafted and "crafted" or "normal"
   if item.ascendantVenomforged == true then return true, nil end
-  -- Exact post-conversion levels are a backup for offline characters whose
-  -- tooltip was not ready or was localized when their equipment was captured.
-  if item.itemLevel == ascendedLevel[crafted and "crafted" or "normal"]
+  -- Exact conversion levels also cover offline characters whose tooltip
+  -- was unavailable or localized, including saved pre-hotfix equipment.
+  if (item.itemLevel == ASCENDANT_ITEM_LEVELS[track][kind]
+    or item.itemLevel == ASCENDANT_PRE_HOTFIX_ITEM_LEVELS[track][kind])
     and level and maximum and level >= maximum then
     return true, nil
   end
