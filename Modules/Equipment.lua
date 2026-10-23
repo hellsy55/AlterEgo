@@ -14,6 +14,23 @@ local TableForEach = LiqUI.Utils.TableForEach
 local EQUIPMENT_HEADER_HEIGHT = 30
 local CRAFTED_QUALITY_MAX = 5
 
+-- Item sets can also include non-tier equipment. Restrict the indicator to
+-- the five armor slots used by class tier sets; the set ID is saved per alt.
+local TIER_SET_SLOTS = {
+  [INVSLOT_HEAD] = true,
+  [INVSLOT_SHOULDER] = true,
+  [INVSLOT_CHEST] = true,
+  [INVSLOT_HAND] = true,
+  [INVSLOT_LEGS] = true,
+}
+
+---@param item AE_Equipment
+---@return boolean
+local function isTierSetPiece(item)
+  return type(item.setID) == "number" and item.setID > 0
+    and TIER_SET_SLOTS[item.itemSlotID] == true
+end
+
 ---Format one stat label and percentage in its color, leaving the numeric rating white.
 local function formatColoredSecondaryStat(name, rating, percent, color)
   return color:WrapTextInColorCode(name .. ": ")
@@ -92,7 +109,11 @@ local function sizeEquipmentColumnsToContent(tableFrame, rows)
             local itemID = row.item.itemLink and C_Item.GetItemIDForItemInfo(row.item.itemLink)
             itemName = itemID and C_Item.GetItemNameByID(itemID) or tostring(cell.data)
           end
-          measuredWidth = measureEquipmentColumnText("[" .. itemName .. "]", "GameFontHighlightSmall") + 20
+          local displayedName = "[" .. itemName .. "]"
+          if isTierSetPiece(row.item) then
+            displayedName = displayedName .. " *"
+          end
+          measuredWidth = measureEquipmentColumnText(displayedName, "GameFontHighlightSmall") + 20
         else
           measuredWidth = measureEquipmentColumnText(cell.data, "GameFontHighlightSmall")
         end
@@ -953,7 +974,8 @@ function Module:Render()
       data = {
         {data = _G[item.itemSlotName]},
         {
-          data = "|T" .. item.itemTexture .. ":0|t " .. item.itemLink,
+          data = "|T" .. item.itemTexture .. ":0|t " .. item.itemLink
+            .. (isTierSetPiece(item) and (" " .. WHITE_FONT_COLOR:WrapTextInColorCode("*")) or ""),
           onEnter = function(cellFrame)
             GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
             GameTooltip:SetHyperlink(item.itemLink)
