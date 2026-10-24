@@ -29,7 +29,7 @@ local version = 5
 ---@param bag LiqUI_EJScanCache
 ---@param seasonID number
 ---@return boolean
-local function CacheBagIsComplete(bag, seasonID)
+local function cacheBagIsComplete(bag, seasonID)
   if bag.seasonID ~= seasonID or bag.lastUpdate <= 0 or bag.build ~= clientBuild or bag.version ~= version then
     return false
   end
@@ -44,7 +44,7 @@ end
 
 ---@param dest LiqUI_EJScanCache
 ---@param source LiqUI_EJScanCache
-local function CopyCache(dest, source)
+local function copyCache(dest, source)
   dest.seasonID = source.seasonID
   dest.build = source.build
   dest.version = source.version
@@ -52,7 +52,7 @@ local function CopyCache(dest, source)
   dest.items = Utils.TableCopy(source.items)
 end
 
-local function SyncBoundCaches()
+local function syncBoundCaches()
   if EJScan.state then
     return
   end
@@ -62,11 +62,11 @@ local function SyncBoundCaches()
   end
   ---@type LiqUI_EJScanCache|nil
   local winner = nil
-  if CacheBagIsComplete(EJScan.itemCache, seasonID) then
+  if cacheBagIsComplete(EJScan.itemCache, seasonID) then
     winner = EJScan.itemCache
   end
   Utils.TableForEach(EJScan.hosts, function(host)
-    if CacheBagIsComplete(host.storage, seasonID) then
+    if cacheBagIsComplete(host.storage, seasonID) then
       if not winner or host.storage.lastUpdate > winner.lastUpdate then
         winner = host.storage
       end
@@ -77,18 +77,18 @@ local function SyncBoundCaches()
   end
   local newestCache = winner
   if newestCache ~= EJScan.itemCache then
-    CopyCache(EJScan.itemCache, newestCache)
+    copyCache(EJScan.itemCache, newestCache)
   end
   Utils.TableForEach(EJScan.hosts, function(host)
     local bag = host.storage
     if bag.seasonID ~= newestCache.seasonID or bag.lastUpdate < newestCache.lastUpdate then
-      CopyCache(bag, newestCache)
+      copyCache(bag, newestCache)
     end
   end)
 end
 
 ---@param event LiqUI_EJScanEvent
-local function EventFire(event)
+local function eventFire(event)
   Utils.TableForEach(EJScan.hosts, function(host)
     if host.onEvent then
       host.onEvent(event)
@@ -106,7 +106,7 @@ local ScanFilterAllClassId = 0
 local ScanFilterAllSpecId = 0
 local ScanMinProgressSteps = 1
 ---@return boolean
-local function JournalHide()
+local function journalHide()
   if EncounterJournal and EncounterJournal:IsShown() then
     HideUIPanel(EncounterJournal)
     return true
@@ -115,14 +115,14 @@ local function JournalHide()
 end
 
 ---@param wasShown boolean
-local function JournalShow(wasShown)
+local function journalShow(wasShown)
   if wasShown and EncounterJournal then
     ShowUIPanel(EncounterJournal)
   end
 end
 
 ---@param instanceType LiqUI_EJScanInstanceType
-local function JournalSetDifficulty(instanceType)
+local function journalSetDifficulty(instanceType)
   if instanceType == "raid" then
     EJ_SetDifficulty(DifficultyUtil.ID.PrimaryRaidMythic)
   else
@@ -130,16 +130,16 @@ local function JournalSetDifficulty(instanceType)
   end
 end
 
-local function CacheNotifyReady()
+local function cacheNotifyReady()
   ---@type LiqUI_EJScanEvent
   local event = { name = "ready" }
-  EventFire(event)
+  eventFire(event)
 end
 
 ---@param state LiqUI_EJScanState
 ---@param instanceType LiqUI_EJScanInstanceType
 ---@param instances (LiqUI_Dungeon|LiqUI_Raid)[]
-local function AppendScanInstances(state, instanceType, instances)
+local function appendScanInstances(state, instanceType, instances)
   Utils.TableForEach(instances, function(instance)
     local journalInstanceID = instance.journalInstanceID
     if journalInstanceID and journalInstanceID > 0 then
@@ -150,20 +150,20 @@ local function AppendScanInstances(state, instanceType, instances)
   end)
 end
 
-local function JournalLoadUi()
+local function journalLoadUi()
   if not EncounterJournal and EncounterJournal_LoadUI then
     EncounterJournal_LoadUI()
   end
 end
 
-local function JournalSelectTier()
+local function journalSelectTier()
   local numTiers = EJ_GetNumTiers and EJ_GetNumTiers() or 0
   if numTiers > 0 then
     EJ_SelectTier(numTiers)
   end
 end
 
-local function ScanFilterRefreshUi()
+local function scanFilterRefreshUi()
   ---@type fun(self: Frame)|nil
   local onFilterChanged = _G.EncounterJournal_OnFilterChanged
   if EncounterJournal and onFilterChanged then
@@ -172,26 +172,28 @@ local function ScanFilterRefreshUi()
 end
 
 ---@param refreshUI boolean|nil When false, only update C API state (skip EncounterJournal_LootUpdate).
-local function ScanFilterSlotClear(refreshUI)
+local function scanFilterSlotClear(refreshUI)
   C_EncounterJournal.ResetSlotFilter()
   C_EncounterJournal.SetSlotFilter(ScanFilterSlotNone)
   if refreshUI ~= false then
-    ScanFilterRefreshUi()
+    scanFilterRefreshUi()
   end
 end
 
----@param encounterInfo any
+---@param encounterInfo EncounterJournalEncounterFrameInfo?
 ---@return number|nil
 local function getEncounterInfoTab(encounterInfo)
   if not encounterInfo then
     return nil
   end
-  return encounterInfo.tab
+  ---@type LiqUI_EJScanEncounterInfo
+  local info = encounterInfo
+  return info.tab
 end
 
 --- Loot tab pins slot filter state; leave overview even when EJ is hidden (e.g. closed on loot tab).
-local function JournalSetTab()
-  JournalLoadUi()
+local function journalSetTab()
+  journalLoadUi()
   if not EncounterJournal then
     return
   end
@@ -207,22 +209,22 @@ local function JournalSetTab()
 end
 
 --- Saved filters + hidden loot tab can leave a non-NoFilter slot on the C API until refreshed.
-local function JournalPrepareFilters()
-  JournalSetTab()
-  ScanFilterSlotClear()
+local function journalPrepareFilters()
+  journalSetTab()
+  scanFilterSlotClear()
 end
 
-local function JournalPrepare()
-  JournalSelectTier()
-  JournalPrepareFilters()
+local function journalPrepare()
+  journalSelectTier()
+  journalPrepareFilters()
   EJ_ClearSearch()
   EJ_EndSearch()
 end
 
 ---@param instanceType LiqUI_EJScanInstanceType
 ---@param journalInstanceID number
-local function JournalSelectInstanceTab(instanceType, journalInstanceID)
-  JournalLoadUi()
+local function journalSelectInstanceTab(instanceType, journalInstanceID)
+  journalLoadUi()
   ---@type fun(instanceID: number)|nil
   local selectInstanceTab = _G.EJ_ContentTab_SelectAppropriateInstanceTab
   if selectInstanceTab then
@@ -239,18 +241,31 @@ local function JournalSelectInstanceTab(instanceType, journalInstanceID)
   end
 end
 
+---@param field string
+---@param value number|nil
+local function setJournalID(field, value)
+  if EncounterJournal then
+    EncounterJournal[field] = value
+  end
+end
+
 ---@return number|nil
-local function JournalGetInstanceId()
-  if EncounterJournal and EncounterJournal.instanceID and EncounterJournal.instanceID > 0 then
-    return EncounterJournal.instanceID
+local function journalGetInstanceId()
+  if not EncounterJournal then
+    return nil
+  end
+  ---@type number?
+  local instanceID = EncounterJournal.instanceID
+  if instanceID and instanceID > 0 then
+    return instanceID
   end
   return nil
 end
 
 --- Addons cannot call C_EncounterJournal.OnOpen (protected). ShowUIPanel lets Blizzard run OnShow/OnOpen.
 ---@return boolean primed True if we showed the panel and scan should hide it again when the user had EJ closed.
-local function JournalShowForSync()
-  JournalLoadUi()
+local function journalShowForSync()
+  journalLoadUi()
   if not EncounterJournal or EncounterJournal:IsShown() then
     return false
   end
@@ -260,48 +275,46 @@ end
 
 --- API + frame IDs only; no boss list / portrait / tab UI work.
 ---@param journalInstanceID number
-local function JournalSelectInstance(journalInstanceID)
-  if EncounterJournal then
-    EncounterJournal.instanceID = journalInstanceID
-    EncounterJournal.encounterID = nil
-  end
+local function journalSelectInstance(journalInstanceID)
+  setJournalID("instanceID", journalInstanceID)
+  setJournalID("encounterID", nil)
   EJ_SelectInstance(journalInstanceID)
 end
 
 --- Full Blizzard display; only for restore or when API sync fails.
 ---@param journalInstanceID number
-local function JournalDisplayInstance(journalInstanceID)
+local function journalDisplayInstance(journalInstanceID)
   ---@type fun(instanceID: number, noButton: boolean|nil)|nil
   local displayInstance = _G.EncounterJournal_DisplayInstance
   if displayInstance then
     displayInstance(journalInstanceID, true)
     return
   end
-  JournalSelectInstance(journalInstanceID)
+  journalSelectInstance(journalInstanceID)
 end
 
 ---@param journalInstanceID number
 ---@param instanceType LiqUI_EJScanInstanceType
-local function JournalSyncInstance(journalInstanceID, instanceType)
-  JournalLoadUi()
-  JournalSelectInstanceTab(instanceType, journalInstanceID)
-  JournalSetDifficulty(instanceType)
+local function journalSyncInstance(journalInstanceID, instanceType)
+  journalLoadUi()
+  journalSelectInstanceTab(instanceType, journalInstanceID)
+  journalSetDifficulty(instanceType)
 
-  JournalSelectInstance(journalInstanceID)
-  if JournalGetInstanceId() == journalInstanceID then
+  journalSelectInstance(journalInstanceID)
+  if journalGetInstanceId() == journalInstanceID then
     return
   end
 
-  JournalDisplayInstance(journalInstanceID)
-  if JournalGetInstanceId() == journalInstanceID then
+  journalDisplayInstance(journalInstanceID)
+  if journalGetInstanceId() == journalInstanceID then
     return
   end
 
-  local primed = JournalShowForSync()
+  local primed = journalShowForSync()
   if primed and EJScan.state then
     EJScan.state.journalPrimedForScan = true
   end
-  JournalDisplayInstance(journalInstanceID)
+  journalDisplayInstance(journalInstanceID)
 
   if primed and EJScan.state and not EJScan.state.journalUIWasShown and EncounterJournal and EncounterJournal:IsShown() then
     HideUIPanel(EncounterJournal)
@@ -309,22 +322,20 @@ local function JournalSyncInstance(journalInstanceID, instanceType)
 end
 
 ---@param journalEncounterID number
-local function JournalSelectEncounter(journalEncounterID)
-  if EncounterJournal then
-    EncounterJournal.encounterID = journalEncounterID
-  end
+local function journalSelectEncounter(journalEncounterID)
+  setJournalID("encounterID", journalEncounterID)
   EJ_SelectEncounter(journalEncounterID)
 end
 
 ---@param journalEncounterID number
-local function JournalDisplayEncounter(journalEncounterID)
+local function journalDisplayEncounter(journalEncounterID)
   ---@type fun(encounterID: number, noButton: boolean|nil)|nil
   local displayEncounter = _G.EncounterJournal_DisplayEncounter
   if displayEncounter then
     displayEncounter(journalEncounterID, true)
     return
   end
-  JournalSelectEncounter(journalEncounterID)
+  journalSelectEncounter(journalEncounterID)
 end
 
 ---@param cache LiqUI_EJScanCache
@@ -334,7 +345,7 @@ end
 ---@param instanceType LiqUI_EJScanInstanceType
 ---@param journalEncounterID number|nil
 ---@param specID number|nil
-local function ScanAddItem(cache, lootInfo, journalInstanceID, instance, instanceType, journalEncounterID, specID)
+local function scanAddItem(cache, lootInfo, journalInstanceID, instance, instanceType, journalEncounterID, specID)
   if not lootInfo or not lootInfo.itemID then
     return
   end
@@ -384,8 +395,8 @@ local function ScanAddItem(cache, lootInfo, journalInstanceID, instance, instanc
 end
 
 ---@return LiqUI_EJScanJournalFilters
-local function ScanFilterSave()
-  JournalLoadUi()
+local function scanFilterSave()
+  journalLoadUi()
 
   local lootClassID, lootSpecID = EJ_GetLootFilter()
   ---@type LiqUI_EJScanJournalFilters
@@ -404,10 +415,12 @@ local function ScanFilterSave()
   }
 
   if EncounterJournal then
+    ---@type number?
     local instanceID = EncounterJournal.instanceID
     if instanceID and instanceID > 0 then
       filters.instanceID = instanceID
     end
+    ---@type number?
     local encounterID = EncounterJournal.encounterID
     if encounterID and encounterID > 0 then
       filters.encounterID = encounterID
@@ -433,12 +446,12 @@ local function ScanFilterSave()
 end
 
 ---@param filters LiqUI_EJScanJournalFilters|nil
-local function ScanFilterRestore(filters)
+local function scanFilterRestore(filters)
   if not filters then
     return
   end
 
-  JournalLoadUi()
+  journalLoadUi()
 
   if filters.tier and filters.tier > 0 then
     EJ_SelectTier(filters.tier)
@@ -457,9 +470,9 @@ local function ScanFilterRestore(filters)
   end
 
   if filters.instanceID and filters.instanceID > 0 then
-    JournalDisplayInstance(filters.instanceID)
+    journalDisplayInstance(filters.instanceID)
     if filters.encounterID and filters.encounterID > 0 then
-      JournalDisplayEncounter(filters.encounterID)
+      journalDisplayEncounter(filters.encounterID)
     end
     if filters.encounterTab then
       ---@type fun(tabType: number)|nil
@@ -469,10 +482,8 @@ local function ScanFilterRestore(filters)
       end
     end
   else
-    if EncounterJournal then
-      EncounterJournal.instanceID = nil
-      EncounterJournal.encounterID = nil
-    end
+    setJournalID("instanceID", nil)
+    setJournalID("encounterID", nil)
     ---@type fun()|nil
     local listInstances = _G.EncounterJournal_ListInstances
     if listInstances then
@@ -484,12 +495,12 @@ local function ScanFilterRestore(filters)
   end
 
   C_EncounterJournal.SetSlotFilter(filters.slotFilter)
-  ScanFilterRefreshUi()
+  scanFilterRefreshUi()
 
   if not filters.instanceID or filters.instanceID <= 0 then
     if EncounterJournal then
-      EncounterJournal.instanceID = nil
-      EncounterJournal.encounterID = nil
+      setJournalID("instanceID", nil)
+      setJournalID("encounterID", nil)
       EncounterJournal.encounter:Hide()
       EncounterJournal.instanceSelect:Show()
     end
@@ -515,18 +526,18 @@ local function ScanFilterRestore(filters)
 end
 
 ---@param state LiqUI_EJScanState
-local function JournalRestore(state)
+local function journalRestore(state)
   if state.journalPrimedForScan and not state.journalUIWasShown and EncounterJournal and EncounterJournal:IsShown() then
     HideUIPanel(EncounterJournal)
   end
-  JournalShow(state.journalUIWasShown)
-  ScanFilterRestore(state.journalFilters)
+  journalShow(state.journalUIWasShown)
+  scanFilterRestore(state.journalFilters)
 end
 
 ---@param cache LiqUI_EJScanCache
 ---@return integer loadedCount
 ---@return integer totalCount
-local function CacheCountProgress(cache)
+local function cacheCountProgress(cache)
   local loadedCount = 0
   local totalCount = 0
   Utils.TableForEach(cache.items, function(row)
@@ -541,7 +552,7 @@ local function CacheCountProgress(cache)
 end
 
 ---@param state LiqUI_EJScanState
-local function CacheLoaded(state)
+local function cacheLoaded(state)
   if not EJScan.state or EJScan.state.scanId ~= state.scanId then
     return
   end
@@ -555,13 +566,13 @@ local function CacheLoaded(state)
   cache.version = version
   cache.lastUpdate = time()
   EJScan.state = nil
-  SyncBoundCaches()
-  CacheNotifyReady()
+  syncBoundCaches()
+  cacheNotifyReady()
 end
 
 ---@param itemID number
 ---@param state LiqUI_EJScanState
-local function CacheOnItemLoad(itemID, state)
+local function cacheOnItemLoad(itemID, state)
   local cache = state.cache
   local row = cache.items[itemID]
   if row then
@@ -570,6 +581,7 @@ local function CacheOnItemLoad(itemID, state)
     end
     row.quality = C_Item.GetItemQualityByID(itemID) or row.quality
     if row.link and next(row.stats) == nil then
+      ---@type table<string, number>?
       local rawStats = C_Item.GetItemStats(row.link)
       if rawStats then
         for statKey, value in pairs(rawStats) do
@@ -591,7 +603,7 @@ local function CacheOnItemLoad(itemID, state)
     return
   end
 
-  local loadedCount, totalCount = CacheCountProgress(cache)
+  local loadedCount, totalCount = cacheCountProgress(cache)
   if loadedCount < totalCount then
     ---@type LiqUI_EJScanEventCounts
     local counts = { done = loadedCount, total = totalCount }
@@ -601,14 +613,14 @@ local function CacheOnItemLoad(itemID, state)
       progress = loadedCount / totalCount,
       counts = counts,
     }
-    EventFire(event)
+    eventFire(event)
     return
   end
-  CacheLoaded(state)
+  cacheLoaded(state)
 end
 
 ---@param state LiqUI_EJScanState
-local function CacheLoadItems(state)
+local function cacheLoadItems(state)
   local cache = state.cache
   cache.seasonID = Data:GetCurrentSeason()
 
@@ -618,9 +630,9 @@ local function CacheLoadItems(state)
     end
   end)
 
-  local _, totalCount = CacheCountProgress(cache)
+  local _, totalCount = cacheCountProgress(cache)
   if totalCount == 0 then
-    CacheLoaded(state)
+    cacheLoaded(state)
     return
   end
 
@@ -632,13 +644,13 @@ local function CacheLoadItems(state)
     progress = 0,
     counts = counts,
   }
-  EventFire(event)
+  eventFire(event)
 
   Utils.TableForEach(cache.items, function(item)
     local itemID = item.itemID
     if itemID then
       Item:CreateFromItemID(itemID):ContinueOnItemLoad(function()
-        CacheOnItemLoad(itemID, state)
+        cacheOnItemLoad(itemID, state)
       end)
     end
   end)
@@ -647,17 +659,17 @@ local function CacheLoadItems(state)
     if not EJScan.state or EJScan.state.scanId ~= state.scanId then
       return
     end
-    local timeoutLoadedCount, timeoutTotalCount = CacheCountProgress(cache)
+    local timeoutLoadedCount, timeoutTotalCount = cacheCountProgress(cache)
     if timeoutTotalCount == 0 or timeoutLoadedCount >= timeoutTotalCount then
       return
     end
-    CacheLoaded(state)
+    cacheLoaded(state)
   end)
 end
 
 local ScanSchedule
 
-local function OnLootDataReceived()
+local function onLootDataReceived()
   local state = EJScan.state
   if not state then
     return
@@ -665,22 +677,22 @@ local function OnLootDataReceived()
   state.lootEvents = state.lootEvents + 1
 end
 
-local function LootListenStop()
-  Events:UnregisterEvent("EJ_LOOT_DATA_RECIEVED", OnLootDataReceived)
+local function lootListenStop()
+  Events:UnregisterEvent("EJ_LOOT_DATA_RECIEVED", onLootDataReceived)
 end
 
-local function ScanFinish()
+local function scanFinish()
   local state = EJScan.state
   if not state then
     return
   end
-  LootListenStop()
-  JournalRestore(state)
-  CacheLoadItems(state)
+  lootListenStop()
+  journalRestore(state)
+  cacheLoadItems(state)
 end
 
 ---@param state LiqUI_EJScanState
-local function ScanCursorAdvance(state)
+local function scanCursorAdvance(state)
   state.encounterIndex = state.encounterIndex + 1
 
   while state.instanceIndex <= #state.instances do
@@ -694,7 +706,7 @@ local function ScanCursorAdvance(state)
   end
 end
 
-local function ScanStepSchedule()
+local function scanStepSchedule()
   local state = EJScan.state
   if not state then
     return
@@ -723,18 +735,18 @@ ScanSchedule = function(expectedScanId)
       state.activeJournalEncounterID = nil
       state.activeInstanceType = nil
       state.cache.items = {}
-      ScanStepSchedule()
+      scanStepSchedule()
       return
     end
     ---@type LiqUI_EJScanEvent
     local event = { name = "complete", progress = 1 }
-    EventFire(event)
-    ScanFinish()
+    eventFire(event)
+    scanFinish()
     return
   end
 
   if #state.classSpecs == 0 then
-    ScanFinish()
+    scanFinish()
     return
   end
 
@@ -746,8 +758,8 @@ ScanSchedule = function(expectedScanId)
     or not encounter.journalEncounterID
     or not encounter.name
     or encounter.name == "" then
-    ScanCursorAdvance(state)
-    ScanStepSchedule()
+    scanCursorAdvance(state)
+    scanStepSchedule()
     return
   end
 
@@ -758,31 +770,31 @@ ScanSchedule = function(expectedScanId)
     local cache = state.cache
 
     if state.activeJournalInstanceID ~= journalInstanceID or state.activeInstanceType ~= instanceType then
-      JournalSelectInstanceTab(instanceType, journalInstanceID)
-      JournalSyncInstance(journalInstanceID, instanceType)
+      journalSelectInstanceTab(instanceType, journalInstanceID)
+      journalSyncInstance(journalInstanceID, instanceType)
       state.activeJournalInstanceID = journalInstanceID
       state.activeInstanceType = instanceType
       state.activeJournalEncounterID = nil
     end
 
     if state.activeJournalEncounterID ~= encounter.journalEncounterID then
-      JournalSelectEncounter(encounter.journalEncounterID)
+      journalSelectEncounter(encounter.journalEncounterID)
       state.activeJournalEncounterID = encounter.journalEncounterID
     end
 
-    JournalSetDifficulty(instanceType)
-    ScanFilterSlotClear(false)
+    journalSetDifficulty(instanceType)
+    scanFilterSlotClear(false)
     EJ_SetLootFilter(ScanFilterAllClassId, ScanFilterAllSpecId)
     for lootIndex = 1, EJ_GetNumLoot() do
       local lootInfo = C_EncounterJournal.GetLootInfoByIndex(lootIndex)
-      ScanAddItem(cache, lootInfo, journalInstanceID, instance, instanceType, encounter.journalEncounterID, nil)
+      scanAddItem(cache, lootInfo, journalInstanceID, instance, instanceType, encounter.journalEncounterID, nil)
     end
 
     for _, classSpec in ipairs(state.classSpecs) do
       EJ_SetLootFilter(classSpec.classID, classSpec.specID)
       for lootIndex = 1, EJ_GetNumLoot() do
         local lootInfo = C_EncounterJournal.GetLootInfoByIndex(lootIndex)
-        ScanAddItem(cache, lootInfo, journalInstanceID, instance, instanceType, encounter.journalEncounterID, classSpec.specID)
+        scanAddItem(cache, lootInfo, journalInstanceID, instance, instanceType, encounter.journalEncounterID, classSpec.specID)
       end
     end
   end
@@ -800,10 +812,10 @@ ScanSchedule = function(expectedScanId)
     progress = state.step / state.totalSteps,
     instance = instance,
   }
-  EventFire(event)
+  eventFire(event)
 
-  ScanCursorAdvance(state)
-  ScanStepSchedule()
+  scanCursorAdvance(state)
+  scanStepSchedule()
 end
 
 ---@param reason string|nil
@@ -813,16 +825,16 @@ function EJScan:ScanCancel(reason, restoreJournal)
     return
   end
 
-  LootListenStop()
+  lootListenStop()
   EJScan.counter = EJScan.counter + 1
   local state = EJScan.state
   EJScan.state = nil
   ---@type LiqUI_EJScanEvent
   local event = { name = "cancelled" }
-  EventFire(event)
+  eventFire(event)
 
   if restoreJournal ~= false then
-    JournalRestore(state)
+    journalRestore(state)
   end
 end
 
@@ -847,7 +859,7 @@ function EJScan:Register(options)
     onEvent = options.onEvent,
   }
   self.hosts[options.name] = host
-  SyncBoundCaches()
+  syncBoundCaches()
 end
 
 ---@return boolean
@@ -856,7 +868,7 @@ function EJScan:IsCacheReady()
   if seasonID <= 0 then
     return false
   end
-  return CacheBagIsComplete(self.itemCache, seasonID)
+  return cacheBagIsComplete(self.itemCache, seasonID)
 end
 
 ---@return boolean
@@ -884,15 +896,15 @@ function EJScan:ClearCache()
   end)
   ---@type LiqUI_EJScanEvent
   local event = { name = "cleared" }
-  EventFire(event)
+  eventFire(event)
 end
 
 function EJScan:GetCache()
   if self:IsCacheReady() then
-    SyncBoundCaches()
+    syncBoundCaches()
     ---@type LiqUI_EJScanEvent
     local event = { name = "current" }
-    EventFire(event)
+    eventFire(event)
     return
   end
   if EJScan.state then
@@ -904,9 +916,9 @@ function EJScan:GetCache()
     end)
     return
   end
-  SyncBoundCaches()
+  syncBoundCaches()
   if self:IsCacheReady() then
-    CacheNotifyReady()
+    cacheNotifyReady()
     return
   end
 
@@ -928,7 +940,7 @@ function EJScan:GetCache()
   local state = {
     scanId = EJScan.counter,
     cache = cache,
-    journalFilters = ScanFilterSave(),
+    journalFilters = scanFilterSave(),
     journalUIWasShown = false,
     journalPrimedForScan = false,
     activeJournalInstanceID = nil,
@@ -945,9 +957,9 @@ function EJScan:GetCache()
   }
   EJScan.state = state
 
-  JournalPrepareFilters()
-  state.journalUIWasShown = JournalHide()
-  JournalPrepare()
+  journalPrepareFilters()
+  state.journalUIWasShown = journalHide()
+  journalPrepare()
   cache.items = {}
   cache.seasonID = 0
   cache.build = ""
@@ -955,10 +967,10 @@ function EJScan:GetCache()
   cache.lastUpdate = 0
   ---@type LiqUI_EJScanEvent
   local event = { name = "start", progress = 0 }
-  EventFire(event)
+  eventFire(event)
 
-  AppendScanInstances(state, "raid", Data:GetRaids())
-  AppendScanInstances(state, "dungeon", Data:GetDungeons())
+  appendScanInstances(state, "raid", Data:GetRaids())
+  appendScanInstances(state, "dungeon", Data:GetDungeons())
 
   local bossCount = 0
   Utils.TableForEach(state.instances, function(instanceEntry)
@@ -970,6 +982,6 @@ function EJScan:GetCache()
   end)
   state.totalSteps = bossCount > 0 and bossCount or ScanMinProgressSteps
 
-  Events:RegisterEvent("EJ_LOOT_DATA_RECIEVED", OnLootDataReceived, true)
-  ScanStepSchedule()
+  Events:RegisterEvent("EJ_LOOT_DATA_RECIEVED", onLootDataReceived, true)
+  scanStepSchedule()
 end

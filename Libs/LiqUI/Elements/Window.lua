@@ -141,6 +141,7 @@ local function applyWindowPosition(settings, window)
   window:SetPoint("TOPLEFT", UIParent, "TOPLEFT", offsetX, offsetY)
 end
 
+---@param window LiqUI_WindowInstance
 local function repositionTitlebarButtons(window)
   if not window.titlebar or not window.titlebar.CloseButton then
     return
@@ -324,9 +325,12 @@ local function createWindow(options)
     if buttonConfig.onMenu then
       ---@class LiqUI_WindowTitlebarDropdownButton
       local menuButton = CreateFrame("DropdownButton", "$parent" .. buttonName, window.titlebar)
-      menuButton.menuGenerator = function(_, rootMenu)
+      ---@param _ Region
+      ---@param rootMenu RootMenuDescriptionProxy
+      local function openTitlebarButtonMenu(_, rootMenu)
         buttonConfig.onMenu(window, rootMenu)
       end
+      menuButton.menuGenerator = openTitlebarButtonMenu
       button = menuButton
     else
       button = CreateFrame("Button", "$parent" .. buttonName, window.titlebar)
@@ -386,8 +390,10 @@ local function createWindow(options)
     -- Remove the button
     button:Hide()
     button:SetParent(nil)
-    window.titlebarButtons = TableFilter(window.titlebarButtons,
-                                         function(titlebarButton) return titlebarButton:GetName() ~= buttonName end)
+    local remainingButtons = TableFilter(window.titlebarButtons, function(titlebarButton)
+      return titlebarButton:GetName() ~= buttonName
+    end)
+    window.titlebarButtons = remainingButtons
 
     repositionTitlebarButtons(window)
   end
@@ -420,7 +426,7 @@ local function createWindow(options)
     end
   end
 
-  ---@return ColorTable?
+  ---@return ColorRGBAData?
   function window:GetWindowColor()
     if window.db and window.db.windowColor then
       return window.db.windowColor
@@ -428,7 +434,7 @@ local function createWindow(options)
     return window.options.windowColor
   end
 
-  ---@param color ColorTable
+  ---@param color ColorRGBAData
   function window:SetWindowColor(color)
     if not window.db then
       return
@@ -511,18 +517,17 @@ local function createWindow(options)
     rootMenu:CreateTitle("Window")
     local windowScale = rootMenu:CreateButton("Scaling")
     for scalePercent = 80, 200, 10 do
-      windowScale:CreateRadio(
-        scalePercent .. "%",
-        function() return window:GetWindowScale() == scalePercent end,
-        function(data)
-          window:SetWindowScale(data)
-          if onRefresh then
-            onRefresh()
-          end
-          return MenuResponse.Refresh
-        end,
-        scalePercent
-      )
+      local function windowScaleIsSelected()
+        return window:GetWindowScale() == scalePercent
+      end
+      local function selectWindowScale()
+        window:SetWindowScale(scalePercent)
+        if onRefresh then
+          onRefresh()
+        end
+        return MenuResponse.Refresh
+      end
+      windowScale:CreateRadio(scalePercent .. "%", windowScaleIsSelected, selectWindowScale, scalePercent)
     end
 
     -- Window-specific options that conceptually belong directly below Scaling
@@ -532,49 +537,58 @@ local function createWindow(options)
       window.options.onWindowOptionsAfterScaling(window, rootMenu)
     end
 
+
     local windowColor = window:GetWindowColor()
     if not windowColor then
       return
     end
+
+    local function applyPickedWindowColor()
+      local red, green, blue = ColorPickerFrame:GetColorRGB() ---@type number, number, number
+      local alpha = ColorPickerFrame:GetColorAlpha()
+      if type(red) ~= "number" or type(green) ~= "number" or type(blue) ~= "number" then
+        return
+      end
+      ---@type ColorRGBAData
+      local color = {
+        r = red,
+        g = green,
+        b = blue,
+        a = type(alpha) == "number" and alpha or windowColor.a,
+      }
+      window:SetWindowColor(color)
+      if onRefresh then
+        onRefresh()
+      end
+    end
+
+    ---@param previousColor ColorRGBAData
+    local function restoreWindowColor(previousColor)
+      if type(previousColor.r) ~= "number" then
+        return
+      end
+      ---@type ColorRGBAData
+      local restored = {
+        r = previousColor.r,
+        g = previousColor.g,
+        b = previousColor.b,
+        a = previousColor.a or windowColor.a,
+      }
+      window:SetWindowColor(restored)
+      if onRefresh then
+        onRefresh()
+      end
+    end
+
+    ---@type LiqUI_ColorPickerInfo
     local colorInfo = {
       r = windowColor.r,
       g = windowColor.g,
       b = windowColor.b,
       a = windowColor.a,
       opacity = windowColor.a,
-      swatchFunc = function()
-        local r, g, b = ColorPickerFrame:GetColorRGB()
-        local a = ColorPickerFrame:GetColorAlpha()
-        if r then
-          ---@type ColorTable
-          local color = {
-            r = r,
-            g = g,
-            b = b,
-            a = a or windowColor.a,
-          }
-          window:SetWindowColor(color)
-          if onRefresh then
-            onRefresh()
-          end
-        end
-      end,
-      opacityFunc = function() end,
-      cancelFunc = function(color)
-        if color.r then
-          ---@type ColorTable
-          local restored = {
-            r = color.r,
-            g = color.g,
-            b = color.b,
-            a = color.a or windowColor.a,
-          }
-          window:SetWindowColor(restored)
-          if onRefresh then
-            onRefresh()
-          end
-        end
-      end,
+      swatchFunc = applyPickedWindowColor,
+      cancelFunc = restoreWindowColor,
       hasOpacity = 1,
     }
     rootMenu:CreateColorSwatch(
@@ -596,7 +610,6 @@ local function createWindow(options)
         return MenuResponse.Refresh
       end
     )
-
     -- Window-specific options that belong directly after the generic border
     -- toggle can be inserted here without duplicating the LiqUI menu.
     if window.options.onWindowOptionsAfterBorder then
@@ -689,12 +702,15 @@ local function createWindow(options)
 
     ---@class LiqUI_WindowTitlebarDropdownButton
     titlebar.SettingsButton = CreateFrame("DropdownButton", "$parentSettingsButton", titlebar)
-    titlebar.SettingsButton.menuGenerator = function(_, rootMenu)
+    ---@param _ Region
+    ---@param rootMenu RootMenuDescriptionProxy
+    local function openWindowSettingsMenu(_, rootMenu)
       if window.options.onSettingsMenu then
         window.options.onSettingsMenu(window, rootMenu)
       end
       window:AppendWindowOptionsMenu(rootMenu)
     end
+    titlebar.SettingsButton.menuGenerator = openWindowSettingsMenu
     titlebar.SettingsButton.Icon = titlebar.SettingsButton:CreateTexture(nil, "ARTWORK")
     titlebar.SettingsButton.Icon:SetPoint("CENTER", titlebar.SettingsButton, "CENTER")
     titlebar.SettingsButton.Icon:SetSize(12, 12)

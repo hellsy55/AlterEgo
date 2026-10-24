@@ -24,6 +24,7 @@ local CLEAR_ICON_SIZE = 12
 ---@param text string
 ---@param scrollToEnd boolean|nil
 local function applyLogText(textBox, text, scrollToEnd)
+  ---@type LiqUI_LogEditBox
   local editBox = textBox:GetEditBox()
   if editBox.logText ~= text then
     editBox.logText = text
@@ -31,6 +32,7 @@ local function applyLogText(textBox, text, scrollToEnd)
   end
   if scrollToEnd then
     C_Timer.After(0, function()
+      ---@type WowScrollBox
       local scrollBox = textBox:GetScrollBox()
       if scrollBox then
         scrollBox:ScrollToEnd()
@@ -138,47 +140,52 @@ function LiqUI:NewLogger(options)
     return existing
   end
 
-  ---@class LiqUI_LoggerHandle
   local handle = {
     name = options.name,
     title = options.title or options.name,
     storage = options.storage,
   }
 
+  ---@param loggerHandle LiqUI_LoggerHandle
   ---@param prefixOrMessage string
   ---@param message string?
-  function handle:Log(prefixOrMessage, message)
-    appendLine(self, nil, prefixOrMessage, message)
+  function handle.Log(loggerHandle, prefixOrMessage, message)
+    appendLine(loggerHandle, nil, prefixOrMessage, message)
   end
 
+  ---@param loggerHandle LiqUI_LoggerHandle
   ---@param message string
-  function handle:Warn(message)
-    appendLine(self, "WARN", message)
+  function handle.Warn(loggerHandle, message)
+    appendLine(loggerHandle, "WARN", message)
   end
 
+  ---@param loggerHandle LiqUI_LoggerHandle
   ---@param message string
-  function handle:Error(message)
-    appendLine(self, "ERROR", message)
+  function handle.Error(loggerHandle, message)
+    appendLine(loggerHandle, "ERROR", message)
   end
 
-  function handle:Clear()
-    wipe(self.storage.lines)
-    Logger.selectedAddonName = self.name
+  ---@param loggerHandle LiqUI_LoggerHandle
+  function handle.Clear(loggerHandle)
+    wipe(loggerHandle.storage.lines)
+    Logger.selectedAddonName = loggerHandle.name
     Logger:QueueRefresh()
   end
 
+  ---@param loggerHandle LiqUI_LoggerHandle
   ---@param state boolean|nil
-  function handle:Toggle(state)
-    Logger.selectedAddonName = self.name
+  function handle.Toggle(loggerHandle, state)
+    Logger.selectedAddonName = loggerHandle.name
     Logger:Toggle(state)
   end
 
-  function handle:Show()
-    Logger.selectedAddonName = self.name
+  ---@param loggerHandle LiqUI_LoggerHandle
+  function handle.Show(loggerHandle)
+    Logger.selectedAddonName = loggerHandle.name
     Logger:Show()
   end
 
-  function handle:Hide()
+  function handle.Hide()
     Logger:Hide()
   end
 
@@ -226,6 +233,29 @@ function Logger:Refresh()
   loggerWindow:SetTitle(handle and handle.title or "Log")
 end
 
+---@param _ LiqUI_WindowInstance
+---@param rootMenu RootMenuDescriptionProxy
+local function openLoggerAddonMenu(_, rootMenu)
+  local list = getLoggerHandles()
+  for index = 1, #list do
+    local handle = list[index]
+    rootMenu:CreateRadio(
+      handle.title,
+      function()
+        return Logger.selectedAddonName == handle.name
+      end,
+      function()
+        Logger.selectedAddonName = handle.name
+        Logger:Refresh()
+      end
+    )
+  end
+end
+
+local function clearSelectedLog()
+  Logger:Clear()
+end
+
 function Logger:Render()
   if not Logger.window then
     ---@type LiqUI_WindowOptions
@@ -240,31 +270,14 @@ function Logger:Render()
           icon = LiqUI.Constants.layout.media.iconSettings,
           tooltipTitle = "Addon",
           tooltipDescription = "Choose which addon's log to show.",
-          onMenu = function(_, rootMenu)
-            local list = getLoggerHandles()
-            for index = 1, #list do
-              local handle = list[index]
-              rootMenu:CreateRadio(
-                handle.title,
-                function()
-                  return Logger.selectedAddonName == handle.name
-                end,
-                function()
-                  Logger.selectedAddonName = handle.name
-                  Logger:Refresh()
-                end
-              )
-            end
-          end,
+          onMenu = openLoggerAddonMenu,
         },
         {
           name = "ClearButton",
           icon = LiqUI.Constants.layout.media.iconClose,
           tooltipTitle = "Clear log",
           tooltipDescription = "Remove all lines from the selected addon's log.",
-          onClick = function()
-            Logger:Clear()
-          end,
+          onClick = clearSelectedLog,
           iconSize = CLEAR_ICON_SIZE,
         },
       },
@@ -282,18 +295,22 @@ function Logger:Render()
     local textBox = scrollHost.textBox
     textBox:SetFontObject("ChatFontSmall")
 
+    ---@type LiqUI_LogEditBox
     local editBox = textBox:GetEditBox()
     editBox.logText = ""
     editBox:SetScript("OnChar", function()
     end)
-    editBox:SetScript("OnKeyDown", function(_, key)
+    ---@param _ EditBox
+    ---@param key string
+    local function onLogKeyDown(_, key)
       if IsControlKeyDown() then
         return
       end
       if key == "ESCAPE" then
         textBox:ClearFocus()
       end
-    end)
+    end
+    editBox:SetScript("OnKeyDown", onLogKeyDown)
 
     loggerWindow.body.textBox = textBox
     loggerWindow.body.scrollBar = scrollHost.scrollBar

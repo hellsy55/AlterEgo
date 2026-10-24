@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.3 - 2026-10-24
+
+- Updated performance.
+
 ## v1.3.2 - 2026-10-24
 
 - Updated the shared event bus so a callback registered for several events runs once per burst, optional unit filters apply per callback, and duplicate registrations are ignored. Thank you @KurtzPT.

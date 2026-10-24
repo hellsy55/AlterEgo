@@ -8,17 +8,14 @@ local TableMergeOptions = LiqUI.Utils.TableMergeOptions
 local buttonChrome = LiqUI.Constants.button
 local textColors = LiqUI.Constants.text
 
----@param color ColorTable|ColorMixin
+---@param color ColorRGBAData
 ---@return number, number, number, number
 local function colorRGBA(color)
-  if color.GetRGBA then
-    return color:GetRGBA()
-  end
-  return color.r, color.g, color.b, color.a or 1
+  return color.r, color.g, color.b, color.a
 end
 
 ---@param color ColorMixin
----@return ColorTable
+---@return ColorRGBAData
 local function colorTable(color)
   local r, g, b, a = color:GetRGBA()
   return {r = r, g = g, b = b, a = a}

@@ -1,6 +1,6 @@
 assert(LibStub, "LiqUI requires LibStub")
 
-local MAJOR, MINOR = "LiqUI-1.0", 6
+local MAJOR, MINOR = "LiqUI-1.0", 7
 ---@class LiqUI
 local LiqUI = LibStub:NewLibrary(MAJOR, MINOR)
 if not LiqUI then
@@ -11,12 +11,13 @@ LiqUI.minor = MINOR
 
 _G.LiqUI = LiqUI
 
+---@type table<string, fun(options: LiqUI_NewElementOptions): Frame>
 LiqUI.elements = LiqUI.elements or {}
 LiqUI.created = LiqUI.created or {}
 LiqUI.registeredAddons = LiqUI.registeredAddons or {}
 
 ---@param elementType string
----@param createFn fun(options: LiqUI_NewElementOptions): table
+---@param createFn fun(options: LiqUI_NewElementOptions): Frame
 function LiqUI:RegisterElement(elementType, createFn)
   if type(elementType) ~= "string" or elementType == "" then
     error("LiqUI:RegisterElement requires elementType", 2)
@@ -27,13 +28,17 @@ function LiqUI:RegisterElement(elementType, createFn)
   self.elements[elementType] = createFn
 end
 
+---@overload fun(self: LiqUI, elementType: "Window", options: LiqUI_WindowOptions): LiqUI_WindowInstance
+---@overload fun(self: LiqUI, elementType: "Table", options: LiqUI_TableOptions): LiqUI_TableInstance
+---@overload fun(self: LiqUI, elementType: "Button", options: LiqUI_ButtonOptions): LiqUI_ButtonInstance
 ---@param elementType string
 ---@param options LiqUI_NewElementOptions
----@return table
+---@return Frame
 function LiqUI:NewElement(elementType, options)
   if type(elementType) ~= "string" or elementType == "" then
     error("LiqUI:NewElement requires elementType", 2)
   end
+  ---@type fun(options: LiqUI_NewElementOptions): Frame
   local createFn = self.elements[elementType]
   if not createFn then
     error("LiqUI:NewElement unknown elementType: " .. elementType, 2)

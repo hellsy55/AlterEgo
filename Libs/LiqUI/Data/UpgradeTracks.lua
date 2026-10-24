@@ -77,8 +77,11 @@ local function getCraftedQualityLadder(bonusID)
   return nil
 end
 
+---@type table<number, LiqUI_UpgradeBonusIndex>|nil
+local upgradeBonusIndex
+
 local function ensureUpgradeBonusIndex()
-  if Data.cache.upgradeByBonusID then
+  if upgradeBonusIndex then
     return
   end
   ---@type table<number, LiqUI_UpgradeBonusIndex>
@@ -96,6 +99,7 @@ local function ensureUpgradeBonusIndex()
       end
     end)
   end)
+  upgradeBonusIndex = index
   Data.cache.upgradeByBonusID = index
 end
 
@@ -135,11 +139,10 @@ end
 ---@return number|nil
 function Data:GetUpgradeTrackForBonusID(bonusID)
   ensureUpgradeBonusIndex()
-  local byBonusID = self.cache.upgradeByBonusID
-  if not byBonusID then
+  if not upgradeBonusIndex then
     return nil
   end
-  local entry = byBonusID[bonusID]
+  local entry = upgradeBonusIndex[bonusID]
   if not entry then
     return nil
   end

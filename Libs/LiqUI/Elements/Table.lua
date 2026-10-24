@@ -23,7 +23,7 @@ local function bindTableMouseWheel(frame, scrollArea)
   BindScrollBoxMouseWheel(frame, wheelScrollBox)
 end
 
----@param value table
+---@param value table<string|integer, string|number|boolean|table|function|nil>
 ---@return boolean
 local function isExtendedTable(value)
   if type(value) ~= "table" then
@@ -35,6 +35,26 @@ local function isExtendedTable(value)
     end
   end
   return false
+end
+
+---@param source LiqUI_TableDataCellExtended
+---@param target LiqUI_TableDataCellExtended
+local function copyCellFields(source, target)
+  TableForEach(source, function(value, key)
+    if type(key) == "string" and key ~= "data" then
+      target[key] = value
+    end
+  end)
+end
+
+---@param source LiqUI_TableDataRowExtended
+---@param target LiqUI_TableDataRowExtended
+local function copyRowFields(source, target)
+  TableForEach(source, function(value, key)
+    if type(key) == "string" and key ~= "data" then
+      target[key] = value
+    end
+  end)
 end
 
 ---@param cellValue LiqUI_TableDataCellValue|nil
@@ -50,37 +70,43 @@ local function normalizeCell(cellValue)
     return { data = cellValue }
   end
   ---@type LiqUI_TableDataCellExtended
-  local normalized = { data = cellValue.data }
-  for key, value in pairs(cellValue) do
-    if type(key) == "string" and key ~= "data" then
-      normalized[key] = value
-    end
+  local cell = cellValue
+  ---@type LiqUI_TableDataCellExtended
+  local normalized = { data = cell.data }
+  copyCellFields(cell, normalized)
+  return normalized
+end
+
+---@param cells LiqUI_TableDataCellValue[]
+---@return LiqUI_TableDataRowExtended
+local function normalizeArrayRow(cells)
+  ---@type LiqUI_TableDataRowExtended
+  local normalized = { data = {} }
+  for columnIndex, cellValue in ipairs(cells) do
+    normalized.data[columnIndex] = normalizeCell(cellValue)
   end
+  return normalized
+end
+
+---@param row LiqUI_TableDataRowExtended
+---@return LiqUI_TableDataRowExtended
+local function normalizeExtendedRow(row)
+  local normalized = normalizeArrayRow(row.data or {})
+  copyRowFields(row, normalized)
   return normalized
 end
 
 ---@param row LiqUI_TableDataRow
 ---@return LiqUI_TableDataRowExtended
 local function normalizeRow(row)
-  local cells
-  ---@type LiqUI_TableDataRowExtended
-  local normalized = { data = {} }
-
   if isExtendedTable(row) then
-    cells = row.data or {}
-    for key, value in pairs(row) do
-      if type(key) == "string" and key ~= "data" then
-        normalized[key] = value
-      end
-    end
-  else
-    cells = row
+    ---@type LiqUI_TableDataRowExtended
+    local extended = row
+    return normalizeExtendedRow(extended)
   end
-
-  for columnIndex, cellValue in ipairs(cells) do
-    normalized.data[columnIndex] = normalizeCell(cellValue)
-  end
-  return normalized
+  ---@type LiqUI_TableDataCellValue[]
+  local cells = row
+  return normalizeArrayRow(cells)
 end
 
 ---@param data LiqUI_TableData
@@ -181,9 +207,11 @@ local function createTable(options)
       sorting.savedState = tableDb.sortState
     end
     if not sorting.onStateChanged then
-      sorting.onStateChanged = function(state)
+      ---@param state LiqUI_TableSortState
+      local function saveSortState(state)
         tableDb.sortState = state
       end
+      sorting.onStateChanged = saveSortState
     end
   end
 
