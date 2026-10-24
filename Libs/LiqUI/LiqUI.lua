@@ -1,6 +1,6 @@
 assert(LibStub, "LiqUI requires LibStub")
 
-local MAJOR, MINOR = "LiqUI-1.0", 5
+local MAJOR, MINOR = "LiqUI-1.0", 6
 ---@class LiqUI
 local LiqUI = LibStub:NewLibrary(MAJOR, MINOR)
 if not LiqUI then
@@ -16,7 +16,7 @@ LiqUI.created = LiqUI.created or {}
 LiqUI.registeredAddons = LiqUI.registeredAddons or {}
 
 ---@param elementType string
----@param createFn fun(options: table): any
+---@param createFn fun(options: LiqUI_NewElementOptions): table
 function LiqUI:RegisterElement(elementType, createFn)
   if type(elementType) ~= "string" or elementType == "" then
     error("LiqUI:RegisterElement requires elementType", 2)
@@ -28,8 +28,8 @@ function LiqUI:RegisterElement(elementType, createFn)
 end
 
 ---@param elementType string
----@param options table
----@return any
+---@param options LiqUI_NewElementOptions
+---@return table
 function LiqUI:NewElement(elementType, options)
   if type(elementType) ~= "string" or elementType == "" then
     error("LiqUI:NewElement requires elementType", 2)
@@ -63,7 +63,7 @@ end
 
 ---@param elementType string
 ---@param name string
----@return any
+---@return table?
 function LiqUI:GetElement(elementType, name)
   local byType = self.created[elementType]
   if not byType then

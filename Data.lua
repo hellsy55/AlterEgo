@@ -14,6 +14,7 @@ local TableFilter = LiqUI.Utils.TableFilter
 local TableFind = LiqUI.Utils.TableFind
 local TableForEach = LiqUI.Utils.TableForEach
 local TableGet = LiqUI.Utils.TableGet
+local MergeDeep = LiqUI.Utils.MergeDeep
 
 Data.dbVersion = 51
 
@@ -339,7 +340,25 @@ function Data:IsSeason2CrestCapLifted()
     (utc.month > 10 or (utc.month == 10 and utc.day >= 20)))
 end
 
----Get the currencies of the current season enriched with C_CurrencyInfo data
+---@param itemID number
+---@return string|nil name
+---@return number|nil iconFileID
+---@return Enum.ItemQuality|nil quality
+---@return number bagCount
+---@return number quantity
+local function fetchBagItem(itemID)
+  local name = C_Item.GetItemNameByID(itemID)
+  local iconFileID = C_Item.GetItemIconByID(itemID)
+  local quality = C_Item.GetItemQualityByID(itemID)
+  if name == nil or iconFileID == nil or quality == nil then
+    C_Item.RequestLoadItemDataByID(itemID)
+  end
+  local bagCount = C_Item.GetItemCount(itemID)
+  local quantity = C_Item.GetItemCount(itemID, true)
+  return name, iconFileID, quality, bagCount, quantity
+end
+
+---Current season trackers enriched for labels and local tracker settings.
 ---@return AE_CurrencyInfo[]
 function Data:GetCurrencies()
   local currencies = {}
@@ -374,23 +393,25 @@ function Data:GetCurrencies()
       return
     end
     if currency.currencyType == "trackedItem" then
+      local name, iconFileID, quality = fetchBagItem(currency.id)
       table.insert(currencies, {
-        id = currency.id, name = currency.name, description = currency.description,
-        currencyType = currency.currencyType, category = currency.category,
-        iconFileID = C_Item.GetItemIconByID(currency.id),
+        id = currency.id, name = name or currency.name, description = currency.description,
+        currencyType = currency.currencyType, category = currency.category, quality = quality,
+        iconFileID = iconFileID,
         tooltipNote = currency.tooltipNote, required = currency.required,
         maxQuantity = 0, maxWeeklyQuantity = 0, quantity = 0,
       })
       return
     end
     if currency.currencyType == "delveMap" then
+      local _, iconFileID, quality = fetchBagItem(currency.id)
       ---@type AE_CurrencyInfo
       local currencyInfo = {
         id = currency.id,
         name = currency.name or "Trovehunter's Bounty",
         description = "Weekly Trovehunter's Bounty map status from delves.",
-        iconFileID = C_Item.GetItemIconByID(currency.id) or 0,
-        quality = Enum.ItemQuality.Rare,
+        iconFileID = iconFileID or 0,
+        quality = quality or Enum.ItemQuality.Rare,
         currencyType = currency.currencyType,
         category = currency.category,
         useTotalEarnedForMaxQty = currency.useTotalEarnedForMaxQty,
@@ -424,8 +445,9 @@ function Data:GetCurrencies()
       table.insert(currencies, gildedStashInfo)
       return
     end
-    local currencyInfo = C_CurrencyInfo.GetCurrencyInfo(currency.id)
-    if currencyInfo then
+    local apiInfo = C_CurrencyInfo.GetCurrencyInfo(currency.id)
+    if apiInfo then
+      local currencyInfo = TableCopy(apiInfo)
       currencyInfo.id = currency.id
       currencyInfo.currencyType = currency.currencyType
       currencyInfo.category = currency.category
@@ -2004,10 +2026,10 @@ function Data:UpdateRaidInstances()
     for encounterIndex = 1, numEncounters do
       local bossName, fileDataID, isKilled = GetSavedInstanceEncounterInfo(savedInstanceIndex, encounterIndex)
       local instanceEncounterID = 0
-      if raid then
+      if raid and bossName then
         TableForEach(raid.encounters, function(encounter)
-          if string.lower(encounter.name) == string.lower(bossName) then
-            instanceEncounterID = encounter.instanceEncounterID
+          if encounter.name and string.lower(encounter.name) == string.lower(bossName) then
+            instanceEncounterID = encounter.instanceEncounterID or 0
           end
         end)
       end
@@ -2463,10 +2485,11 @@ function Data:UpdateCurrencies()
       return
     end
     if dataCurrency.currencyType == "trackedItem" then
-      local count = C_Item.GetItemCount(dataCurrency.id, false, false, false)
+      local name, iconFileID, quality, bagCount, quantity = fetchBagItem(dataCurrency.id)
       table.insert(character.currencies, {
         id = dataCurrency.id, currencyType = dataCurrency.currencyType,
-        name = dataCurrency.name, quantity = count or 0,
+        name = name or dataCurrency.name, quantity = quantity or 0,
+        bagCount = bagCount or 0, iconFileID = iconFileID, quality = quality,
       })
       return
     end
@@ -2495,30 +2518,7 @@ function Data:UpdateCurrencies()
       table.insert(character.currencies, questCurrency)
       return
     end
-    if dataCurrency.currencyType == "delveMap" then
-      local bagCount = C_Item.GetItemCount(dataCurrency.id, true) or 0
-      local hasBuff = false
-      if dataCurrency.spellID then
-        local aura = C_UnitAuras.GetPlayerAuraBySpellID(dataCurrency.spellID)
-        if aura ~= nil and not issecretvalue(aura) then
-          hasBuff = true
-        end
-      end
 
-      ---@type AE_CharacterCurrency
-      local delveMapCurrency = {
-        id = dataCurrency.id,
-        currencyType = dataCurrency.currencyType,
-        name = dataCurrency.name or "Trovehunter's Bounty",
-        iconFileID = C_Item.GetItemIconByID(dataCurrency.id) or 0,
-        quantity = bagCount,
-        bagCount = bagCount,
-        hasBuff = hasBuff,
-        questCompleted = dataCurrency.questID ~= nil and C_QuestLog.IsQuestFlaggedCompleted(dataCurrency.questID) == true,
-      }
-      table.insert(character.currencies, delveMapCurrency)
-      return
-    end
     if dataCurrency.currencyType == "gildedStash" then
       -- Mirrors how WeeklyRewards reads Gilded Stash progress: this widget is only populated
       -- client-side after visiting Silvermoon City (or otherwise triggering the spell visual).
@@ -2548,19 +2548,57 @@ function Data:UpdateCurrencies()
       return
     end
 
-    local currencyInfo = C_CurrencyInfo.GetCurrencyInfo(dataCurrency.id)
-    if not currencyInfo then return end
-    ---@type AE_CharacterCurrency
-    local currency = currencyInfo
-    currency.id = dataCurrency.id
-    currency.currencyType = dataCurrency.currencyType
-    if dataCurrency.currencyType == "spark" and dataCurrency.itemID then
-      -- Count the actual whole Spark item in bags, not Spark Dust currency.
-      currency.bagCount = C_Item.GetItemCount(dataCurrency.itemID, false, false, false) or 0
+    local isBagItem = dataCurrency.currencyType == "item" or dataCurrency.currencyType == "delveMap"
+    local currencyInfo = nil
+    if not isBagItem then
+      currencyInfo = C_CurrencyInfo.GetCurrencyInfo(dataCurrency.id)
+      if not currencyInfo then return end
     end
-    if dataCurrency.itemID and dataCurrency.currencyType ~= "spark" then
-      currency.quantity = C_Item.GetItemCount(dataCurrency.itemID, true)
-      currency.iconFileID = C_Item.GetItemIconByID(dataCurrency.itemID) or 0
+
+    ---@type AE_CharacterCurrency
+    local currency = {
+      id = dataCurrency.id,
+      currencyType = dataCurrency.currencyType,
+      quantity = 0,
+    }
+    if currencyInfo then
+      currency = MergeDeep(currency, currencyInfo)
+      currency.id = dataCurrency.id
+      currency.currencyType = dataCurrency.currencyType
+    end
+
+    local itemID = isBagItem and dataCurrency.id or dataCurrency.itemID
+    if itemID then
+      local itemName, iconFileID, quality, bagCount, quantity = fetchBagItem(itemID)
+      currency.quantity = quantity
+      currency.bagCount = bagCount
+      if iconFileID ~= nil then
+        currency.iconFileID = iconFileID
+      end
+      if quality ~= nil then
+        currency.quality = quality
+      end
+      if dataCurrency.currencyType == "item" then
+        currency.name = itemName or dataCurrency.name
+      end
+    end
+
+    if dataCurrency.currencyType == "delveMap" then
+      currency.name = dataCurrency.name or "Trovehunter's Bounty"
+      currency.hasBuff = false
+      if dataCurrency.spellID then
+        local aura = C_UnitAuras.GetPlayerAuraBySpellID(dataCurrency.spellID)
+        if aura ~= nil and not issecretvalue(aura) then
+          currency.hasBuff = true
+        end
+      end
+      currency.questCompleted = dataCurrency.questID ~= nil and C_QuestLog.IsQuestFlaggedCompleted(dataCurrency.questID) == true
+    end
+
+    if dataCurrency.currencyType == "spark" and dataCurrency.itemID then
+      -- Keep dust quantity separate from whole Sparks in bags.
+      currency.quantity = currencyInfo.quantity or 0
+      currency.bagCount = C_Item.GetItemCount(dataCurrency.itemID, false, false, false) or 0
     end
     table.insert(character.currencies, currency)
   end)
@@ -3101,17 +3139,15 @@ function Data:UpdateEquipment()
           or line.leftText:lower():find("ascendant voidforged", 1, true)) then
           ascendantVenomforged = true
         end
-        local match, _, uTrack, uLevel, uMax = line.leftText:find(upgradePattern)
-        if not match then return end
+        local trackCapture, levelCapture, maxCapture = line.leftText:match(upgradePattern)
+        if not trackCapture then return end
         if itemUpgradeTrack == "" then
-          if uTrack then
-            itemUpgradeTrack = uTrack
+          itemUpgradeTrack = trackCapture
+          if levelCapture then
+            itemUpgradeLevel = tonumber(levelCapture) or itemUpgradeLevel
           end
-          if uLevel then
-            itemUpgradeLevel = tonumber(uLevel) or itemUpgradeLevel
-          end
-          if uMax then
-            itemUpgradeMax = tonumber(uMax) or itemUpgradeMax
+          if maxCapture then
+            itemUpgradeMax = tonumber(maxCapture) or itemUpgradeMax
           end
         end
         if line.leftColor then
@@ -3472,9 +3508,11 @@ function Data:UpdateVault()
       if encounters then
         TableForEach(encounters, function(encounter)
           if not encounter then return end
-          encounter.type = vaultType.id
-          encounter.index = index
-          table.insert(character.vault.activityEncounterInfo, encounter)
+          ---@type AE_WeeklyRewardActivityEncounterInfo
+          local activityEncounter = TableCopy(encounter)
+          activityEncounter.type = vaultType.id
+          activityEncounter.index = index
+          table.insert(character.vault.activityEncounterInfo, activityEncounter)
         end)
       end
     end
@@ -3482,14 +3520,16 @@ function Data:UpdateVault()
 
   local activities = C_WeeklyRewards.GetActivities()
   TableForEach(activities, function(activity)
-    activity.exampleRewardLink = ""
-    activity.exampleRewardUpgradeLink = ""
+    ---@type AE_CharacterVaultSlot
+    local slot = TableCopy(activity)
+    slot.exampleRewardLink = ""
+    slot.exampleRewardUpgradeLink = ""
     if activity.progress >= activity.threshold then
       local itemLink, upgradeItemLink = C_WeeklyRewards.GetExampleRewardItemHyperlinks(activity.id)
-      activity.exampleRewardLink = itemLink
-      activity.exampleRewardUpgradeLink = upgradeItemLink
+      slot.exampleRewardLink = itemLink or ""
+      slot.exampleRewardUpgradeLink = upgradeItemLink or ""
     end
-    table.insert(character.vault.slots, activity)
+    table.insert(character.vault.slots, slot)
 
     -- The "example" link above is only a representative sample and can
     -- come back empty even though the slot is genuinely unlocked in-game
@@ -3504,8 +3544,8 @@ function Data:UpdateVault()
     if activity.rewards and #activity.rewards > 0 then
       local ok, err = pcall(resolveBestVaultItemReward, activity.rewards, function(itemLink)
         if not itemLink then return end
-        activity.exampleRewardLink = itemLink
-        activity.rewardIsConcrete = true
+        slot.exampleRewardLink = itemLink
+        slot.rewardIsConcrete = true
         self:ArchiveVaultSnapshot(character)
         addon.Core:Render()
       end)
@@ -3571,10 +3611,16 @@ function Data:UpdateMythicPlus()
     local bestTimedRun, bestNotTimedRun = C_MythicPlus.GetSeasonBestForMap(dataDungeon.challengeModeID)
     local affixScores, bestOverAllScore = C_MythicPlus.GetSeasonBestAffixScoreInfoForMap(dataDungeon.challengeModeID)
 
+    ---@type AE_CharacterAffixScoreInfo[]|nil
+    local characterAffixScores = nil
     if affixScores then
+      characterAffixScores = {}
       TableForEach(affixScores, function(affixScore)
         local affix = TableGet(affixes, "name", affixScore.name)
-        affixScore.id = affix and affix.id or 0
+        ---@type AE_CharacterAffixScoreInfo
+        local characterAffixScore = TableCopy(affixScore)
+        characterAffixScore.id = affix and affix.id or 0
+        table.insert(characterAffixScores, characterAffixScore)
       end)
     end
 
@@ -3586,7 +3632,7 @@ function Data:UpdateMythicPlus()
       finishedSuccess = false,
       bestTimedRun = bestTimedRun,
       bestNotTimedRun = bestNotTimedRun,
-      affixScores = affixScores,
+      affixScores = characterAffixScores,
       bestOverAllScore = bestOverAllScore,
     }
 

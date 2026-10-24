@@ -555,7 +555,10 @@ end
 ---@return boolean
 local function compareEquipmentPrimaryThenSlot(rowA, rowB, primaryA, primaryB)
   if primaryA ~= primaryB then
-    return primaryA < primaryB
+    if type(primaryA) == "number" and type(primaryB) == "number" then
+      return primaryA < primaryB
+    end
+    return tostring(primaryA) < tostring(primaryB)
   end
   return compareEquipmentTiebreak(rowA, rowB)
 end
@@ -673,40 +676,31 @@ function Module:QueueEquipmentRefresh()
 end
 
 function Module:OnEnable()
-  addon.Events:RegisterEvent(
-    {
-      "PLAYER_EQUIPMENT_CHANGED",
-      "UNIT_INVENTORY_CHANGED",
-    }, function(unitOrSlot)
-      -- UNIT_INVENTORY_CHANGED passes a unit token, while
-      -- PLAYER_EQUIPMENT_CHANGED passes the numeric equipment slot first.
-      if type(unitOrSlot) == "string" and unitOrSlot ~= "player" then return end
-      self:QueueEquipmentRefresh()
-    end
-  )
+  local function onEquipmentChanged()
+    self:QueueEquipmentRefresh()
+  end
+  addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_EQUIPMENT_CHANGED", onEquipmentChanged)
+  addon.Libs.LiqUI.Events:RegisterEvent("UNIT_INVENTORY_CHANGED", onEquipmentChanged, nil, "player")
 
   -- Keep snapshots current after buffs/spec changes, but never overwrite a
   -- good snapshot with secret combat values. The shared event bucket coalesces
   -- frequent rating/stat updates without rescanning every equipment slot.
-  addon.Events:RegisterEvent({
-    "COMBAT_RATING_UPDATE",
-    "UNIT_STATS",
-    "PLAYER_DAMAGE_DONE_MODS",
-    "PLAYER_SPECIALIZATION_CHANGED",
-    "PLAYER_ENTERING_WORLD",
-    "PLAYER_REGEN_ENABLED",
-  }, function(_, event, unit)
-    if (event == "UNIT_STATS" or event == "PLAYER_DAMAGE_DONE_MODS"
-      or event == "PLAYER_SPECIALIZATION_CHANGED") and unit ~= "player" then return end
+  local function onSecondaryStatsChanged()
     if Data:UpdateSecondaryStats() and self.window and self.window:IsVisible() then
       self:Render()
     end
-  end)
+  end
+  addon.Libs.LiqUI.Events:RegisterEvent({
+    "COMBAT_RATING_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_ENABLED",
+  }, onSecondaryStatsChanged)
+  addon.Libs.LiqUI.Events:RegisterEvent({
+    "UNIT_STATS", "PLAYER_DAMAGE_DONE_MODS", "PLAYER_SPECIALIZATION_CHANGED",
+  }, onSecondaryStatsChanged, nil, "player")
 
   -- Hyperlink tooltips for offline characters may become available shortly
   -- after item data finishes loading. Re-render the open equipment window as
   -- soon as that happens instead of waiting for another unrelated UI update.
-  addon.Events:RegisterEvent("ITEM_DATA_LOAD_RESULT", function()
+  addon.Libs.LiqUI.Events:RegisterEvent("ITEM_DATA_LOAD_RESULT", function()
     if self.window and self.window:IsVisible() then
       self:Render()
     end
@@ -734,7 +728,8 @@ function Module:Render()
   if not self.window then
     local windows = Data.db.global.liqui.windows
     local tables = Data.db.global.liqui.tables
-    self.window = LiqUI:NewElement("Window", {
+    ---@type LiqUI_WindowOptions
+    local windowOptions = {
       name = addon.name .. "Equipment",
       storage = windows.Equipment,
       title = "Character",
@@ -755,8 +750,10 @@ function Module:Render()
           tooltip:AddLine("Show the saved Critical Strike, Haste, Mastery and Versatility ratings and percentages in this window's title.", nil, nil, nil, true)
         end)
       end,
-    })
-    self.dataTable = LiqUI:NewElement("Table", {
+    }
+    self.window = LiqUI:NewElement("Window", windowOptions)
+    ---@type LiqUI_TableOptions
+    local tableOptions = {
       name = addon.name .. "Equipment",
       storage = tables.Equipment,
       header = {enabled = true, sticky = true, height = EQUIPMENT_HEADER_HEIGHT},
@@ -775,7 +772,8 @@ function Module:Render()
         defaultOrder = "asc",
         defaultCompare = compareEquipmentSlotColumn,
       },
-    })
+    }
+    self.dataTable = LiqUI:NewElement("Table", tableOptions)
     self.dataTable:SetParent(self.window.body)
     self.dataTable:SetPoint("TOPLEFT", self.window.body, "TOPLEFT", 0, 0)
     self.dataTable:SetPoint("BOTTOMRIGHT", self.window.body, "BOTTOMRIGHT", 0, 0)

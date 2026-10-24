@@ -382,10 +382,12 @@ local function createTable(options)
 
     if headerEnabled then
       if not headerRowFrame then
-        headerRowFrame = CreateFrame("Frame", "$parentHeaderRow", frame)
-        headerRowFrame.cells = {}
-        bindTableMouseWheel(headerRowFrame, scrollArea)
-        frame.headerRowFrame = headerRowFrame
+        ---@type LiqUI_TableRowFrame
+        local createdHeader = CreateFrame("Frame", "$parentHeaderRow", frame)
+        createdHeader.cells = {}
+        bindTableMouseWheel(createdHeader, scrollArea)
+        headerRowFrame = createdHeader
+        frame.headerRowFrame = createdHeader
       end
 
       if headerSticky then

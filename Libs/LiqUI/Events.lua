@@ -6,21 +6,94 @@ end
 
 LiqUI.Events = LiqUI.Events or {
   handlers = {},
-  runtime = {pendingByEventName = {}},
+  runtime = {pendingByCallback = {}},
   frame = CreateFrame("Frame", "LiqUIEventsFrame"),
 }
 
 ---@class LiqUI_Events
 local Events = LiqUI.Events
+
+local TableForEach = LiqUI.Utils.TableForEach
+
+Events.runtime.pendingByCallback = Events.runtime.pendingByCallback or {}
+
 local BUCKET_INTERVAL_SEC = 2
 
----@param packed LiqUI_EventPackedVarargs
----@return any ...
-local function unpackEventVarargs(packed)
-  if not packed or (packed.n or 0) == 0 then
-    return
+---@param entry LiqUI_EventHandlerEntry
+---@param packedVarargs LiqUI_EventPackedVarargs
+---@return boolean
+local function entryMatchesUnit(entry, packedVarargs)
+  if not entry.unit then
+    return true
   end
-  return unpack(packed, 1, packed.n)
+  return packedVarargs[1] == entry.unit
+end
+
+---@param event string
+---@param callback LiqUI_EventCallback
+---@param unit string|nil
+---@return boolean
+local function isRegistered(event, callback, unit)
+  local list = Events.handlers[event]
+  if not list then
+    return false
+  end
+  for handlerIndex = 1, #list do
+    local entry = list[handlerIndex]
+    if entry.fn == callback and entry.unit == unit then
+      return true
+    end
+  end
+  return false
+end
+
+---@param callback LiqUI_EventCallback
+---@return boolean
+local function isCallbackRegisteredAnywhere(callback)
+  local found = false
+  TableForEach(Events.handlers, function(list)
+    if found then
+      return
+    end
+    for handlerIndex = 1, #list do
+      if list[handlerIndex].fn == callback then
+        found = true
+        return
+      end
+    end
+  end)
+  return found
+end
+
+---@param callback LiqUI_EventCallback
+local function cancelPending(callback)
+  local pendingByCallback = Events.runtime.pendingByCallback
+  ---@type LiqUI_EventBucketPending?
+  local bucket = pendingByCallback[callback]
+  if bucket and bucket.timer then
+    bucket.timer:Cancel()
+  end
+  pendingByCallback[callback] = nil
+end
+
+---@param frame Frame
+---@param callback LiqUI_EventCallback
+---@param bucket LiqUI_EventBucketPending
+local function scheduleBucket(frame, callback, bucket)
+  local pendingByCallback = Events.runtime.pendingByCallback
+  bucket.timer = C_Timer.NewTimer(BUCKET_INTERVAL_SEC, function()
+    pendingByCallback[callback] = nil
+    local currentList = Events.handlers[bucket.event]
+    if not currentList then
+      return
+    end
+    for currentIndex = 1, #currentList do
+      if currentList[currentIndex].fn == callback then
+        callback(frame, bucket.event, unpack(bucket.packedVarargs, 1, bucket.packedVarargs.n))
+        return
+      end
+    end
+  end)
 end
 
 Events.frame:SetScript("OnEvent", function(frame, event, ...)
@@ -36,57 +109,38 @@ Events.frame:SetScript("OnEvent", function(frame, event, ...)
     packedVarargs[packedIndex] = select(packedIndex, ...)
   end
 
+  local pendingByCallback = Events.runtime.pendingByCallback
   for handlerIndex = 1, #list do
     local entry = list[handlerIndex]
-    if entry.runsImmediately then
-      entry.fn(frame, event, unpackEventVarargs(packedVarargs))
-    end
-  end
-
-  local hasBucketed = false
-  for handlerIndex = 1, #list do
-    if not list[handlerIndex].runsImmediately then
-      hasBucketed = true
-      break
-    end
-  end
-  if not hasBucketed then
-    return
-  end
-
-  local pendingByEventName = Events.runtime.pendingByEventName
-  local bucket = pendingByEventName[event]
-  if not bucket or not bucket.timer then
-    ---@type LiqUI_EventBucketPending
-    bucket = {packedVarargs = packedVarargs}
-    pendingByEventName[event] = bucket
-    bucket.timer = C_Timer.NewTimer(BUCKET_INTERVAL_SEC, function()
-      local snapshot = bucket.packedVarargs
-      bucket.timer = nil
-      pendingByEventName[event] = nil
-      local currentList = Events.handlers[event]
-      if not currentList then
-        return
-      end
-      for currentIndex = 1, #currentList do
-        local entry = currentList[currentIndex]
-        if not entry.runsImmediately then
-          entry.fn(frame, event, unpackEventVarargs(snapshot))
+    if entryMatchesUnit(entry, packedVarargs) then
+      if entry.runsImmediately then
+        entry.fn(frame, event, unpack(packedVarargs, 1, packedVarargs.n))
+      else
+        local fn = entry.fn
+        ---@type LiqUI_EventBucketPending?
+        local bucket = pendingByCallback[fn]
+        if not bucket then
+          ---@type LiqUI_EventBucketPending
+          local newBucket = {event = event, packedVarargs = packedVarargs}
+          pendingByCallback[fn] = newBucket
+          scheduleBucket(frame, fn, newBucket)
+        else
+          bucket.event = event
+          bucket.packedVarargs = packedVarargs
         end
       end
-    end)
-  else
-    bucket.packedVarargs = packedVarargs
+    end
   end
 end)
 
 ---@param event string|string[]
 ---@param callback LiqUI_EventCallback
 ---@param runsImmediately boolean|nil
-function Events:RegisterEvent(event, callback, runsImmediately)
+---@param unit string|nil
+function Events:RegisterEvent(event, callback, runsImmediately, unit)
   if type(event) == "table" then
-    for eventIndex = 1, #event do
-      self:RegisterEvent(event[eventIndex], callback, runsImmediately)
+    for _, eventName in ipairs(event) do
+      self:RegisterEvent(eventName, callback, runsImmediately, unit)
     end
     return
   end
@@ -96,8 +150,15 @@ function Events:RegisterEvent(event, callback, runsImmediately)
     self.handlers[event] = list
     self.frame:RegisterEvent(event)
   end
+  if isRegistered(event, callback, unit) then
+    return
+  end
   ---@type LiqUI_EventHandlerEntry
-  local entry = {fn = callback, runsImmediately = runsImmediately == true}
+  local entry = {
+    fn = callback,
+    runsImmediately = runsImmediately == true,
+    unit = unit,
+  }
   list[#list + 1] = entry
 end
 
@@ -105,8 +166,8 @@ end
 ---@param callback LiqUI_EventCallback|nil
 function Events:UnregisterEvent(event, callback)
   if type(event) == "table" then
-    for eventIndex = 1, #event do
-      self:UnregisterEvent(event[eventIndex], callback)
+    for _, eventName in ipairs(event) do
+      self:UnregisterEvent(eventName, callback)
     end
     return
   end
@@ -120,24 +181,27 @@ function Events:UnregisterEvent(event, callback)
         table.remove(list, handlerIndex)
       end
     end
+    if not isCallbackRegisteredAnywhere(callback) then
+      cancelPending(callback)
+    end
     if #list == 0 then
       self.handlers[event] = nil
-      local pendingByEventName = self.runtime.pendingByEventName
-      local bucket = pendingByEventName[event]
-      if bucket and bucket.timer then
-        bucket.timer:Cancel()
-      end
-      pendingByEventName[event] = nil
       self.frame:UnregisterEvent(event)
     end
-  else
-    self.handlers[event] = nil
-    local pendingByEventName = self.runtime.pendingByEventName
-    local bucket = pendingByEventName[event]
-    if bucket and bucket.timer then
-      bucket.timer:Cancel()
+    return
+  end
+
+  ---@type LiqUI_EventCallback[]
+  local removedCallbacks = {}
+  for handlerIndex = 1, #list do
+    removedCallbacks[#removedCallbacks + 1] = list[handlerIndex].fn
+  end
+  self.handlers[event] = nil
+  self.frame:UnregisterEvent(event)
+  for removedIndex = 1, #removedCallbacks do
+    local fn = removedCallbacks[removedIndex]
+    if not isCallbackRegisteredAnywhere(fn) then
+      cancelPending(fn)
     end
-    pendingByEventName[event] = nil
-    self.frame:UnregisterEvent(event)
   end
 end

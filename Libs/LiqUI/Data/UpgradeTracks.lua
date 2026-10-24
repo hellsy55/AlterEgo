@@ -136,7 +136,10 @@ end
 function Data:GetUpgradeTrackForBonusID(bonusID)
   ensureUpgradeBonusIndex()
   local byBonusID = self.cache.upgradeByBonusID
-  local entry = byBonusID and byBonusID[bonusID]
+  if not byBonusID then
+    return nil
+  end
+  local entry = byBonusID[bonusID]
   if not entry then
     return nil
   end

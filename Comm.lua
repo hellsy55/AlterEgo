@@ -1881,7 +1881,7 @@ local function RespondForCharacter(remote, sender, distribution, payload, status
   end
 end
 
-addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
   for key, pendingSettings in pairs(pendingCombatSettings) do
     if Data.db.global.sync.enabled
       and pendingSettings.password == Data.db.global.sync.password then
@@ -1927,7 +1927,7 @@ end, true)
 -- Midnight can reject outgoing addon traffic for an encounter-specific restriction even when
 -- the normal combat check alone is not enough to describe why a chunk failed. Resume a pending
 -- automatic batch as soon as Blizzard reports that restriction becoming inactive.
-addon.Events:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED", function(_, _, _, state)
+addon.Libs.LiqUI.Events:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED", function(_, _, _, state)
   if state == Enum.AddOnRestrictionState.Inactive then
     ResumeAutomaticSyncIfPending()
   end
@@ -2299,7 +2299,7 @@ end
 -- Advertise presence/version state when this client becomes reachable on a relevant
 -- transport. The short debounce coalesces the burst of roster/guild events that commonly
 -- fire together on login. A low-rate heartbeat keeps peer presence fresh without chat noise.
-addon.Events:RegisterEvent({
+addon.Libs.LiqUI.Events:RegisterEvent({
   "PLAYER_ENTERING_WORLD",
   "GROUP_ROSTER_UPDATE",
   "GUILD_ROSTER_UPDATE",

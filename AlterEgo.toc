@@ -26,7 +26,6 @@ Libs\AceConsole-3.0\AceConsole-3.0.xml
 
 Boot.lua
 Constants.lua
-Events.lua
 Data.lua
 Data\BonusRoll.lua
 Data\Currencies.lua

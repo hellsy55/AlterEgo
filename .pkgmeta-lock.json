@@ -13,11 +13,11 @@
   },
   "Libs/LibDBIcon-1.0": {
     "kind": "svn-tag",
-    "value": "v12.1.1"
+    "value": "v12.1.2"
   },
   "Libs/LiqUI": {
     "kind": "git-tag",
-    "value": "v1.3.1"
+    "value": "v1.3.2"
   },
   "Libs/AceAddon-3.0": {
     "kind": "svn-tag",

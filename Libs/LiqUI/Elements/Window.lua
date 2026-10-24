@@ -604,12 +604,24 @@ local function createWindow(options)
     end
   end
 
-  if window.options.border > 0 then
+  local borderSize = window.options.border
+  if borderSize > 0 then
     ---@diagnostic disable-next-line: assign-type-mismatch
     window.border = CreateFrame("Frame", "$parentBorder", window, "BackdropTemplate")
     window.border:SetPoint("TOPLEFT", window, "TOPLEFT", -3, 3)
     window.border:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", 3, -3)
-    window.border:SetBackdrop({edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 16, insets = {left = window.options.border, right = window.options.border, top = window.options.border, bottom = window.options.border}})
+    ---@type backdropInfo
+    local borderBackdrop = {
+      edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+      edgeSize = 16,
+      insets = {
+        left = borderSize,
+        right = borderSize,
+        top = borderSize,
+        bottom = borderSize,
+      },
+    }
+    window.border:SetBackdrop(borderBackdrop)
     window.border:SetBackdropBorderColor(0, 0, 0, .5)
     window.border:Show()
   end

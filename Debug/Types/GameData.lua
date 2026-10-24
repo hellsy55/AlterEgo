@@ -15,6 +15,7 @@
 ---@field useTotalEarnedForMaxQty boolean
 ---@field currencyType AE_CurrencyType
 ---@field name string?
+---@field itemID number?
 ---@field questID number?
 ---@field spellID number?
 ---@field tooltipNote string|nil
@@ -53,6 +54,11 @@
 ---@field seasonDisplayID number
 ---@field itemID number
 
+---@class AE_KeystoneAnnounceLine
+---@field text string
+---@field itemLink string
+---@field characterName string
+
 ---@class AE_SavedInstance
 ---@field index number
 ---@field id number
@@ -77,7 +83,7 @@
 ---@class AE_SavedInstanceEncounter
 ---@field index number
 ---@field instanceEncounterID number
----@field bossName string
+---@field bossName string|nil
 ---@field fileDataID number|nil
 ---@field isKilled boolean
 

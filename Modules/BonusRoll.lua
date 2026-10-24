@@ -1602,18 +1602,18 @@ function Module:OnInitialize()
   self:RegisterChatCommand("bonus", function()
     Module:OpenCurrentCharacter()
   end)
-  addon.Events:RegisterEvent("PLAYER_ENTERING_WORLD", function(_, _, isInitialLogin)
+  addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_ENTERING_WORLD", function(_, _, isInitialLogin)
     if isInitialLogin == true then
       Module:RefreshOnInitialLogin()
     end
   end, true)
-  addon.Events:RegisterEvent("SPELL_CONFIRMATION_PROMPT", function(_, _, spellID)
+  addon.Libs.LiqUI.Events:RegisterEvent("SPELL_CONFIRMATION_PROMPT", function(_, _, spellID)
     Module:SPELL_CONFIRMATION_PROMPT(nil, spellID)
   end, true)
-  addon.Events:RegisterEvent("BONUS_ROLL_RESULT", function(_, _, typeIdentifier, itemLink, quantity, specID)
+  addon.Libs.LiqUI.Events:RegisterEvent("BONUS_ROLL_RESULT", function(_, _, typeIdentifier, itemLink, quantity, specID)
     Module:BONUS_ROLL_RESULT(nil, typeIdentifier, itemLink, quantity, specID)
   end, true)
-  addon.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+  addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
     local guid = Module.loginSyncDeferredGUID
     Module.loginSyncDeferredGUID = nil
     if guid and guid == UnitGUID("player") then

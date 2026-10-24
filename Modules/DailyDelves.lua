@@ -470,15 +470,15 @@ local function retryBountifulCapture()
   end
 end
 
-addon.Events:RegisterEvent({"PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA"}, function()
+addon.Libs.LiqUI.Events:RegisterEvent({"PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA"}, function()
   retryBountifulCapture()
 end, true)
 
-addon.Events:RegisterEvent("SCENARIO_UPDATE", function()
+addon.Libs.LiqUI.Events:RegisterEvent("SCENARIO_UPDATE", function()
   captureCurrentBountifulRun()
 end, true)
 
-addon.Events:RegisterEvent("SCENARIO_COMPLETED", function()
+addon.Libs.LiqUI.Events:RegisterEvent("SCENARIO_COMPLETED", function()
   local settings = Data.db.global.dailyDelves
   if settings.checkBountifulDone ~= true then return end
 
@@ -509,7 +509,7 @@ end, true)
 -- the completion event or the entry latch is missed. Currency ID 3028 is used
 -- instead of the localized currency name.
 local RESTORED_COFFER_KEY_CURRENCY = 3028
-addon.Events:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function(_, _, currencyType, _, quantityChange)
+addon.Libs.LiqUI.Events:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function(_, _, currencyType, _, quantityChange)
   if type(quantityChange) ~= "number" or quantityChange >= 0 then return end
   if Data.db.global.dailyDelves.checkBountifulDone ~= true then return end
   if currencyType ~= RESTORED_COFFER_KEY_CURRENCY then return end

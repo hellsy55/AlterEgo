@@ -150,7 +150,7 @@ function Module:OnInitialize()
 end
 
 function Module:OnEnable()
-  addon.Events:RegisterEvent("ITEM_DATA_LOAD_RESULT", function(_, _, itemID, success)
+  addon.Libs.LiqUI.Events:RegisterEvent("ITEM_DATA_LOAD_RESULT", function(_, _, itemID, success)
     if not itemID or not pendingItemData[itemID] then return end
     pendingItemData[itemID] = nil
     if success and self.window and self.window:IsVisible() then

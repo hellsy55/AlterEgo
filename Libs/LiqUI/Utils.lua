@@ -521,12 +521,22 @@ local function updateScrollAreaLayout(scrollArea, contentWidth, contentHeight)
   end
 
   if scrollArea.horizontal and scrollArea.vertical then
-    scrollArea.horizontalScrollBox:FullUpdate(ScrollBoxConstants.UpdateImmediately)
-    scrollArea.verticalScrollBox:FullUpdate(ScrollBoxConstants.UpdateImmediately)
+    local bothHorizontal = scrollArea.horizontalScrollBox
+    local bothVertical = scrollArea.verticalScrollBox
+    if bothHorizontal and bothVertical then
+      bothHorizontal:FullUpdate(ScrollBoxConstants.UpdateImmediately)
+      bothVertical:FullUpdate(ScrollBoxConstants.UpdateImmediately)
+    end
   elseif scrollArea.vertical then
-    scrollArea.verticalScrollBox:FullUpdate(ScrollBoxConstants.UpdateImmediately)
+    local verticalOnly = scrollArea.verticalScrollBox
+    if verticalOnly then
+      verticalOnly:FullUpdate(ScrollBoxConstants.UpdateImmediately)
+    end
   elseif scrollArea.horizontal then
-    scrollArea.horizontalScrollBox:FullUpdate(ScrollBoxConstants.UpdateImmediately)
+    local horizontalOnly = scrollArea.horizontalScrollBox
+    if horizontalOnly then
+      horizontalOnly:FullUpdate(ScrollBoxConstants.UpdateImmediately)
+    end
   end
 
   local showVertical = false

@@ -1496,7 +1496,7 @@ function Module:OnEnable()
   -- PLAYER_ENTERING_WORLD fires both for genuine zone transitions and for
   -- login/UI reload. Seed the current instance on login/reload without
   -- showing the alert, so it only appears after actually entering a raid.
-  addon.Events:RegisterEvent("PLAYER_ENTERING_WORLD", function(_, _, isInitialLogin, isReloadingUi)
+  addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_ENTERING_WORLD", function(_, _, isInitialLogin, isReloadingUi)
     local suppressCurrent = isInitialLogin == true or isReloadingUi == true
     Module:CheckInstanceAlert(suppressCurrent)
     if not suppressCurrent then
@@ -1504,7 +1504,7 @@ function Module:OnEnable()
     end
   end, true)
 
-  addon.Events:RegisterEvent("GROUP_ROSTER_UPDATE", function()
+  addon.Libs.LiqUI.Events:RegisterEvent("GROUP_ROSTER_UPDATE", function()
     if Module.window and Module.window:IsVisible() then
       C_Timer.After(0.5, function()
         Module:RequestGroupState()
@@ -1513,18 +1513,18 @@ function Module:OnEnable()
     end
   end, true)
 
-  addon.Events:RegisterEvent("UNIT_CONNECTION", function()
+  addon.Libs.LiqUI.Events:RegisterEvent("UNIT_CONNECTION", function()
     Module:RefreshWindow()
   end, true)
 
-  addon.Events:RegisterEvent("UPDATE_INSTANCE_INFO", function()
+  addon.Libs.LiqUI.Events:RegisterEvent("UPDATE_INSTANCE_INFO", function()
     Module:RefreshWindow()
     -- Data updates its saved-instance snapshot from this event as well. Paint
     -- once more after the handlers settle so the window cannot keep stale data.
     C_Timer.After(0.3, function() Module:RefreshWindow() end)
   end, true)
 
-  addon.Events:RegisterEvent("BOSS_KILL", function()
+  addon.Libs.LiqUI.Events:RegisterEvent("BOSS_KILL", function()
     if not IsInRaid() then return end
     RequestRaidInfo()
     C_Timer.After(3.2, function()
