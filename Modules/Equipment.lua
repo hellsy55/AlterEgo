@@ -1125,6 +1125,46 @@ function Module:Render()
     local gemCount = TableCount(socketTexts)
     local _, _, _, itemLevelColorCode = C_Item.GetItemQualityColor(item.itemQuality or Enum.ItemQuality.Common)
     local itemLevelText = WrapTextInColorCode(tostring(floor(item.itemLevel)), itemLevelColorCode)
+
+    ---@param cellFrame LiqUI_TableCellFrame
+    local function showEquipmentItemTooltip(cellFrame)
+      GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
+      GameTooltip:SetHyperlink(item.itemLink)
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine("<Shift Click to Link to Chat>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+      GameTooltip:Show()
+    end
+
+    ---@param cellFrame LiqUI_TableCellFrame
+    local function showEquipmentEnchantTooltip(cellFrame)
+      if enchantTooltip ~= "" then
+        GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Enchanted:")
+        GameTooltip:AddLine(enchantTooltip, 1, 1, 1)
+        GameTooltip:Show()
+      end
+    end
+
+    local function linkEquipmentItem()
+      if IsModifiedClick("CHATLINK") then
+        if not ChatFrameUtil.InsertLink(item.itemLink) then
+          ChatFrameUtil.OpenChat(item.itemLink)
+        end
+      end
+    end
+
+    ---@param cellFrame LiqUI_TableCellFrame
+    local function showEquipmentGemTooltip(cellFrame)
+      if TableCount(socketTooltipLines) > 0 then
+        GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Gems:")
+        TableForEach(socketTooltipLines, function(line)
+          GameTooltip:AddLine(line, 1, 1, 1)
+        end)
+        GameTooltip:Show()
+      end
+    end
+
     ---@type AE_EquipmentTableRow
     local row = {
       item = item,
@@ -1138,23 +1178,9 @@ function Module:Render()
         {
           data = "|T" .. item.itemTexture .. ":0|t " .. item.itemLink
             .. (showTierSetAsterisk and isTierSetPiece(item) and (" " .. WHITE_FONT_COLOR:WrapTextInColorCode("*")) or ""),
-          onEnter = function(cellFrame)
-            GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
-            GameTooltip:SetHyperlink(item.itemLink)
-            GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("<Shift Click to Link to Chat>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
-            GameTooltip:Show()
-          end,
-          onLeave = function()
-            GameTooltip:Hide()
-          end,
-          onClick = function()
-            if IsModifiedClick("CHATLINK") then
-              if not ChatFrameUtil.InsertLink(item.itemLink) then
-                ChatFrameUtil.OpenChat(item.itemLink)
-              end
-            end
-          end,
+          onEnter = showEquipmentItemTooltip,
+          onLeave = GameTooltip_Hide,
+          onClick = linkEquipmentItem,
         },
         {data = itemLevelText},
         {
@@ -1195,33 +1221,13 @@ function Module:Render()
         },
         {
           data = enchantColor:WrapTextInColorCode(enchantText),
-          onEnter = function(cellFrame)
-            if enchantTooltip ~= "" then
-              GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
-              GameTooltip:AddLine("Enchanted:")
-              GameTooltip:AddLine(enchantTooltip, 1, 1, 1)
-              GameTooltip:Show()
-            end
-          end,
-          onLeave = function()
-            GameTooltip:Hide()
-          end,
+          onEnter = showEquipmentEnchantTooltip,
+          onLeave = GameTooltip_Hide,
         },
         {
           data = gemsCellText,
-          onEnter = function(cellFrame)
-            if TableCount(socketTooltipLines) > 0 then
-              GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
-              GameTooltip:AddLine("Gems:")
-              TableForEach(socketTooltipLines, function(line)
-                GameTooltip:AddLine(line, 1, 1, 1)
-              end)
-              GameTooltip:Show()
-            end
-          end,
-          onLeave = function()
-            GameTooltip:Hide()
-          end,
+          onEnter = showEquipmentGemTooltip,
+          onLeave = GameTooltip_Hide,
         },
       },
     }

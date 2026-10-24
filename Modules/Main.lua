@@ -1902,6 +1902,7 @@ local function getVaultProgressTooltip(infoFrame, character, activityType)
       elseif numActivities > 0 then -- All slots unlocked: What's next?
         if activityType == Enum.WeeklyRewardChestThresholdType.Raid then
           local activity = activities[numActivities]
+          ---@type number?
           local nextDifficultyID = DifficultyUtil.GetNextPrimaryRaidDifficultyID(GetBaseDifficultyID(activity.level))
           if nextDifficultyID then
             local difficulty = TableGet(difficulties, "id", nextDifficultyID)
@@ -2001,202 +2002,500 @@ function Module:GetCharacterInfo(unfiltered)
   local bonusRollModule = addon.Core:GetModule("BonusRoll", true)
   local vaultPreviewModule = addon.Core:GetModule("VaultPreview", true)
 
+  ---@param character AE_Character
+  ---@return string
+  local function characterNameValue(character, characterIndex)
+    local name = "-"
+    local nameColor = "ffffffff"
+    if character.info.name ~= nil then
+      name = character.info.name
+    end
+    local positionSuffix = ""
+    if Data.db.global.showCharacterPosition and characterIndex then
+      positionSuffix = WHITE_FONT_COLOR:WrapTextInColorCode(format(" - %d", characterIndex))
+    end
+    if character.info.class.file ~= nil then
+      local classColor = C_ClassColor.GetClassColor(character.info.class.file)
+      if classColor ~= nil then
+        nameColor = classColor.GenerateHexColor(classColor)
+      end
+    end
+    local coloredName = "|c" .. nameColor .. name .. "|r" .. positionSuffix
+    if character.GUID ~= UnitGUID("player") then
+      return coloredName
+    end
+    local marker = Data.db.global.currentCharacterMarker
+    local markerColor = Data.db.global.currentCharacterMarkerColor
+    local currentColor = markerColor and CreateColor(markerColor.r, markerColor.g, markerColor.b) or GREEN_FONT_COLOR
+    if marker == "brackets" then
+      return currentColor:WrapTextInColorCode("[ ") .. coloredName .. currentColor:WrapTextInColorCode(" ]")
+    end
+    if marker == "parentheses" then
+      return currentColor:WrapTextInColorCode("( ") .. coloredName .. currentColor:WrapTextInColorCode(" )")
+    end
+    if marker == "dot" then
+      return coloredName .. Constants.currentCharacterNameMarker
+    end
+    return coloredName
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function characterNameOnEnter(infoFrame, character)
+    local name = "-"
+    local nameColor = WHITE_FONT_COLOR
+    if character.info.name ~= nil then
+      name = character.info.name
+    end
+    if character.info.class.file ~= nil then
+      local classColor = C_ClassColor.GetClassColor(character.info.class.file)
+      if classColor ~= nil then
+        nameColor = CreateColor(classColor.r, classColor.g, classColor.b, 1)
+      end
+    end
+    name = format("%s (%s)", nameColor:WrapTextInColorCode(name), character.info.realm)
+    GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(name, 1, 1, 1)
+    if character.info.guild ~= nil and character.info.guild.isInGuild then
+      GameTooltip:AddLine(format("<%s>", character.info.guild.name), NECROLORD_GREEN_COLOR.r, NECROLORD_GREEN_COLOR.g, NECROLORD_GREEN_COLOR.b)
+    end
+    GameTooltip:AddLine(format("Level %d %s", character.info.level, character.info.race ~= nil and character.info.race.name or ""), 1, 1, 1)
+    if character.info.factionGroup ~= nil and character.info.factionGroup.localized ~= nil then
+      GameTooltip:AddLine(character.info.factionGroup.localized, 1, 1, 1)
+    end
+    if character.info.lastLocation ~= nil and character.info.lastLocation ~= "" then
+      GameTooltip:AddLine(format("Last location: %s", character.info.lastLocation), 1, 1, 1)
+    end
+    if character.money ~= nil then
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine(GetMoneyString(character.money, true), 1, 1, 1)
+    end
+    if character.lastUpdate ~= nil then
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine(format("Last update:\n|cffffffff%s|r", date("%d/%m - %H:%M", character.lastUpdate)), NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+    end
+    if (type(character.equipment) == "table" and equipmentModule) or bonusRollModule then
+      GameTooltip:AddLine(" ")
+    end
+    if type(character.equipment) == "table" and equipmentModule then
+      GameTooltip:AddLine("<Left-click to View Equipment>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+    end
+    if bonusRollModule then
+      GameTooltip:AddLine("<Right-click to View Bonus Roll>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+    end
+    GameTooltip:Show()
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function characterNameOnClick(infoFrame, character)
+    if not equipmentModule then return end
+    equipmentModule:OpenCharacter(character)
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function realmValue(character)
+    local realm = "-"
+    local realmColor = LIGHTGRAY_FONT_COLOR
+    if character.info.realm ~= nil then
+      realm = character.info.realm
+      realmColor = WHITE_FONT_COLOR
+    end
+    return realmColor:WrapTextInColorCode(realm)
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function guildValue(character)
+    local guild = "-"
+    local guildColor = WHITE_FONT_COLOR
+    if character.info.guild == nil then
+      guildColor = LIGHTGRAY_FONT_COLOR
+    elseif character.info.guild.isInGuild then
+      if character.info.guild.name ~= nil and character.info.guild.name ~= "" then
+        guild = character.info.guild.name
+        guildColor = NECROLORD_GREEN_COLOR
+      else
+        guildColor = LIGHTGRAY_FONT_COLOR
+      end
+    end
+    return guildColor:WrapTextInColorCode(guild)
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function guildOnEnter(infoFrame, character)
+    GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+    if character.info.guild == nil then
+      GameTooltip:AddLine("Guild", 1, 1, 1)
+      GameTooltip:AddLine("Log in to update your guild information.")
+    elseif character.info.guild.isInGuild and character.info.guild.name ~= nil then
+      local realmName = character.info.realm
+      if character.info.guild.realm ~= nil and strlenutf8(character.info.guild.realm) > 0 then
+        realmName = character.info.guild.realm
+      end
+      GameTooltip:AddLine(character.info.guild.name, 1, 1, 1)
+      GameTooltip:AddDoubleLine("Rank:", character.info.guild.rankName ~= nil and character.info.guild.rankName or "-", nil, nil, nil, 1, 1, 1)
+      GameTooltip:AddDoubleLine("Realm:", realmName, nil, nil, nil, 1, 1, 1)
+    else
+      GameTooltip:AddLine("Guild", 1, 1, 1)
+      GameTooltip:AddLine("Not in a guild.")
+    end
+    GameTooltip:Show()
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function itemLevelValue(character)
+    local itemLevel = "-"
+    local itemLevelColor = LIGHTGRAY_FONT_COLOR:GenerateHexColor()
+    if character.info.ilvl ~= nil then
+      local displayLevel = character.info.ilvl.potential or character.info.ilvl.level
+      if Data.db.global.showEquippedItemLevel and character.info.ilvl.equipped ~= nil then
+        displayLevel = character.info.ilvl.equipped
+      end
+      if displayLevel ~= nil then
+        if Data.db.global.showItemLevelDecimals then
+          itemLevel = format("%.2f", displayLevel)
+        else
+          itemLevel = tostring(floor(displayLevel))
+        end
+      end
+      itemLevelColor = Helpers:GetItemLevelTrackColor(displayLevel):GenerateHexColor()
+    end
+    return WrapTextInColorCode(itemLevel, itemLevelColor)
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function itemLevelOnEnter(infoFrame, character)
+    local itemLevelTooltip = ""
+    local itemLevelTooltip2 = STAT_AVERAGE_ITEM_LEVEL_TOOLTIP
+    if character.info.ilvl ~= nil then
+      local decimals = Data.db.global.showItemLevelDecimals and 2 or 0
+      local equipped = character.info.ilvl.equipped
+      local inBags = character.info.ilvl.potential or character.info.ilvl.level
+      if equipped ~= nil then
+        itemLevelTooltip = HIGHLIGHT_FONT_COLOR_CODE .. "Item Level " .. format("%." .. decimals .. "f", equipped)
+        if inBags ~= nil and floor(inBags) ~= floor(equipped) then
+          itemLevelTooltip = itemLevelTooltip .. format(" (%." .. decimals .. "f in bags)", inBags)
+        end
+        itemLevelTooltip = itemLevelTooltip .. FONT_COLOR_CODE_CLOSE
+      elseif inBags ~= nil then
+        itemLevelTooltip = HIGHLIGHT_FONT_COLOR_CODE .. "Item Level " .. format("%." .. decimals .. "f", inBags) .. FONT_COLOR_CODE_CLOSE
+      end
+      if inBags ~= nil and character.info.ilvl.pvp ~= nil and floor(inBags) ~= character.info.ilvl.pvp then
+        itemLevelTooltip2 = itemLevelTooltip2 .. "\n\n" .. STAT_AVERAGE_PVP_ITEM_LEVEL:format(tostring(floor(character.info.ilvl.pvp)))
+      end
+    end
+    GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(itemLevelTooltip, 1, 1, 1)
+    GameTooltip:AddLine(itemLevelTooltip2, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, true)
+    GameTooltip:Show()
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function ratingValue(character)
+    local rating = "-"
+    local ratingColor = LIGHTGRAY_FONT_COLOR
+    if character.mythicplus.rating ~= nil and C_MythicPlus.IsMythicPlusActive() then
+      rating = tostring(character.mythicplus.rating)
+      local color = Helpers:GetRatingColor(character.mythicplus.rating, Data.db.global.useRIOScoreColor, false)
+      if color ~= nil then
+        ratingColor = CreateColor(color.r, color.g, color.b, color.a)
+      else
+        ratingColor = WHITE_FONT_COLOR
+      end
+    end
+    return ratingColor:WrapTextInColorCode(rating)
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function ratingOnEnter(infoFrame, character)
+    local rating = "-"
+    local ratingColor = WHITE_FONT_COLOR
+    local bestSeasonScore = nil
+    local bestSeasonScoreColor = WHITE_FONT_COLOR
+    local bestSeasonNumber = nil
+    local numSeasonRuns = 0
+    if character.mythicplus.runHistory ~= nil then
+      numSeasonRuns = TableCount(character.mythicplus.runHistory)
+    end
+    if character.mythicplus.bestSeasonNumber ~= nil then
+      bestSeasonNumber = character.mythicplus.bestSeasonNumber
+    end
+    if character.mythicplus.bestSeasonScore ~= nil then
+      bestSeasonScore = character.mythicplus.bestSeasonScore
+      local color = Helpers:GetRatingColor(bestSeasonScore, Data.db.global.useRIOScoreColor, bestSeasonNumber ~= nil and bestSeasonNumber < seasonDisplayID)
+      if color ~= nil then
+        bestSeasonScoreColor = CreateColor(color.r, color.g, color.b, color.a)
+      end
+    end
+    if type(character.mythicplus.rating) == "number" then
+      local color = Helpers:GetRatingColor(character.mythicplus.rating, Data.db.global.useRIOScoreColor, false)
+      if color ~= nil then
+        ratingColor = CreateColor(color.r, color.g, color.b, color.a)
+      end
+      rating = tostring(character.mythicplus.rating)
+    end
+
+    GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Mythic+ Rating", 1, 1, 1)
+    if not C_MythicPlus.IsMythicPlusActive() then
+      GameTooltip:AddLine("Mythic+ is not active.", DIM_RED_FONT_COLOR.r, DIM_RED_FONT_COLOR.g, DIM_RED_FONT_COLOR.b)
+    else
+      -- Season information
+      GameTooltip:AddDoubleLine("Current Season:", ratingColor:WrapTextInColorCode(rating), nil, nil, nil, ratingColor.r, ratingColor.g, ratingColor.b)
+      if bestSeasonNumber ~= nil and bestSeasonScore ~= nil then
+        local bestSeasonValue = bestSeasonScoreColor:WrapTextInColorCode(tostring(bestSeasonScore))
+        if bestSeasonNumber > 0 then
+          local season = LIGHTGRAY_FONT_COLOR:WrapTextInColorCode(format("(Season %s)", bestSeasonNumber))
+          bestSeasonValue = format("%s %s", bestSeasonValue, season)
+        end
+        GameTooltip:AddDoubleLine("Best Season:", bestSeasonValue, nil, nil, nil, 1, 1, 1)
+      end
+      GameTooltip:AddDoubleLine("Runs this Season:", WHITE_FONT_COLOR:WrapTextInColorCode(tostring(numSeasonRuns)), nil, nil, nil, WHITE_FONT_COLOR.r, WHITE_FONT_COLOR.g, WHITE_FONT_COLOR.b)
+
+      -- Dungeon information
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine("Highest Keys:")
+      TableForEach(dungeons, function(dungeon)
+        local level = "-"
+        local levelColor = LIGHTGRAY_FONT_COLOR
+        if character.mythicplus.dungeons ~= nil and TableCount(character.mythicplus.dungeons) > 0 then
+          local characterDungeon = TableGet(character.mythicplus.dungeons, "challengeModeID", dungeon.challengeModeID)
+          if characterDungeon ~= nil and type(characterDungeon.level) == "number" and characterDungeon.level > 0 then
+            level = format("+%s", tostring(characterDungeon.level))
+            levelColor = WHITE_FONT_COLOR
+          end
+        end
+        GameTooltip:AddDoubleLine(dungeon.name, level, 1, 1, 1, levelColor.r, levelColor.g, levelColor.b)
+      end)
+      if numSeasonRuns > 0 then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("<Shift Click to Link to Chat>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+      end
+    end
+    GameTooltip:Show()
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function ratingOnClick(infoFrame, character)
+    local numSeasonRuns = 0
+    if character.mythicplus.runHistory ~= nil then
+      numSeasonRuns = TableCount(character.mythicplus.runHistory)
+    end
+    if character.mythicplus.dungeons ~= nil
+      and TableCount(character.mythicplus.dungeons) > 0
+      and numSeasonRuns > 0
+      and IsModifiedClick("CHATLINK")
+    then
+      local dungeonScoreDungeonTable = {}
+      for _, dungeon in pairs(character.mythicplus.dungeons) do
+        table.insert(dungeonScoreDungeonTable, dungeon.challengeModeID)
+        table.insert(dungeonScoreDungeonTable, dungeon.finishedSuccess and 1 or 0)
+        table.insert(dungeonScoreDungeonTable, dungeon.level)
+      end
+      local dungeonScoreTable = {
+        character.mythicplus.rating,
+        character.GUID,
+        character.info.name,
+        character.info.class.id,
+        math.ceil(character.info.ilvl.level),
+        character.info.level,
+        numSeasonRuns,
+        character.mythicplus.bestSeasonScore,
+        character.mythicplus.bestSeasonNumber,
+        unpack(dungeonScoreDungeonTable),
+      }
+      local link = NORMAL_FONT_COLOR:WrapTextInColorCode(LinkUtil.FormatLink("dungeonScore", DUNGEON_SCORE_LINK, unpack(dungeonScoreTable)))
+      if not ChatFrameUtil.InsertLink(link) then
+        ChatFrameUtil.OpenChat(link)
+      end
+    end
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function keystoneValue(character)
+    local currentKeystone = LIGHTGRAY_FONT_COLOR:WrapTextInColorCode("-")
+    if character.mythicplus.keystone ~= nil then
+      local dungeon
+      if type(character.mythicplus.keystone.challengeModeID) == "number" and character.mythicplus.keystone.challengeModeID > 0 then
+        dungeon = TableGet(dungeons, "challengeModeID", character.mythicplus.keystone.challengeModeID)
+      elseif type(character.mythicplus.keystone.mapId) == "number" and character.mythicplus.keystone.mapId > 0 then
+        dungeon = TableGet(dungeons, "mapId", character.mythicplus.keystone.mapId)
+      end
+      if dungeon ~= nil then
+        currentKeystone = dungeon.abbr
+        if type(character.mythicplus.keystone.level) == "number" and character.mythicplus.keystone.level > 0 then
+          currentKeystone = format("%s +%s", currentKeystone, tostring(character.mythicplus.keystone.level))
+        end
+      end
+    end
+    return currentKeystone
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function keystoneOnEnter(infoFrame, character)
+    if character.mythicplus.keystone == nil then return end
+    local itemLink = character.mythicplus.keystone.itemLink
+    if type(itemLink) == "string" and itemLink ~= "" then
+      GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+      GameTooltip:SetHyperlink(itemLink)
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine("<Shift Click to Link to Chat>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+      GameTooltip:Show()
+      return
+    end
+    local dungeon
+    if type(character.mythicplus.keystone.challengeModeID) == "number" and character.mythicplus.keystone.challengeModeID > 0 then
+      dungeon = TableGet(dungeons, "challengeModeID", character.mythicplus.keystone.challengeModeID)
+    elseif type(character.mythicplus.keystone.mapId) == "number" and character.mythicplus.keystone.mapId > 0 then
+      dungeon = TableGet(dungeons, "mapId", character.mythicplus.keystone.mapId)
+    end
+    if dungeon == nil then return end
+    GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+    GameTooltip:SetText(dungeon.name, 1, 1, 1)
+    if type(character.mythicplus.keystone.level) == "number" and character.mythicplus.keystone.level > 0 then
+      GameTooltip:AddLine(format("Mythic Keystone Level %d", character.mythicplus.keystone.level), 1, 1, 1)
+    end
+    GameTooltip:Show()
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function keystoneOnClick(infoFrame, character)
+    if character.mythicplus.keystone ~= nil and type(character.mythicplus.keystone.itemLink) == "string" and character.mythicplus.keystone.itemLink ~= "" then
+      if IsModifiedClick("CHATLINK") then
+        if not ChatFrameUtil.InsertLink(character.mythicplus.keystone.itemLink) then
+          ChatFrameUtil.OpenChat(character.mythicplus.keystone.itemLink)
+        end
+      end
+    end
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function vaultRewardValue(character)
+    if character.vault.hasAvailableRewards == true then
+      if characterHasVaultPreviewData(character) then
+        return RARE_BLUE_COLOR:WrapTextInColorCode("Rewards Pending")
+      end
+      return GREEN_FONT_COLOR:WrapTextInColorCode(QUEST_REWARDS)
+    end
+    return ""
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function vaultRaidProgressValue(character)
+    return getVaultProgressValue(character, Enum.WeeklyRewardChestThresholdType.Raid)
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function vaultRaidProgressOnEnter(infoFrame, character)
+    getVaultProgressTooltip(infoFrame, character, Enum.WeeklyRewardChestThresholdType.Raid)
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function vaultDungeonProgressValue(character)
+    return getVaultProgressValue(character, Enum.WeeklyRewardChestThresholdType.Activities)
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function vaultDungeonProgressOnEnter(infoFrame, character)
+    getVaultProgressTooltip(infoFrame, character, Enum.WeeklyRewardChestThresholdType.Activities)
+  end
+
+  ---@param character AE_Character
+  ---@return string
+  local function vaultWorldProgressValue(character)
+    return getVaultProgressValue(character, Enum.WeeklyRewardChestThresholdType.World)
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function vaultWorldProgressOnEnter(infoFrame, character)
+    getVaultProgressTooltip(infoFrame, character, Enum.WeeklyRewardChestThresholdType.World)
+  end
+
+  ---@param infoFrame Frame
+  ---@param character AE_Character
+  local function vaultRewardOnEnter(infoFrame, character)
+    if character.vault.hasAvailableRewards == true then
+      GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+      GameTooltip:AddLine("It's payday!", WHITE_FONT_COLOR.r, WHITE_FONT_COLOR.g, WHITE_FONT_COLOR.b)
+      GameTooltip:AddLine(GREAT_VAULT_REWARDS_WAITING, GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b, true)
+      if vaultPreviewModule then
+        GameTooltip:AddLine(" ")
+        if characterHasVaultPreviewData(character) then
+          GameTooltip:AddLine("<Click to Preview Rewards>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
+        else
+          GameTooltip:AddLine("Open the Great Vault to check rewards", ORANGE_FONT_COLOR.r, ORANGE_FONT_COLOR.g, ORANGE_FONT_COLOR.b, true)
+        end
+      end
+      GameTooltip:Show()
+    end
+  end
+
+  local function characterNameOnRightClick(infoFrame, character)
+    if not bonusRollModule then return end
+    bonusRollModule:OpenCharacter(character)
+  end
+
+  local function vaultRewardOnClick(infoFrame, character)
+    if not vaultPreviewModule then return end
+    if character.vault.hasAvailableRewards ~= true then return end
+    if not characterHasVaultPreviewData(character) then
+      GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
+      GameTooltip:AddLine("Open the Great Vault to check rewards", ORANGE_FONT_COLOR.r, ORANGE_FONT_COLOR.g, ORANGE_FONT_COLOR.b, true)
+      GameTooltip:Show()
+      return
+    end
+    -- The pending state is specifically a confirmed reward-history view,
+    -- so never fall back to live example links here.
+    vaultPreviewModule:OpenCharacter(character, true)
+  end
+
   ---@type AE_CharacterRows[]
   local rows = {
     {
       label = CHARACTER,
-      value = function(character, characterIndex)
-        local name = "-"
-        local nameColor = "ffffffff"
-        if character.info.name ~= nil then
-          name = character.info.name
-        end
-        local positionSuffix = ""
-        if Data.db.global.showCharacterPosition and characterIndex then
-          positionSuffix = WHITE_FONT_COLOR:WrapTextInColorCode(format(" - %d", characterIndex))
-        end
-        if character.info.class.file ~= nil then
-          local classColor = C_ClassColor.GetClassColor(character.info.class.file)
-          if classColor ~= nil then
-            nameColor = classColor.GenerateHexColor(classColor)
-          end
-        end
-        local coloredName = "|c" .. nameColor .. name .. "|r" .. positionSuffix
-        if character.GUID ~= UnitGUID("player") then
-          return coloredName
-        end
-        local marker = Data.db.global.currentCharacterMarker
-        local markerColor = Data.db.global.currentCharacterMarkerColor
-        local currentColor = markerColor and CreateColor(markerColor.r, markerColor.g, markerColor.b) or GREEN_FONT_COLOR
-        if marker == "brackets" then
-          return currentColor:WrapTextInColorCode("[ ") .. coloredName .. currentColor:WrapTextInColorCode(" ]")
-        end
-        if marker == "parentheses" then
-          return currentColor:WrapTextInColorCode("( ") .. coloredName .. currentColor:WrapTextInColorCode(" )")
-        end
-        if marker == "dot" then
-          return coloredName .. Constants.currentCharacterNameMarker
-        end
-        return coloredName
-      end,
-      onEnter = function(infoFrame, character)
-        local name = "-"
-        local nameColor = WHITE_FONT_COLOR
-        if character.info.name ~= nil then
-          name = character.info.name
-        end
-        if character.info.class.file ~= nil then
-          local classColor = C_ClassColor.GetClassColor(character.info.class.file)
-          if classColor ~= nil then
-            nameColor = CreateColor(classColor.r, classColor.g, classColor.b, 1)
-          end
-        end
-        name = format("%s (%s)", nameColor:WrapTextInColorCode(name), character.info.realm)
-        GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
-        GameTooltip:AddLine(name, 1, 1, 1)
-        if character.info.guild ~= nil and character.info.guild.isInGuild then
-          GameTooltip:AddLine(format("<%s>", character.info.guild.name), NECROLORD_GREEN_COLOR.r, NECROLORD_GREEN_COLOR.g, NECROLORD_GREEN_COLOR.b)
-        end
-        GameTooltip:AddLine(format("Level %d %s", character.info.level, character.info.race ~= nil and character.info.race.name or ""), 1, 1, 1)
-        if character.info.factionGroup ~= nil and character.info.factionGroup.localized ~= nil then
-          GameTooltip:AddLine(character.info.factionGroup.localized, 1, 1, 1)
-        end
-        if character.info.lastLocation ~= nil and character.info.lastLocation ~= "" then
-          GameTooltip:AddLine(format("Last location: %s", character.info.lastLocation), 1, 1, 1)
-        end
-        if character.money ~= nil then
-          GameTooltip:AddLine(" ")
-          GameTooltip:AddLine(GetMoneyString(character.money, true), 1, 1, 1)
-        end
-        if character.lastUpdate ~= nil then
-          GameTooltip:AddLine(" ")
-          GameTooltip:AddLine(format("Last update:\n|cffffffff%s|r", date("%d/%m - %H:%M", character.lastUpdate)), NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-        end
-        if (type(character.equipment) == "table" and equipmentModule) or bonusRollModule then
-          GameTooltip:AddLine(" ")
-        end
-        if type(character.equipment) == "table" and equipmentModule then
-          GameTooltip:AddLine("<Left-click to View Equipment>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
-        end
-        if bonusRollModule then
-          GameTooltip:AddLine("<Right-click to View Bonus Roll>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
-        end
-        GameTooltip:Show()
-      end,
+      value = characterNameValue,
+      onEnter = characterNameOnEnter,
       onLeave = function()
         GameTooltip:Hide()
       end,
-      onClick = function(infoFrame, character)
-        if not equipmentModule then return end
-        equipmentModule:OpenCharacter(character)
-      end,
-      onRightClick = function(infoFrame, character)
-        if not bonusRollModule then return end
-        bonusRollModule:OpenCharacter(character)
-      end,
+      onClick = characterNameOnClick,
+      onRightClick = characterNameOnRightClick,
       enabled = true,
     },
     {
       label = "Realm",
-      value = function(character)
-        local realm = "-"
-        local realmColor = LIGHTGRAY_FONT_COLOR
-        if character.info.realm ~= nil then
-          realm = character.info.realm
-          realmColor = WHITE_FONT_COLOR
-        end
-        return realmColor:WrapTextInColorCode(realm)
-      end,
+      value = realmValue,
       tooltip = false,
       enabled = Data.db.global.showRealms,
     },
     {
       label = "Guild",
-      value = function(character)
-        local guild = "-"
-        local guildColor = WHITE_FONT_COLOR
-        if character.info.guild == nil then
-          guildColor = LIGHTGRAY_FONT_COLOR
-        elseif character.info.guild.isInGuild then
-          if character.info.guild.name ~= nil and character.info.guild.name ~= "" then
-            guild = character.info.guild.name
-            guildColor = NECROLORD_GREEN_COLOR
-          else
-            guildColor = LIGHTGRAY_FONT_COLOR
-          end
-        end
-        return guildColor:WrapTextInColorCode(guild)
-      end,
-      onEnter = function(infoFrame, character)
-        GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
-        if character.info.guild == nil then
-          GameTooltip:AddLine("Guild", 1, 1, 1)
-          GameTooltip:AddLine("Log in to update your guild information.")
-        elseif character.info.guild.isInGuild and character.info.guild.name ~= nil then
-          local realmName = character.info.realm
-          if character.info.guild.realm ~= nil and strlenutf8(character.info.guild.realm) > 0 then
-            realmName = character.info.guild.realm
-          end
-          GameTooltip:AddLine(character.info.guild.name, 1, 1, 1)
-          GameTooltip:AddDoubleLine("Rank:", character.info.guild.rankName ~= nil and character.info.guild.rankName or "-", nil, nil, nil, 1, 1, 1)
-          GameTooltip:AddDoubleLine("Realm:", realmName, nil, nil, nil, 1, 1, 1)
-        else
-          GameTooltip:AddLine("Guild", 1, 1, 1)
-          GameTooltip:AddLine("Not in a guild.")
-        end
-        GameTooltip:Show()
-      end,
-      onLeave = function()
-        GameTooltip:Hide()
-      end,
+      value = guildValue,
+      onEnter = guildOnEnter,
+      onLeave = GameTooltip_Hide,
       enabled = Data.db.global.showGuildInformation,
     },
     {
       label = STAT_AVERAGE_ITEM_LEVEL,
-      value = function(character)
-        local itemLevel = "-"
-        local itemLevelColor = LIGHTGRAY_FONT_COLOR:GenerateHexColor()
-        if character.info.ilvl ~= nil then
-          local displayLevel = character.info.ilvl.potential or character.info.ilvl.level
-          if Data.db.global.showEquippedItemLevel and character.info.ilvl.equipped ~= nil then
-            displayLevel = character.info.ilvl.equipped
-          end
-          if displayLevel ~= nil then
-            if Data.db.global.showItemLevelDecimals then
-              itemLevel = format("%.2f", displayLevel)
-            else
-              itemLevel = tostring(floor(displayLevel))
-            end
-          end
-          itemLevelColor = Helpers:GetItemLevelTrackColor(displayLevel):GenerateHexColor()
-        end
-        return WrapTextInColorCode(itemLevel, itemLevelColor)
-      end,
-      onEnter = function(infoFrame, character)
-        local itemLevelTooltip = ""
-        local itemLevelTooltip2 = STAT_AVERAGE_ITEM_LEVEL_TOOLTIP
-        if character.info.ilvl ~= nil then
-          local decimals = Data.db.global.showItemLevelDecimals and 2 or 0
-          local equipped = character.info.ilvl.equipped
-          local inBags = character.info.ilvl.potential or character.info.ilvl.level
-          if equipped ~= nil then
-            itemLevelTooltip = HIGHLIGHT_FONT_COLOR_CODE .. "Item Level " .. format("%." .. decimals .. "f", equipped)
-            if inBags ~= nil and floor(inBags) ~= floor(equipped) then
-              itemLevelTooltip = itemLevelTooltip .. format(" (%." .. decimals .. "f in bags)", inBags)
-            end
-            itemLevelTooltip = itemLevelTooltip .. FONT_COLOR_CODE_CLOSE
-          elseif inBags ~= nil then
-            itemLevelTooltip = HIGHLIGHT_FONT_COLOR_CODE .. "Item Level " .. format("%." .. decimals .. "f", inBags) .. FONT_COLOR_CODE_CLOSE
-          end
-          if inBags ~= nil and character.info.ilvl.pvp ~= nil and floor(inBags) ~= character.info.ilvl.pvp then
-            itemLevelTooltip2 = itemLevelTooltip2 .. "\n\n" .. STAT_AVERAGE_PVP_ITEM_LEVEL:format(tostring(floor(character.info.ilvl.pvp)))
-          end
-        end
-        GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
-        GameTooltip:AddLine(itemLevelTooltip, 1, 1, 1)
-        GameTooltip:AddLine(itemLevelTooltip2, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, true)
-        GameTooltip:Show()
-      end,
+      value = itemLevelValue,
+      onEnter = itemLevelOnEnter,
       onLeave = function()
         GameTooltip:Hide()
       end,
@@ -2204,250 +2503,54 @@ function Module:GetCharacterInfo(unfiltered)
     },
     {
       label = "Rating",
-      value = function(character)
-        local rating = "-"
-        local ratingColor = LIGHTGRAY_FONT_COLOR
-        if character.mythicplus.rating ~= nil and C_MythicPlus.IsMythicPlusActive() then
-          rating = tostring(character.mythicplus.rating)
-          local color = Helpers:GetRatingColor(character.mythicplus.rating, Data.db.global.useRIOScoreColor, false)
-          if color ~= nil then
-            ratingColor = CreateColor(color.r, color.g, color.b, color.a)
-          else
-            ratingColor = WHITE_FONT_COLOR
-          end
-        end
-        return ratingColor:WrapTextInColorCode(rating)
-      end,
-      onEnter = function(infoFrame, character)
-        local rating = "-"
-        local ratingColor = WHITE_FONT_COLOR
-        local bestSeasonScore = nil
-        local bestSeasonScoreColor = WHITE_FONT_COLOR
-        local bestSeasonNumber = nil
-        local numSeasonRuns = 0
-        if character.mythicplus.runHistory ~= nil then
-          numSeasonRuns = TableCount(character.mythicplus.runHistory)
-        end
-        if character.mythicplus.bestSeasonNumber ~= nil then
-          bestSeasonNumber = character.mythicplus.bestSeasonNumber
-        end
-        if character.mythicplus.bestSeasonScore ~= nil then
-          bestSeasonScore = character.mythicplus.bestSeasonScore
-          local color = Helpers:GetRatingColor(bestSeasonScore, Data.db.global.useRIOScoreColor, bestSeasonNumber ~= nil and bestSeasonNumber < seasonDisplayID)
-          if color ~= nil then
-            bestSeasonScoreColor = CreateColor(color.r, color.g, color.b, color.a)
-          end
-        end
-        if type(character.mythicplus.rating) == "number" then
-          local color = Helpers:GetRatingColor(character.mythicplus.rating, Data.db.global.useRIOScoreColor, false)
-          if color ~= nil then
-            ratingColor = CreateColor(color.r, color.g, color.b, color.a)
-          end
-          rating = tostring(character.mythicplus.rating)
-        end
-
-        GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
-        GameTooltip:AddLine("Mythic+ Rating", 1, 1, 1)
-        if not C_MythicPlus.IsMythicPlusActive() then
-          GameTooltip:AddLine("Mythic+ is not active.", DIM_RED_FONT_COLOR.r, DIM_RED_FONT_COLOR.g, DIM_RED_FONT_COLOR.b)
-        else
-          -- Season information
-          GameTooltip:AddDoubleLine("Current Season:", ratingColor:WrapTextInColorCode(rating), nil, nil, nil, ratingColor.r, ratingColor.g, ratingColor.b)
-          if bestSeasonNumber ~= nil and bestSeasonScore ~= nil then
-            local bestSeasonValue = bestSeasonScoreColor:WrapTextInColorCode(tostring(bestSeasonScore))
-            if bestSeasonNumber > 0 then
-              local season = LIGHTGRAY_FONT_COLOR:WrapTextInColorCode(format("(Season %s)", bestSeasonNumber))
-              bestSeasonValue = format("%s %s", bestSeasonValue, season)
-            end
-            GameTooltip:AddDoubleLine("Best Season:", bestSeasonValue, nil, nil, nil, 1, 1, 1)
-          end
-          GameTooltip:AddDoubleLine("Runs this Season:", WHITE_FONT_COLOR:WrapTextInColorCode(tostring(numSeasonRuns)), nil, nil, nil, WHITE_FONT_COLOR.r, WHITE_FONT_COLOR.g, WHITE_FONT_COLOR.b)
-
-          -- Dungeon information
-          GameTooltip:AddLine(" ")
-          GameTooltip:AddLine("Highest Keys:")
-          TableForEach(dungeons, function(dungeon)
-            local level = "-"
-            local levelColor = LIGHTGRAY_FONT_COLOR
-            if character.mythicplus.dungeons ~= nil and TableCount(character.mythicplus.dungeons) > 0 then
-              local characterDungeon = TableGet(character.mythicplus.dungeons, "challengeModeID", dungeon.challengeModeID)
-              if characterDungeon ~= nil and type(characterDungeon.level) == "number" and characterDungeon.level > 0 then
-                level = format("+%s", tostring(characterDungeon.level))
-                levelColor = WHITE_FONT_COLOR
-              end
-            end
-            GameTooltip:AddDoubleLine(dungeon.name, level, 1, 1, 1, levelColor.r, levelColor.g, levelColor.b)
-          end)
-          if numSeasonRuns > 0 then
-            GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("<Shift Click to Link to Chat>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
-          end
-        end
-        GameTooltip:Show()
-      end,
+      value = ratingValue,
+      onEnter = ratingOnEnter,
       onLeave = function()
         GameTooltip:Hide()
       end,
-      onClick = function(infoFrame, character)
-        local numSeasonRuns = 0
-        if character.mythicplus.runHistory ~= nil then
-          numSeasonRuns = TableCount(character.mythicplus.runHistory)
-        end
-        if character.mythicplus.dungeons ~= nil
-          and TableCount(character.mythicplus.dungeons) > 0
-          and numSeasonRuns > 0
-          and IsModifiedClick("CHATLINK")
-        then
-          local dungeonScoreDungeonTable = {}
-          for _, dungeon in pairs(character.mythicplus.dungeons) do
-            table.insert(dungeonScoreDungeonTable, dungeon.challengeModeID)
-            table.insert(dungeonScoreDungeonTable, dungeon.finishedSuccess and 1 or 0)
-            table.insert(dungeonScoreDungeonTable, dungeon.level)
-          end
-          local dungeonScoreTable = {
-            character.mythicplus.rating,
-            character.GUID,
-            character.info.name,
-            character.info.class.id,
-            math.ceil(character.info.ilvl.level),
-            character.info.level,
-            numSeasonRuns,
-            character.mythicplus.bestSeasonScore,
-            character.mythicplus.bestSeasonNumber,
-            unpack(dungeonScoreDungeonTable),
-          }
-          local link = NORMAL_FONT_COLOR:WrapTextInColorCode(LinkUtil.FormatLink("dungeonScore", DUNGEON_SCORE_LINK, unpack(dungeonScoreTable)))
-          if not ChatFrameUtil.InsertLink(link) then
-            ChatFrameUtil.OpenChat(link)
-          end
-        end
-      end,
+      onClick = ratingOnClick,
       enabled = Data.db.global.showRating,
     },
     {
       label = "Current Keystone",
-      value = function(character)
-        local currentKeystone = LIGHTGRAY_FONT_COLOR:WrapTextInColorCode("-")
-        if character.mythicplus.keystone ~= nil then
-          local dungeon
-          if type(character.mythicplus.keystone.challengeModeID) == "number" and character.mythicplus.keystone.challengeModeID > 0 then
-            dungeon = TableGet(dungeons, "challengeModeID", character.mythicplus.keystone.challengeModeID)
-          elseif type(character.mythicplus.keystone.mapId) == "number" and character.mythicplus.keystone.mapId > 0 then
-            dungeon = TableGet(dungeons, "mapId", character.mythicplus.keystone.mapId)
-          end
-          if dungeon ~= nil then
-            currentKeystone = dungeon.abbr
-            if type(character.mythicplus.keystone.level) == "number" and character.mythicplus.keystone.level > 0 then
-              currentKeystone = format("%s +%s", currentKeystone, tostring(character.mythicplus.keystone.level))
-            end
-          end
-        end
-        return currentKeystone
-      end,
-      onEnter = function(infoFrame, character)
-        if character.mythicplus.keystone == nil then return end
-        local itemLink = character.mythicplus.keystone.itemLink
-        if type(itemLink) == "string" and itemLink ~= "" then
-          GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
-          GameTooltip:SetHyperlink(itemLink)
-          GameTooltip:AddLine(" ")
-          GameTooltip:AddLine("<Shift Click to Link to Chat>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
-          GameTooltip:Show()
-          return
-        end
-        local dungeon
-        if type(character.mythicplus.keystone.challengeModeID) == "number" and character.mythicplus.keystone.challengeModeID > 0 then
-          dungeon = TableGet(dungeons, "challengeModeID", character.mythicplus.keystone.challengeModeID)
-        elseif type(character.mythicplus.keystone.mapId) == "number" and character.mythicplus.keystone.mapId > 0 then
-          dungeon = TableGet(dungeons, "mapId", character.mythicplus.keystone.mapId)
-        end
-        if dungeon == nil then return end
-        GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
-        GameTooltip:SetText(dungeon.name, 1, 1, 1)
-        if type(character.mythicplus.keystone.level) == "number" and character.mythicplus.keystone.level > 0 then
-          GameTooltip:AddLine(format("Mythic Keystone Level %d", character.mythicplus.keystone.level), 1, 1, 1)
-        end
-        GameTooltip:Show()
-      end,
+      value = keystoneValue,
+      onEnter = keystoneOnEnter,
       onLeave = function()
         GameTooltip:Hide()
       end,
-      onClick = function(infoFrame, character)
-        if character.mythicplus.keystone ~= nil and type(character.mythicplus.keystone.itemLink) == "string" and character.mythicplus.keystone.itemLink ~= "" then
-          if IsModifiedClick("CHATLINK") then
-            if not ChatFrameUtil.InsertLink(character.mythicplus.keystone.itemLink) then
-              ChatFrameUtil.OpenChat(character.mythicplus.keystone.itemLink)
-            end
-          end
-        end
-      end,
+      onClick = keystoneOnClick,
       enabled = Data.db.global.showCurrentKeystone,
     },
     {
       label = DELVES_GREAT_VAULT_LABEL,
-      value = function(character)
-        if character.vault.hasAvailableRewards == true then
-          if characterHasVaultPreviewData(character) then
-            return RARE_BLUE_COLOR:WrapTextInColorCode("Rewards Pending")
-          end
-          return GREEN_FONT_COLOR:WrapTextInColorCode(QUEST_REWARDS)
-        end
-        return ""
-      end,
-      onEnter = function(infoFrame, character)
-        if character.vault.hasAvailableRewards == true then
-          GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
-          GameTooltip:AddLine("It's payday!", WHITE_FONT_COLOR.r, WHITE_FONT_COLOR.g, WHITE_FONT_COLOR.b)
-          GameTooltip:AddLine(GREAT_VAULT_REWARDS_WAITING, GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b, true)
-          if vaultPreviewModule then
-            GameTooltip:AddLine(" ")
-            if characterHasVaultPreviewData(character) then
-              GameTooltip:AddLine("<Click to Preview Rewards>", GREEN_FONT_COLOR.r, GREEN_FONT_COLOR.g, GREEN_FONT_COLOR.b)
-            else
-              GameTooltip:AddLine("Open the Great Vault to check rewards", ORANGE_FONT_COLOR.r, ORANGE_FONT_COLOR.g, ORANGE_FONT_COLOR.b, true)
-            end
-          end
-          GameTooltip:Show()
-        end
-      end,
+      value = vaultRewardValue,
+      onEnter = vaultRewardOnEnter,
       onLeave = function()
         GameTooltip:Hide()
       end,
-      onClick = function(infoFrame, character)
-        if not vaultPreviewModule then return end
-        if character.vault.hasAvailableRewards ~= true then return end
-        if not characterHasVaultPreviewData(character) then
-          GameTooltip:SetOwner(infoFrame, "ANCHOR_RIGHT")
-          GameTooltip:AddLine("Open the Great Vault to check rewards", ORANGE_FONT_COLOR.r, ORANGE_FONT_COLOR.g, ORANGE_FONT_COLOR.b, true)
-          GameTooltip:Show()
-          return
-        end
-        -- The pending state is specifically a confirmed reward-history view,
-        -- so never fall back to live example links here.
-        vaultPreviewModule:OpenCharacter(character, true)
-      end,
+      onClick = vaultRewardOnClick,
       backgroundColor = {r = 0, g = 0, b = 0, a = 0.3},
       enabled = Data.db.global.vault.raids or Data.db.global.vault.dungeons or Data.db.global.vault.world,
     },
     {
       label = WHITE_FONT_COLOR:WrapTextInColorCode(RAIDS),
-      value = function(character) return getVaultProgressValue(character, Enum.WeeklyRewardChestThresholdType.Raid) end,
-      onEnter = function(infoFrame, character) getVaultProgressTooltip(infoFrame, character, Enum.WeeklyRewardChestThresholdType.Raid) end,
-      onLeave = function() GameTooltip:Hide() end,
+      value = vaultRaidProgressValue,
+      onEnter = vaultRaidProgressOnEnter,
+      onLeave = GameTooltip_Hide,
       enabled = Data.db.global.vault.raids,
     },
     {
       label = WHITE_FONT_COLOR:WrapTextInColorCode(DUNGEONS),
-      value = function(character) return getVaultProgressValue(character, Enum.WeeklyRewardChestThresholdType.Activities) end,
-      onEnter = function(infoFrame, character) getVaultProgressTooltip(infoFrame, character, Enum.WeeklyRewardChestThresholdType.Activities) end,
-      onLeave = function() GameTooltip:Hide() end,
+      value = vaultDungeonProgressValue,
+      onEnter = vaultDungeonProgressOnEnter,
+      onLeave = GameTooltip_Hide,
       enabled = Data.db.global.vault.dungeons,
     },
     {
       label = WHITE_FONT_COLOR:WrapTextInColorCode(WORLD),
-      value = function(character) return getVaultProgressValue(character, Enum.WeeklyRewardChestThresholdType.World) end,
-      onEnter = function(infoFrame, character) getVaultProgressTooltip(infoFrame, character, Enum.WeeklyRewardChestThresholdType.World) end,
-      onLeave = function() GameTooltip:Hide() end,
+      value = vaultWorldProgressValue,
+      onEnter = vaultWorldProgressOnEnter,
+      onLeave = GameTooltip_Hide,
       enabled = Data.db.global.vault.world,
     },
   }
@@ -3384,93 +3487,391 @@ end
 function Module:RenderNow()
   if not self.window then
     local windows = Data.db.global.liqui.windows
-    ---@type LiqUI_WindowOptions
-    local windowOptions = {
-      name = addon.name .. "Main",
-      storage = windows.Main,
-      title = addon.name,
-      icon = Constants.media.LogoTransparent,
-      overlayFontObject = "GameFontHighlight_NoShadow",
-      overlayTextColor = {r = 1, g = 0.82, b = 0, a = 1},
-      onShow = function()
-        Module.revealCurrentCharacterOnOpen = true
-        Module:Render()
-      end,
-      onScaleChanged = function()
-        Module:Render()
-      end,
-      onWindowOptionsAfterScaling = function(_, menu)
-        local settings = Data.db.global.liqui.windows.Main
+    ---@param _ LiqUI_WindowInstance
+    ---@param rootMenu RootMenuDescriptionProxy
+    local function openCharactersMenu(_, rootMenu)
+      rootMenu:SetScrollMode(math.min(20 * 50, GetScreenHeight() - 20)) -- 20 pixels per row, 50 rows
 
-        menu:CreateCheckbox(
-          "Show Overflow Arrows",
-          function() return settings.showCharacterScrollArrows ~= false end,
+      ---Build the checkbox row for one character (same row used before this feature existed).
+      local function addCharacterRow(parentMenu, char)
+        local nameColor = WHITE_FONT_COLOR
+        if char.info.class.file ~= nil then
+          local classColor = C_ClassColor.GetClassColor(char.info.class.file)
+          if classColor ~= nil then
+            nameColor = CreateColor(classColor.r, classColor.g, classColor.b, 1)
+          end
+        end
+        local characterName = format("%s (%s)", nameColor:WrapTextInColorCode(char.info.name), char.info.realm)
+        local characterButton = parentMenu:CreateCheckbox(
+          characterName,
+          function(value) return Data.db.global.characters[value].enabled end,
+          function(value)
+            Data.db.global.characters[value].enabled = not Data.db.global.characters[value].enabled
+            if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+            self:Render()
+            return MenuResponse.Refresh
+          end,
+          char.GUID
+        )
+        local moveCharacterButton = characterButton:CreateButton("Move Character")
+        TableForEach(Data:GetAccounts(), function(targetAccount)
+          moveCharacterButton:CreateRadio(
+            targetAccount.name,
+            function() return (char.accountId or Data:EnsureDefaultAccount()) == targetAccount.id end,
+            function()
+              Data:MoveCharacterToAccount(char.GUID, targetAccount.id)
+              if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+              self:Render()
+              return MenuResponse.Refresh
+            end
+          )
+        end)
+        if char.GUID ~= UnitGUID("player") then
+          local removeButton = characterButton:CreateButton("Remove character", function()
+            StaticPopup_Show("ALTEREGO_DELETE_CHARACTER", characterName, nil, char)
+          end)
+          removeButton:SetTooltip(function(tooltip, elm)
+            tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+            tooltip:AddLine(format("Remove %s?", characterName), nil, nil, nil, true)
+          end)
+        end
+      end
+
+      local accounts = Data:GetAccounts()
+      TableForEach(accounts, function(account)
+        -- ---------------------------------------------------------------
+        -- REAL BUG FIXED HERE, for good this time: renaming and the
+        -- "Main WoW Account" toggle used to be a right-click hitbox and
+        -- a clickable "M" glyph, both implemented as a custom child
+        -- frame attached to this row's underlying Blizzard button.
+        -- Blizzard's Menu API pools that exact frame GLOBALLY, across
+        -- every dropdown in the game -- not just this addon's own
+        -- menus, but every OTHER window's own generic "Settings" gear
+        -- (LiqUI adds one to every window automatically), any other
+        -- addon's menus, and even native secure menus (a real bug
+        -- report: right-clicking a raid-frame unit's own context menu
+        -- broke a protected Blizzard function because our own code had
+        -- run on that same shared frame at some point). No registry of
+        -- "hide this on every OTHER menu we know about" can ever fully
+        -- close that off, since there's no way to enumerate every
+        -- dropdown that might ever reuse the frame. The only fully
+        -- robust fix is what's below: plain, native menu content (a
+        -- text badge, ordinary submenu buttons, exactly like "Remove
+        -- character"/"Move Character" already use safely elsewhere in
+        -- this same menu) that Blizzard's OWN menu framework owns and
+        -- rebuilds fresh every time -- there is nothing left behind on
+        -- the shared frame for a later, unrelated menu to inherit.
+        -- ---------------------------------------------------------------
+        local isMainAccount = Data.GetMainAccountId and Data:GetMainAccountId() == account.id
+
+        -- The row itself IS the "track this whole account" checkbox.
+        -- The Main WoW Account badge is plain text baked into the
+        -- label -- computed fresh every time this menu is built,
+        -- exactly like character rows already color names by class.
+        local accountRow = rootMenu:CreateCheckbox(
+          isMainAccount and format("%s  |cffffd100[Main]|r", account.name) or account.name,
+          function() return account.enabled end,
           function()
-            settings.showCharacterScrollArrows = not (settings.showCharacterScrollArrows ~= false)
-            UpdateCharacterScrollEdgeButtons(self.window)
+            Data:SetAccountEnabled(account.id, not account.enabled)
+            if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+            self:Render()
             return MenuResponse.Refresh
           end
-        ):SetTooltip(function(tooltip)
-          tooltip:AddLine("Show Overflow Arrows", 1, 1, 1, true)
-          tooltip:AddLine("Show the large left/right indicators when additional characters exist outside the visible area. Horizontal scrolling remains available when this is disabled.", nil, nil, nil, true)
-        end)
-
-        local arrowScale = math.max(50, math.min(200, tonumber(settings.characterScrollArrowScale) or 100))
-        local arrowScalingButton = menu:CreateButton(format("Arrow Scaling: %d%%", arrowScale))
-        BindLiveMenuLabel(arrowScalingButton)
-        for scalePercent = 50, 200, 10 do
-          arrowScalingButton:CreateRadio(
-            scalePercent .. "%",
-            function(value) return (tonumber(Data.db.global.liqui.windows.Main.characterScrollArrowScale) or 100) == value end,
-            function(value)
-              Data.db.global.liqui.windows.Main.characterScrollArrowScale = value
-              UpdateCharacterScrollEdgeButtons(self.window)
-              SetLiveMenuLabel(arrowScalingButton, format("Arrow Scaling: %d%%", value))
-              -- Keep Settings open; the radio state and parent label refresh immediately.
-              return MenuResponse.Refresh
-            end,
-            scalePercent
-          )
-        end
-        arrowScalingButton:SetTooltip(function(tooltip, elm)
-          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-          tooltip:AddLine("Adjust the size of the character overflow arrows. 100% uses the default 80x80 icon size.", nil, nil, nil, true)
-        end)
-
-        local visibleLimit = tonumber(settings.visibleCharacterLimit) or 15
-        local visibleCharactersButton = menu:CreateButton(
-          visibleLimit > 0 and format("Visible Characters: %d", visibleLimit) or "Visible Characters: Unlimited"
         )
-        BindLiveMenuLabel(visibleCharactersButton)
-        visibleCharactersButton:CreateRadio(
-          "Unlimited",
-          function() return (tonumber(Data.db.global.liqui.windows.Main.visibleCharacterLimit) or 15) <= 0 end,
-          function()
-            Data.db.global.liqui.windows.Main.visibleCharacterLimit = 0
-            Module:Render()
-            SetLiveMenuLabel(visibleCharactersButton, "Visible Characters: Unlimited")
-            return MenuResponse.Refresh
+
+        if accountRow.SetIcon then
+          accountRow:SetIcon(Constants.media.IconAccount)
+        end
+        if isMainAccount then
+          accountRow:AddInitializer(function(button, description)
+            RegisterSyncTutorialMenuTarget("mainAccount", button, description)
+          end)
+        end
+
+        accountRow:CreateButton("Rename or Delete WoW Account", function()
+          StaticPopup_Show("ALTEREGO_RENAME_ACCOUNT", account.name, nil, account)
+        end)
+
+        if Data.GetMainAccountId and Data.SetMainAccount then
+          -- "Main" toggle -- marks which WoW Account this installation
+          -- actually plays. Once set: Sync only ever SENDS characters
+          -- filed under it, and never lets incoming sync data overwrite
+          -- characters already filed under it (see Comm.lua). Only one
+          -- account can be Main -- setting a new one clears the
+          -- previous (Data:SetMainAccount already enforces this in the
+          -- saved data, so there's nothing extra to keep in sync here).
+          -- No MenuResponse.Refresh here on purpose -- closes the whole
+          -- Accounts & Characters menu on click (same default behavior
+          -- as "Rename or Delete WoW Account"/"Remove character" above),
+          -- instead of staying open needing a manual close afterward.
+          local mainToggleButton = accountRow:CreateButton(
+            isMainAccount and "Unset as Main WoW Account" or "Set as Main WoW Account",
+            function()
+              if isMainAccount then
+                if TableCount(Data.db.global.accounts) <= 1 then
+                  StaticPopup_Show("ALTEREGO_MAIN_ACCOUNT_REQUIRED")
+                  return
+                end
+                Data:SetMainAccount(nil)
+                if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+                self:Render()
+                return
+              end
+
+              local currentMainId = Data:GetMainAccountId()
+              if currentMainId and currentMainId ~= account.id then
+                local currentMain = Data.db.global.accounts[currentMainId]
+                StaticPopup_Show(
+                  "ALTEREGO_CONFIRM_CHANGE_MAIN_ACCOUNT",
+                  (currentMain and currentMain.name) or "The current Main WoW Account",
+                  account.name,
+                  account
+                )
+                return
+              end
+
+              Data:SetMainAccount(account.id)
+              if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
+              self:Render()
+            end
+          )
+          mainToggleButton:SetTooltip(function(tooltip, elm)
+            tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+            if isMainAccount then
+              tooltip:AddLine("Sync only sends characters from here, and never lets incoming sync data overwrite them.", nil, nil, nil, true)
+            else
+              tooltip:AddLine("Marks this as the account this installation actually plays. Sync will only send characters filed here, and will protect them from being overwritten by incoming sync data.", nil, nil, nil, true)
+            end
+          end)
+        end
+
+        -- Expanding the row (hover arrow, same mechanism "Remove character"
+        -- already uses today) opens this account's own character list.
+        local accountCharacters = Data:GetCharactersByAccount(account.id, true)
+        TableForEach(accountCharacters, function(char)
+          addCharacterRow(accountRow, char)
+        end)
+      end)
+
+      rootMenu:CreateDivider()
+      rootMenu:CreateButton("+ Add WoW Account", function()
+        Data:CreateAccount()
+        self:Render()
+      end)
+    end
+
+    ---@param _ LiqUI_WindowInstance
+    ---@param rootMenu RootMenuDescriptionProxy
+    local function openSortingMenu(_, rootMenu)
+      ---@param sorting AE_CharacterSortingOption
+      ---@return boolean
+      local function isSortingOption(sorting)
+        return Data.db.global.sorting == sorting
+      end
+
+      ---@param sorting AE_CharacterSortingOption
+      ---@return MenuResponse
+      local function setSortingOption(sorting)
+        Data.db.global.sorting = sorting
+        self:Render()
+        return MenuResponse.Refresh
+      end
+
+      for _, option in ipairs(Constants.sortingOptions) do
+        local button = rootMenu:CreateRadio(
+          option.text,
+          isSortingOption,
+          setSortingOption,
+          option.value
+        )
+        if option.tooltipTitle or option.tooltipText then
+          ---@param tooltip GameTooltip
+          local function showSortingTooltip(tooltip)
+            if option.tooltipTitle then
+              tooltip:AddLine(option.tooltipTitle, 1, 1, 1, true)
+            end
+            if option.tooltipText then
+              tooltip:AddLine(option.tooltipText, nil, nil, nil, true)
+            end
           end
-        )
-        for count = 1, 20 do
-          visibleCharactersButton:CreateRadio(
-            tostring(count),
-            function(value) return (tonumber(Data.db.global.liqui.windows.Main.visibleCharacterLimit) or 0) == value end,
-            function(value)
-              Data.db.global.liqui.windows.Main.visibleCharacterLimit = value
-              Module:Render()
-              SetLiveMenuLabel(visibleCharactersButton, format("Visible Characters: %d", value))
-              return MenuResponse.Refresh
-            end,
-            count
-          )
+          button:SetTooltip(showSortingTooltip)
         end
-        visibleCharactersButton:SetTooltip(function(tooltip, elm)
-          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-          tooltip:AddLine("Limit how many character columns are visible at once. Extra characters stay in the grid and remain available through horizontal scrolling and the edge arrows.", nil, nil, nil, true)
-        end)
-      end,
-      onSettingsMenu = function(window, menu)
+      end
+    end
+
+    ---@param tooltip GameTooltip
+    ---@param elm ElementMenuDescriptionProxy
+    local function showPartyKeystoneTooltip(tooltip, elm)
+      tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+      tooltip:AddLine("Announce all your keystones to the party chat.", nil, nil, nil, true)
+      if not IsInGroup() then
+        tooltip:AddLine(" ")
+        tooltip:AddLine("You are not in a party.", 1, 0, 0, true)
+      end
+    end
+
+    ---@param tooltip GameTooltip
+    ---@param elm ElementMenuDescriptionProxy
+    local function showGuildKeystoneTooltip(tooltip, elm)
+      tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+      tooltip:AddLine("Announce all your keystones to the guild chat.", nil, nil, nil, true)
+      if not IsInGuild() then
+        tooltip:AddLine(" ")
+        tooltip:AddLine("You are not in a guild.", 1, 0, 0, true)
+      end
+    end
+
+    ---@param tooltip GameTooltip
+    ---@param elm ElementMenuDescriptionProxy
+    local function showMultilineKeystoneTooltip(tooltip, elm)
+      tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+      tooltip:AddLine("Announce keystones with multiple chat messages.", nil, nil, nil, true)
+      tooltip:AddLine(" ")
+      tooltip:AddLine("|cffff0000Warning: |rIf you have a lot of characters it could get spammy and the messages may get blocked.", nil, nil, nil, true)
+    end
+
+    ---@param tooltip GameTooltip
+    ---@param elm ElementMenuDescriptionProxy
+    local function showKeystoneNamesTooltip(tooltip, elm)
+      tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+      tooltip:AddLine("Add character names before each keystone.", nil, nil, nil, true)
+      if not Data.db.global.announceKeystones.multiline then
+        tooltip:AddLine(" ")
+        tooltip:AddLine("Multiple chat messages must be enabled.", 1, 0, 0, true)
+      end
+    end
+
+    ---@param tooltip GameTooltip
+    ---@param elm ElementMenuDescriptionProxy
+    local function showResetAnnounceTooltip(tooltip, elm)
+      tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+      tooltip:AddLine("Let others in your group know when you've reset the instances.", nil, nil, nil, true)
+    end
+
+    ---@param tooltip GameTooltip
+    ---@param elm ElementMenuDescriptionProxy
+    local function showAutoKeystoneTooltip(tooltip, elm)
+      tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+      tooltip:AddLine("Announce to your party when you loot a new keystone.", nil, nil, nil, true)
+    end
+
+    ---@param window LiqUI_WindowInstance
+    ---@param menu RootMenuDescriptionProxy
+    local function openAnnounceMenu(window, menu)
+      menu:CreateTitle("Announce Current Keystones")
+      local sendToParty = menu:CreateButton(
+        "Send to Party Chat",
+        function()
+          if not IsInGroup() then
+            addon.Core:Print("You are not in a party.")
+            return
+          end
+          addon.Core:AnnounceKeystones("PARTY")
+        end
+      )
+      sendToParty:SetEnabled(IsInGroup())
+      sendToParty:SetTooltip(function(tooltip, elm)
+        tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+        tooltip:AddLine("Announce all your keystones to the party chat.", nil, nil, nil, true)
+        if not IsInGroup() then
+          tooltip:AddLine(" ")
+          tooltip:AddLine("You are not in a party.", 1, 0, 0, true)
+        end
+      end)
+      local sendToGuild = menu:CreateButton(
+        "Send to Guild Chat",
+        function()
+          if not IsInGuild() then
+            addon.Core:Print("You are not in a guild.")
+            return
+          end
+          addon.Core:AnnounceKeystones("GUILD")
+        end
+      )
+      sendToGuild:SetEnabled(IsInGuild())
+      sendToGuild:SetTooltip(function(tooltip, elm)
+        tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+        tooltip:AddLine("Announce all your keystones to the guild chat.", nil, nil, nil, true)
+        if not IsInGuild() then
+          tooltip:AddLine(" ")
+          tooltip:AddLine("You are not in a guild.", 1, 0, 0, true)
+        end
+      end)
+      menu:CreateTitle(OPTIONS)
+      ---@type ElementMenuDescriptionProxy
+      local withCharacterNames
+      local withMultipleMessages = menu:CreateCheckbox(
+        "Multiple chat messages",
+        function() return Data.db.global.announceKeystones.multiline end,
+        function()
+          Data.db.global.announceKeystones.multiline = not Data.db.global.announceKeystones.multiline
+          withCharacterNames:SetEnabled(Data.db.global.announceKeystones.multiline)
+          return MenuResponse.Refresh
+        end
+      )
+      withCharacterNames = menu:CreateCheckbox(
+        "Include character names",
+        function() return Data.db.global.announceKeystones.multilineNames end,
+        function()
+          Data.db.global.announceKeystones.multilineNames = not Data.db.global.announceKeystones.multilineNames
+          return MenuResponse.Refresh
+        end
+      )
+      withMultipleMessages:SetTooltip(function(tooltip, elm)
+        tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+        tooltip:AddLine("Announce keystones with multiple chat messages.", nil, nil, nil, true)
+        tooltip:AddLine(" ")
+        tooltip:AddLine("|cffff0000Warning: |rIf you have a lot of characters it could get spammy and the messages may get blocked.", nil, nil, nil, true)
+      end)
+      withCharacterNames:SetTooltip(function(tooltip, elm)
+        tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+        tooltip:AddLine("Add character names before each keystone.", nil, nil, nil, true)
+        if not Data.db.global.announceKeystones.multiline then
+          tooltip:AddLine(" ")
+          tooltip:AddLine("Multiple chat messages must be enabled.", 1, 0, 0, true)
+        end
+      end)
+      withCharacterNames:SetEnabled(Data.db.global.announceKeystones.multiline)
+      menu:CreateDivider()
+      menu:CreateTitle("Automatic Announcements")
+      menu:CreateCheckbox(
+        "Announce instance resets",
+        function() return Data.db.global.announceResets end,
+        function()
+          Data.db.global.announceResets = not Data.db.global.announceResets
+          self:Render()
+          return MenuResponse.Refresh
+        end
+      ):SetTooltip(function(tooltip, elm)
+        tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+        tooltip:AddLine("Let others in your group know when you've reset the instances.", nil, nil, nil, true)
+      end)
+      menu:CreateCheckbox(
+        "Announce new keystones (Party)",
+        function() return Data.db.global.announceKeystones.autoParty end,
+        function()
+          Data.db.global.announceKeystones.autoParty = not Data.db.global.announceKeystones.autoParty
+          self:Render()
+          return MenuResponse.Refresh
+        end
+      ):SetTooltip(function(tooltip, elm)
+        tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+        tooltip:AddLine("Announce to your party when you loot a new keystone.", nil, nil, nil, true)
+      end)
+    end
+
+    local function openGreatVault()
+      addon.Core:ToggleVault()
+    end
+
+    local function renderMainWindow()
+      Module.revealCurrentCharacterOnOpen = true
+      Module:Render()
+    end
+
+    ---@param _ LiqUI_WindowInstance
+    ---@param menu RootMenuDescriptionProxy
+    local function openMainSettingsMenu(window, menu)
             -- The list has grown into a lot of sections (Character, Vault,
             -- Currencies/Weeklies/Seasonal Chores, Announcements, Interface,
             -- Multi-Account Sync...) -- without a scroll cap it just grows
@@ -4358,7 +4759,92 @@ function Module:RenderNow()
               tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
               tooltip:AddLine("Opens a step-by-step guide for configuring Multi-Account Sync from start to finish.", nil, nil, nil, true)
             end)
-          end,
+    end
+
+    ---@type LiqUI_WindowOptions
+    local windowOptions = {
+      name = addon.name .. "Main",
+      storage = windows.Main,
+      title = addon.name,
+      icon = Constants.media.LogoTransparent,
+      overlayFontObject = "GameFontHighlight_NoShadow",
+      overlayTextColor = {r = 1, g = 0.82, b = 0, a = 1},
+      onShow = renderMainWindow,
+      onScaleChanged = function()
+        Module:Render()
+      end,
+      onWindowOptionsAfterScaling = function(_, menu)
+        local settings = Data.db.global.liqui.windows.Main
+
+        menu:CreateCheckbox(
+          "Show Overflow Arrows",
+          function() return settings.showCharacterScrollArrows ~= false end,
+          function()
+            settings.showCharacterScrollArrows = not (settings.showCharacterScrollArrows ~= false)
+            UpdateCharacterScrollEdgeButtons(self.window)
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip)
+          tooltip:AddLine("Show Overflow Arrows", 1, 1, 1, true)
+          tooltip:AddLine("Show the large left/right indicators when additional characters exist outside the visible area. Horizontal scrolling remains available when this is disabled.", nil, nil, nil, true)
+        end)
+
+        local arrowScale = math.max(50, math.min(200, tonumber(settings.characterScrollArrowScale) or 100))
+        local arrowScalingButton = menu:CreateButton(format("Arrow Scaling: %d%%", arrowScale))
+        BindLiveMenuLabel(arrowScalingButton)
+        for scalePercent = 50, 200, 10 do
+          arrowScalingButton:CreateRadio(
+            scalePercent .. "%",
+            function(value) return (tonumber(Data.db.global.liqui.windows.Main.characterScrollArrowScale) or 100) == value end,
+            function(value)
+              Data.db.global.liqui.windows.Main.characterScrollArrowScale = value
+              UpdateCharacterScrollEdgeButtons(self.window)
+              SetLiveMenuLabel(arrowScalingButton, format("Arrow Scaling: %d%%", value))
+              -- Keep Settings open; the radio state and parent label refresh immediately.
+              return MenuResponse.Refresh
+            end,
+            scalePercent
+          )
+        end
+        arrowScalingButton:SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Adjust the size of the character overflow arrows. 100% uses the default 80x80 icon size.", nil, nil, nil, true)
+        end)
+
+        local visibleLimit = tonumber(settings.visibleCharacterLimit) or 15
+        local visibleCharactersButton = menu:CreateButton(
+          visibleLimit > 0 and format("Visible Characters: %d", visibleLimit) or "Visible Characters: Unlimited"
+        )
+        BindLiveMenuLabel(visibleCharactersButton)
+        visibleCharactersButton:CreateRadio(
+          "Unlimited",
+          function() return (tonumber(Data.db.global.liqui.windows.Main.visibleCharacterLimit) or 15) <= 0 end,
+          function()
+            Data.db.global.liqui.windows.Main.visibleCharacterLimit = 0
+            Module:Render()
+            SetLiveMenuLabel(visibleCharactersButton, "Visible Characters: Unlimited")
+            return MenuResponse.Refresh
+          end
+        )
+        for count = 1, 20 do
+          visibleCharactersButton:CreateRadio(
+            tostring(count),
+            function(value) return (tonumber(Data.db.global.liqui.windows.Main.visibleCharacterLimit) or 0) == value end,
+            function(value)
+              Data.db.global.liqui.windows.Main.visibleCharacterLimit = value
+              Module:Render()
+              SetLiveMenuLabel(visibleCharactersButton, format("Visible Characters: %d", value))
+              return MenuResponse.Refresh
+            end,
+            count
+          )
+        end
+        visibleCharactersButton:SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Limit how many character columns are visible at once. Extra characters stay in the grid and remain available through horizontal scrolling and the edge arrows.", nil, nil, nil, true)
+        end)
+      end,
+      onSettingsMenu = openMainSettingsMenu,
       onWindowOptionsAfterBorder = function(_, menu)
         local settings = Data.db.global.liqui.windows.Main
         menu:CreateCheckbox(
@@ -4380,176 +4866,7 @@ function Module:RenderNow()
           icon = Constants.media.IconAccount,
           tooltipTitle = "Accounts & Characters",
           tooltipDescription = "Toggle your characters.",
-          onMenu = function(_, rootMenu)
-            rootMenu:SetScrollMode(math.min(20 * 50, GetScreenHeight() - 20)) -- 20 pixels per row, 50 rows
-
-            ---Build the checkbox row for one character (same row used before this feature existed).
-            local function addCharacterRow(parentMenu, char)
-              local nameColor = WHITE_FONT_COLOR
-              if char.info.class.file ~= nil then
-                local classColor = C_ClassColor.GetClassColor(char.info.class.file)
-                if classColor ~= nil then
-                  nameColor = CreateColor(classColor.r, classColor.g, classColor.b, 1)
-                end
-              end
-              local characterName = format("%s (%s)", nameColor:WrapTextInColorCode(char.info.name), char.info.realm)
-              local characterButton = parentMenu:CreateCheckbox(
-                characterName,
-                function(value) return Data.db.global.characters[value].enabled end,
-                function(value)
-                  Data.db.global.characters[value].enabled = not Data.db.global.characters[value].enabled
-                  if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
-                  self:Render()
-                  return MenuResponse.Refresh
-                end,
-                char.GUID
-              )
-              local moveCharacterButton = characterButton:CreateButton("Move Character")
-              TableForEach(Data:GetAccounts(), function(targetAccount)
-                moveCharacterButton:CreateRadio(
-                  targetAccount.name,
-                  function() return (char.accountId or Data:EnsureDefaultAccount()) == targetAccount.id end,
-                  function()
-                    Data:MoveCharacterToAccount(char.GUID, targetAccount.id)
-                    if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
-                    self:Render()
-                    return MenuResponse.Refresh
-                  end
-                )
-              end)
-              if char.GUID ~= UnitGUID("player") then
-                local removeButton = characterButton:CreateButton("Remove character", function()
-                  StaticPopup_Show("ALTEREGO_DELETE_CHARACTER", characterName, nil, char)
-                end)
-                removeButton:SetTooltip(function(tooltip, elm)
-                  tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-                  tooltip:AddLine(format("Remove %s?", characterName), nil, nil, nil, true)
-                end)
-              end
-            end
-
-            local accounts = Data:GetAccounts()
-            TableForEach(accounts, function(account)
-              -- ---------------------------------------------------------------
-              -- REAL BUG FIXED HERE, for good this time: renaming and the
-              -- "Main WoW Account" toggle used to be a right-click hitbox and
-              -- a clickable "M" glyph, both implemented as a custom child
-              -- frame attached to this row's underlying Blizzard button.
-              -- Blizzard's Menu API pools that exact frame GLOBALLY, across
-              -- every dropdown in the game -- not just this addon's own
-              -- menus, but every OTHER window's own generic "Settings" gear
-              -- (LiqUI adds one to every window automatically), any other
-              -- addon's menus, and even native secure menus (a real bug
-              -- report: right-clicking a raid-frame unit's own context menu
-              -- broke a protected Blizzard function because our own code had
-              -- run on that same shared frame at some point). No registry of
-              -- "hide this on every OTHER menu we know about" can ever fully
-              -- close that off, since there's no way to enumerate every
-              -- dropdown that might ever reuse the frame. The only fully
-              -- robust fix is what's below: plain, native menu content (a
-              -- text badge, ordinary submenu buttons, exactly like "Remove
-              -- character"/"Move Character" already use safely elsewhere in
-              -- this same menu) that Blizzard's OWN menu framework owns and
-              -- rebuilds fresh every time -- there is nothing left behind on
-              -- the shared frame for a later, unrelated menu to inherit.
-              -- ---------------------------------------------------------------
-              local isMainAccount = Data.GetMainAccountId and Data:GetMainAccountId() == account.id
-
-              -- The row itself IS the "track this whole account" checkbox.
-              -- The Main WoW Account badge is plain text baked into the
-              -- label -- computed fresh every time this menu is built,
-              -- exactly like character rows already color names by class.
-              local accountRow = rootMenu:CreateCheckbox(
-                isMainAccount and format("%s  |cffffd100[Main]|r", account.name) or account.name,
-                function() return account.enabled end,
-                function()
-                  Data:SetAccountEnabled(account.id, not account.enabled)
-                  if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
-                  self:Render()
-                  return MenuResponse.Refresh
-                end
-              )
-
-              if accountRow.SetIcon then
-                accountRow:SetIcon(Constants.media.IconAccount)
-              end
-              if isMainAccount then
-                accountRow:AddInitializer(function(button, description)
-                  RegisterSyncTutorialMenuTarget("mainAccount", button, description)
-                end)
-              end
-
-              accountRow:CreateButton("Rename or Delete WoW Account", function()
-                StaticPopup_Show("ALTEREGO_RENAME_ACCOUNT", account.name, nil, account)
-              end)
-
-              if Data.GetMainAccountId and Data.SetMainAccount then
-                -- "Main" toggle -- marks which WoW Account this installation
-                -- actually plays. Once set: Sync only ever SENDS characters
-                -- filed under it, and never lets incoming sync data overwrite
-                -- characters already filed under it (see Comm.lua). Only one
-                -- account can be Main -- setting a new one clears the
-                -- previous (Data:SetMainAccount already enforces this in the
-                -- saved data, so there's nothing extra to keep in sync here).
-                -- No MenuResponse.Refresh here on purpose -- closes the whole
-                -- Accounts & Characters menu on click (same default behavior
-                -- as "Rename or Delete WoW Account"/"Remove character" above),
-                -- instead of staying open needing a manual close afterward.
-                local mainToggleButton = accountRow:CreateButton(
-                  isMainAccount and "Unset as Main WoW Account" or "Set as Main WoW Account",
-                  function()
-                    if isMainAccount then
-                      if TableCount(Data.db.global.accounts) <= 1 then
-                        StaticPopup_Show("ALTEREGO_MAIN_ACCOUNT_REQUIRED")
-                        return
-                      end
-                      Data:SetMainAccount(nil)
-                      if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
-                      self:Render()
-                      return
-                    end
-
-                    local currentMainId = Data:GetMainAccountId()
-                    if currentMainId and currentMainId ~= account.id then
-                      local currentMain = Data.db.global.accounts[currentMainId]
-                      StaticPopup_Show(
-                        "ALTEREGO_CONFIRM_CHANGE_MAIN_ACCOUNT",
-                        (currentMain and currentMain.name) or "The current Main WoW Account",
-                        account.name,
-                        account
-                      )
-                      return
-                    end
-
-                    Data:SetMainAccount(account.id)
-                    if addon.Core.AnnounceSyncPresence then addon.Core:AnnounceSyncPresence() end
-                    self:Render()
-                  end
-                )
-                mainToggleButton:SetTooltip(function(tooltip, elm)
-                  tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-                  if isMainAccount then
-                    tooltip:AddLine("Sync only sends characters from here, and never lets incoming sync data overwrite them.", nil, nil, nil, true)
-                  else
-                    tooltip:AddLine("Marks this as the account this installation actually plays. Sync will only send characters filed here, and will protect them from being overwritten by incoming sync data.", nil, nil, nil, true)
-                  end
-                end)
-              end
-
-              -- Expanding the row (hover arrow, same mechanism "Remove character"
-              -- already uses today) opens this account's own character list.
-              local accountCharacters = Data:GetCharactersByAccount(account.id, true)
-              TableForEach(accountCharacters, function(char)
-                addCharacterRow(accountRow, char)
-              end)
-            end)
-
-            rootMenu:CreateDivider()
-            rootMenu:CreateButton("+ Add WoW Account", function()
-              Data:CreateAccount()
-              self:Render()
-            end)
-          end,
+          onMenu = openCharactersMenu,
           iconSize = 18,
         },
         {
@@ -4557,30 +4874,7 @@ function Module:RenderNow()
           icon = Constants.media.IconSorting,
           tooltipTitle = "Sorting",
           tooltipDescription = "Sort your characters.",
-          onMenu = function(_, rootMenu)
-            for _, option in ipairs(Constants.sortingOptions) do
-              local button = rootMenu:CreateRadio(
-                option.text,
-                function(value) return Data.db.global.sorting == value end,
-                function(value)
-                  Data.db.global.sorting = value
-                  self:Render()
-                  return MenuResponse.Refresh
-                end,
-                option.value
-              )
-              if option.tooltipTitle or option.tooltipText then
-                button:SetTooltip(function(tooltip)
-                  if option.tooltipTitle then
-                    tooltip:AddLine(option.tooltipTitle, 1, 1, 1, true)
-                  end
-                  if option.tooltipText then
-                    tooltip:AddLine(option.tooltipText, nil, nil, nil, true)
-                  end
-                end)
-              end
-            end
-          end,
+          onMenu = openSortingMenu,
           iconSize = 16,
         },
         {
@@ -4588,108 +4882,7 @@ function Module:RenderNow()
           icon = Constants.media.IconAnnounce,
           tooltipTitle = "Announcements",
           tooltipDescription = "Sharing is caring.",
-          onMenu = function(window, menu)
-            menu:CreateTitle("Announce Current Keystones")
-            local sendToParty = menu:CreateButton(
-              "Send to Party Chat",
-              function()
-                if not IsInGroup() then
-                  addon.Core:Print("You are not in a party.")
-                  return
-                end
-                addon.Core:AnnounceKeystones("PARTY")
-              end
-            )
-            sendToParty:SetEnabled(IsInGroup())
-            sendToParty:SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Announce all your keystones to the party chat.", nil, nil, nil, true)
-              if not IsInGroup() then
-                tooltip:AddLine(" ")
-                tooltip:AddLine("You are not in a party.", 1, 0, 0, true)
-              end
-            end)
-            local sendToGuild = menu:CreateButton(
-              "Send to Guild Chat",
-              function()
-                if not IsInGuild() then
-                  addon.Core:Print("You are not in a guild.")
-                  return
-                end
-                addon.Core:AnnounceKeystones("GUILD")
-              end
-            )
-            sendToGuild:SetEnabled(IsInGuild())
-            sendToGuild:SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Announce all your keystones to the guild chat.", nil, nil, nil, true)
-              if not IsInGuild() then
-                tooltip:AddLine(" ")
-                tooltip:AddLine("You are not in a guild.", 1, 0, 0, true)
-              end
-            end)
-            menu:CreateTitle(OPTIONS)
-            ---@type ElementMenuDescriptionProxy
-            local withCharacterNames
-            local withMultipleMessages = menu:CreateCheckbox(
-              "Multiple chat messages",
-              function() return Data.db.global.announceKeystones.multiline end,
-              function()
-                Data.db.global.announceKeystones.multiline = not Data.db.global.announceKeystones.multiline
-                withCharacterNames:SetEnabled(Data.db.global.announceKeystones.multiline)
-                return MenuResponse.Refresh
-              end
-            )
-            withCharacterNames = menu:CreateCheckbox(
-              "Include character names",
-              function() return Data.db.global.announceKeystones.multilineNames end,
-              function()
-                Data.db.global.announceKeystones.multilineNames = not Data.db.global.announceKeystones.multilineNames
-                return MenuResponse.Refresh
-              end
-            )
-            withMultipleMessages:SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Announce keystones with multiple chat messages.", nil, nil, nil, true)
-              tooltip:AddLine(" ")
-              tooltip:AddLine("|cffff0000Warning: |rIf you have a lot of characters it could get spammy and the messages may get blocked.", nil, nil, nil, true)
-            end)
-            withCharacterNames:SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Add character names before each keystone.", nil, nil, nil, true)
-              if not Data.db.global.announceKeystones.multiline then
-                tooltip:AddLine(" ")
-                tooltip:AddLine("Multiple chat messages must be enabled.", 1, 0, 0, true)
-              end
-            end)
-            withCharacterNames:SetEnabled(Data.db.global.announceKeystones.multiline)
-            menu:CreateDivider()
-            menu:CreateTitle("Automatic Announcements")
-            menu:CreateCheckbox(
-              "Announce instance resets",
-              function() return Data.db.global.announceResets end,
-              function()
-                Data.db.global.announceResets = not Data.db.global.announceResets
-                self:Render()
-                return MenuResponse.Refresh
-              end
-            ):SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Let others in your group know when you've reset the instances.", nil, nil, nil, true)
-            end)
-            menu:CreateCheckbox(
-              "Announce new keystones (Party)",
-              function() return Data.db.global.announceKeystones.autoParty end,
-              function()
-                Data.db.global.announceKeystones.autoParty = not Data.db.global.announceKeystones.autoParty
-                self:Render()
-                return MenuResponse.Refresh
-              end
-            ):SetTooltip(function(tooltip, elm)
-              tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
-              tooltip:AddLine("Announce to your party when you loot a new keystone.", nil, nil, nil, true)
-            end)
-          end,
+          onMenu = openAnnounceMenu,
           iconSize = 12,
         },
         {
@@ -4697,9 +4890,7 @@ function Module:RenderNow()
           icon = Constants.media.IconKeyhole,
           tooltipTitle = DELVES_GREAT_VAULT_LABEL,
           tooltipDescription = WEEKLY_REWARDS_ADD_ITEMS .. "\n\n" .. GREEN_FONT_COLOR:WrapTextInColorCode(format("<%s>", WEEKLY_REWARDS_CLICK_TO_PREVIEW_INSTRUCTIONS)),
-          onClick = function()
-            addon.Core:ToggleVault()
-          end,
+          onClick = openGreatVault,
           iconSize = 13,
         },
         {
@@ -4714,22 +4905,28 @@ function Module:RenderNow()
         },
       },
     }
-    self.window = LiqUI:NewElement("Window", windowOptions)
+    ---@type AE_MainWindow
+    local mainWindow = LiqUI:NewElement("Window", windowOptions)
+    self.window = mainWindow
     local sidebarWidth = Constants.sizes.sidebar.width
-    self.window.body.sidebar = CreateFrame("Frame", "$parentSidebar", self.window.body)
-    self.window.body.sidebar:SetPoint("TOPLEFT", self.window.body, "TOPLEFT")
-    self.window.body.sidebar:SetPoint("BOTTOMLEFT", self.window.body, "BOTTOMLEFT")
-    self.window.body.sidebar:SetWidth(sidebarWidth)
-    SetBackgroundColor(self.window.body.sidebar, 0, 0, 0, 0.3)
-    self.window.body.content = CreateFrame("Frame", "$parentContent", self.window.body)
-    self.window.body.content:SetPoint("TOPLEFT", self.window.body.sidebar, "TOPRIGHT")
-    self.window.body.content:SetPoint("BOTTOMRIGHT", self.window.body, "BOTTOMRIGHT")
-    self.window.body.content.scrollArea = CreateScrollArea(self.window.body.content, {
+    ---@type AE_MainSidebar
+    local sidebar = CreateFrame("Frame", "$parentSidebar", mainWindow.body)
+    sidebar:SetPoint("TOPLEFT", mainWindow.body, "TOPLEFT")
+    sidebar:SetPoint("BOTTOMLEFT", mainWindow.body, "BOTTOMLEFT")
+    sidebar:SetWidth(sidebarWidth)
+    SetBackgroundColor(sidebar, 0, 0, 0, 0.3)
+    mainWindow.body.sidebar = sidebar
+    ---@type AE_MainContent
+    local content = CreateFrame("Frame", "$parentContent", mainWindow.body)
+    content:SetPoint("TOPLEFT", sidebar, "TOPRIGHT")
+    content:SetPoint("BOTTOMRIGHT", mainWindow.body, "BOTTOMRIGHT")
+    content.scrollArea = CreateScrollArea(content, {
       horizontal = true,
       hideHorizontalScrollBar = true,
       name = "$parentCharacterScroll",
     })
-    self.window.body.content.scrollArea:SetAllPoints()
+    mainWindow.body.content = content
+    content.scrollArea:SetAllPoints()
     -- WowScrollBox clips its rendering, but explicitly clip every layer of the
     -- character viewport as well so off-screen columns never leak outside the
     -- visible Main-window character area.
@@ -4865,6 +5062,7 @@ function Module:RenderNow()
   local weeklyAffixesModule = addon.Core:GetModule("WeeklyAffixes", true)
   local dailyDelvesModule = addon.Core:GetModule("DailyDelves", true)
 
+  ---@type Frame
   local scrollContent = self.window.body.content.scrollArea.content
   local sidebarCollapsed = mainWindowSettings.sidebarCollapsed == true
 
@@ -6198,6 +6396,7 @@ function Module:RenderNow()
           local overallScore
           local inTimeInfo
           local overTimeInfo
+          ---@type AE_CharacterAffixScoreInfo?
           local bestAffixScore
           local level = "-"
           local color = HIGHLIGHT_FONT_COLOR
@@ -6219,8 +6418,12 @@ function Module:RenderNow()
             end
 
             if affixScores then
-              TableForEach(affixScores, function(affixScore)
-                if not bestAffixScore or affixScore.score > bestAffixScore.score then
+              TableForEach(characterDungeon.affixScores, function(affixScore)
+                if not bestAffixScore then
+                  bestAffixScore = affixScore
+                  return
+                end
+                if affixScore.score > bestAffixScore.score then
                   bestAffixScore = affixScore
                 end
               end)

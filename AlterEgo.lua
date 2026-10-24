@@ -54,41 +54,45 @@ function Core:OnInitialize()
     end
   end
 
+  local function onLauncherClick(_, mouseButton)
+    local isShiftKeyDown = IsLeftShiftKeyDown() or IsRightShiftKeyDown()
+    if mouseButton then
+      if mouseButton == "LeftButton" and isShiftKeyDown then
+        self:ToggleEquipment()
+      elseif mouseButton == "RightButton" and isShiftKeyDown then
+        self:ToggleVault()
+      elseif mouseButton == "MiddleButton" then
+        self:ToggleRaidLockouts()
+      elseif mouseButton == "RightButton" then
+        openCurrentBonusRoll()
+      else
+        self:ToggleWindow()
+      end
+    else
+      self:ToggleWindow()
+    end
+  end
+
+  local function showLauncherTooltip(tooltip)
+    tooltip:SetText(addon.title, 1, 1, 1)
+    tooltip:AddLine("|cff00ff00Left click|r to open AlterEgo.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+    tooltip:AddLine("|cff00ff00Right click|r to open Bonus Roll.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+    tooltip:AddLine("|cff00ff00Middle click|r to open Raid Group Lockouts.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+    tooltip:AddLine("|cff00ff00Shift+Left click|r to open your character equipment.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+    tooltip:AddLine("|cff00ff00Shift+Right click|r to open the Great Vault.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+    local dragText = "|cff00ff00Drag|r to move this icon"
+    if Data.db.global.minimap.lock then
+      dragText = dragText .. " |cffff0000(locked)|r"
+    end
+    tooltip:AddLine(dragText .. ".", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+  end
+
   local libDataObject = {
     label = addon.title,
     type = "launcher",
     icon = addon.Constants.media.Logo,
-    OnClick = function(_, mouseButton)
-      local isShiftKeyDown = IsLeftShiftKeyDown() or IsRightShiftKeyDown()
-      if mouseButton then
-        if mouseButton == "LeftButton" and isShiftKeyDown then
-          self:ToggleEquipment()
-        elseif mouseButton == "RightButton" and isShiftKeyDown then
-          self:ToggleVault()
-        elseif mouseButton == "MiddleButton" then
-          self:ToggleRaidLockouts()
-        elseif mouseButton == "RightButton" then
-          openCurrentBonusRoll()
-        else
-          self:ToggleWindow()
-        end
-      else
-        self:ToggleWindow()
-      end
-    end,
-    OnTooltipShow = function(tooltip)
-      tooltip:SetText(addon.title, 1, 1, 1)
-      tooltip:AddLine("|cff00ff00Left click|r to open AlterEgo.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-      tooltip:AddLine("|cff00ff00Right click|r to open Bonus Roll.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-      tooltip:AddLine("|cff00ff00Middle click|r to open Raid Group Lockouts.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-      tooltip:AddLine("|cff00ff00Shift+Left click|r to open your character equipment.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-      tooltip:AddLine("|cff00ff00Shift+Right click|r to open the Great Vault.", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-      local dragText = "|cff00ff00Drag|r to move this icon"
-      if Data.db.global.minimap.lock then
-        dragText = dragText .. " |cffff0000(locked)|r"
-      end
-      tooltip:AddLine(dragText .. ".", NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-    end,
+    OnClick = onLauncherClick,
+    OnTooltipShow = showLauncherTooltip,
   }
 
   LibDataBroker:NewDataObject(addon.name, libDataObject)
@@ -234,6 +238,17 @@ function Core:QueueAllUpdates()
   }) do
     self:QueueUpdate(name)
   end
+end
+
+---@param _frame Frame
+---@param _event string
+---@param _restrictionType Enum.AddOnRestrictionType
+---@param state Enum.AddOnRestrictionState
+local function onAddonRestrictionStateChanged(_frame, _event, _restrictionType, state)
+  if state ~= Enum.AddOnRestrictionState.Inactive then
+    return
+  end
+  Data:FlushPendingKeystoneAnnounce()
 end
 
 ---Register event handlers for game data updates
@@ -433,14 +448,14 @@ function Core:OnEnable()
     end,
     true
   )
+  Events:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED", onAddonRestrictionStateChanged, true)
   Events:RegisterEvent(
     {
-      "ADDON_RESTRICTION_STATE_CHANGED",
       "PLAYER_INTERACTION_MANAGER_FRAME_HIDE",
       "PLAYER_REGEN_ENABLED",
     },
-    function(_, event, ...)
-      self:OnPendingKeystoneAnnounceEvent(event, select(2, ...))
+    function()
+      Data:FlushPendingKeystoneAnnounce()
     end,
     true
   )
@@ -461,15 +476,6 @@ function Core:OnGetItemInfoReceived(itemID, success)
     return
   end
   self:QueueUpdate("UpdateCurrencies")
-end
-
----@param event string
----@param state Enum.AddOnRestrictionState|nil
-function Core:OnPendingKeystoneAnnounceEvent(event, state)
-  if event == "ADDON_RESTRICTION_STATE_CHANGED" and state ~= Enum.AddOnRestrictionState.Inactive then
-    return
-  end
-  Data:FlushPendingKeystoneAnnounce()
 end
 
 ---Request game data from the API
@@ -539,6 +545,7 @@ function Core:OnChatMessageSystem(_, msg)
   if not groupChannel or not Data.db.global.announceResets or IsInInstance() or not UnitIsGroupLeader("player") then
     return
   end
+  ---@type string[]
   local resetPatterns = {INSTANCE_RESET_SUCCESS, INSTANCE_RESET_FAILED, INSTANCE_RESET_FAILED_OFFLINE, INSTANCE_RESET_FAILED_ZONING}
   TableForEach(resetPatterns, function(resetPattern)
     if msg:match("^" .. resetPattern:gsub("%%s", ".+") .. "$") then
