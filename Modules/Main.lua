@@ -2561,6 +2561,10 @@ local function EnsureRowHighlightPoller(window)
     elapsed = elapsed + dt
     if elapsed < 0.05 then return end
     elapsed = 0
+    if not window:IsMouseOver() then
+      Module:HideRowHighlight()
+      return
+    end
 
     local hovered = nil
     local scrollArea = window.body and window.body.content and window.body.content.scrollArea

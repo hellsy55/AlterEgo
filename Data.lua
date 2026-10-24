@@ -127,7 +127,12 @@ Data.defaultDB = {
         },
         Affixes = {},
         DailyDelves = {},
-        Equipment = {showSecondaryStats = false},
+        Equipment = {
+          showSecondaryStats = false,
+          showTierSetAsterisk = false,
+          showLowItemLevelAsterisk = false,
+          separateSortByCharacter = false,
+        },
         VaultPreview = {},
         RaidLockouts = {},
         BonusRoll = {},
@@ -2231,14 +2236,32 @@ function Data:UpdateLabyrinthProgress()
   end
 end
 
+---Compare persisted snapshots without relying on freshly allocated table identity.
+---Used for Prey quest flags, currencies and equipment to avoid redundant Sync revisions.
+local function SavedSnapshotEqual(a, b)
+  if a == b then return true end
+  if type(a) ~= type(b) then return false end
+  if type(a) ~= "table" then return false end
+  for key, value in pairs(a) do
+    if not SavedSnapshotEqual(value, b[key]) then return false end
+  end
+  for key in pairs(b) do
+    if a[key] == nil then return false end
+  end
+  return true
+end
+
 function Data:UpdatePreyProgress()
   local character = self:GetCharacter()
   if not character then return end
   character.prey = character.prey or {}
-  character.prey.questsCompleted = wipe(character.prey.questsCompleted or {})
+  local previousQuests = character.prey.questsCompleted
+  local questsCompleted = {}
   TableForEach(self.preyQuests, function(quest)
-    character.prey.questsCompleted[quest.questID] = C_QuestLog.IsQuestFlaggedCompleted(quest.questID)
+    questsCompleted[quest.questID] = C_QuestLog.IsQuestFlaggedCompleted(quest.questID)
   end)
+  local questsChanged = not SavedSnapshotEqual(previousQuests or {}, questsCompleted)
+  character.prey.questsCompleted = questsChanged and questsCompleted or (previousQuests or questsCompleted)
 
   -- Some hunts accelerated by soul items advance the Nightmare weekly
   -- objective without flagging the individual Prey quest as completed.
@@ -2258,8 +2281,8 @@ function Data:UpdatePreyProgress()
     end
   end
   character.prey.nightmareWeeklyProgress = math.max(previousProgress, weeklyProgress)
-  self:MarkCharacterSyncChanged(character)
-  if character.prey.nightmareWeeklyProgress ~= previousProgress then
+  if questsChanged or character.prey.nightmareWeeklyProgress ~= previousProgress then
+    self:MarkCharacterSyncChanged(character)
     addon.Core:Render()
   end
 end
@@ -2440,22 +2463,6 @@ function Data:UpdateMoney()
   end
 end
 
----Compare the currency snapshots that are actually saved/synced, including
----weekly counters and tracked-item quantities. API lookups return fresh tables
----even when nothing changed, so table identity is not meaningful here.
-local function CurrencySnapshotEqual(a, b)
-  if a == b then return true end
-  if type(a) ~= type(b) then return false end
-  if type(a) ~= "table" then return false end
-  for key, value in pairs(a) do
-    if not CurrencySnapshotEqual(value, b[key]) then return false end
-  end
-  for key in pairs(b) do
-    if a[key] == nil then return false end
-  end
-  return true
-end
-
 ---Refresh currencies from the API
 function Data:UpdateCurrencies()
   local character = self:GetCharacter()
@@ -2605,7 +2612,7 @@ function Data:UpdateCurrencies()
   -- Avoid a new Sync revision and network broadcast on every harmless
   -- CURRENCY_DISPLAY_UPDATE or item event. Preserve the previous snapshot
   -- object when equal, including its existing metadata.
-  if CurrencySnapshotEqual(oldCurrencies, character.currencies) then
+  if SavedSnapshotEqual(oldCurrencies, character.currencies) then
     character.currencies = oldCurrencies
     if oldTrackingVersion == character.alterEgoTrackingVersion
       and oldKillResetAt == (character.labyrinth and character.labyrinth.killResetAt) then
@@ -3087,9 +3094,19 @@ end
 function Data:UpdateEquipment()
   local character = self:GetCharacter()
   if not character then return end
+  -- The core update queue can request a scan independently of Equipment's
+  -- inventory-event handler. Preserve the last snapshot during combat and
+  -- let the module refresh it on PLAYER_REGEN_ENABLED.
+  if InCombatLockdown and InCombatLockdown() then
+    if addon.Module_Equipment then
+      addon.Module_Equipment.equipmentRefreshAfterCombat = true
+    end
+    return false
+  end
 
-  self:UpdateSecondaryStats()
-  character.equipment = wipe(character.equipment or {})
+  local statsChanged = self:UpdateSecondaryStats()
+  local previousEquipment = character.equipment
+  local equipmentSnapshot = {}
 
   local upgradePattern = ITEM_UPGRADE_TOOLTIP_FORMAT_STRING
   upgradePattern = upgradePattern:gsub("%%d", "%%s")
@@ -3195,9 +3212,15 @@ function Data:UpdateEquipment()
       itemSlotID = slot.id,
       itemSlotName = slot.token,
     }
-    table.insert(character.equipment, equipment)
+    table.insert(equipmentSnapshot, equipment)
   end)
+  if SavedSnapshotEqual(previousEquipment or {}, equipmentSnapshot) then
+    character.equipment = previousEquipment or equipmentSnapshot
+    return statsChanged
+  end
+  character.equipment = equipmentSnapshot
   self:MarkCharacterSyncChanged(character)
+  return true
 end
 
 local function isKeystoneAnnounceBlocked()

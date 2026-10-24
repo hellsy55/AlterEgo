@@ -466,6 +466,17 @@ function Module:RequestGroupState()
   self:RefreshWindow()
 end
 
+-- A full raid can return dozens of status records within a few frames.
+-- Rebuild the visible roster once per short window, not once per reply.
+function Module:QueueWindowRefresh()
+  if not self.window or not self.window:IsVisible() or self.windowRefreshQueued then return end
+  self.windowRefreshQueued = true
+  C_Timer.After(0.1, function()
+    self.windowRefreshQueued = false
+    self:RefreshWindow()
+  end)
+end
+
 function Module:OnRaidLockoutComm(prefix, message, distribution, sender)
   if prefix ~= COMM_PREFIX or distribution ~= "RAID" then return end
   if type(message) ~= "string" or message == "" then return end
@@ -520,7 +531,7 @@ function Module:OnRaidLockoutComm(prefix, message, distribution, sender)
     receivedAt = time(),
     addonVersion = version,
   }
-  self:RefreshWindow()
+  self:QueueWindowRefresh()
 end
 
 local function setFrameBackground(frame, r, g, b, a)
@@ -1505,23 +1516,25 @@ function Module:OnEnable()
   end, true)
 
   addon.Libs.LiqUI.Events:RegisterEvent("GROUP_ROSTER_UPDATE", function()
-    if Module.window and Module.window:IsVisible() then
-      C_Timer.After(0.5, function()
+    if not Module.window or not Module.window:IsVisible() or Module.rosterRefreshQueued then return end
+    Module.rosterRefreshQueued = true
+    C_Timer.After(0.5, function()
+      Module.rosterRefreshQueued = false
+      if Module.window and Module.window:IsVisible() then
         Module:RequestGroupState()
-        Module:RefreshWindow()
-      end)
-    end
+      end
+    end)
   end, true)
 
   addon.Libs.LiqUI.Events:RegisterEvent("UNIT_CONNECTION", function()
-    Module:RefreshWindow()
+    Module:QueueWindowRefresh()
   end, true)
 
   addon.Libs.LiqUI.Events:RegisterEvent("UPDATE_INSTANCE_INFO", function()
-    Module:RefreshWindow()
+    Module:QueueWindowRefresh()
     -- Data updates its saved-instance snapshot from this event as well. Paint
     -- once more after the handlers settle so the window cannot keep stale data.
-    C_Timer.After(0.3, function() Module:RefreshWindow() end)
+    C_Timer.After(0.3, function() Module:QueueWindowRefresh() end)
   end, true)
 
   addon.Libs.LiqUI.Events:RegisterEvent("BOSS_KILL", function()

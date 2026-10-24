@@ -14,6 +14,70 @@ local TableForEach = LiqUI.Utils.TableForEach
 local EQUIPMENT_HEADER_HEIGHT = 30
 local CRAFTED_QUALITY_MAX = 5
 
+-- The LiqUI table has a single visual instance. Preserve its shared sort state
+-- unless per-character sorting is explicitly enabled in Equipment settings.
+local EQUIPMENT_SORT_COLUMNS = {
+  slot = true, item = true, ilevel = true, upgrade = true,
+  embellishment = true, enchant = true, gems = true,
+}
+
+local function getEquipmentSortState(character, perCharacter)
+  local liqui = Data.db.global.liqui
+  if perCharacter and character and type(character.GUID) == "string" then
+    local characterStates = liqui.windows.Equipment.characterSortStates
+    if type(characterStates) == "table" and type(characterStates[character.GUID]) == "table" then
+      return characterStates[character.GUID]
+    end
+  end
+  return liqui.tables.Equipment.sortState
+end
+
+local function normalizeEquipmentSortState(state)
+  if type(state) == "table" and EQUIPMENT_SORT_COLUMNS[state.columnId]
+    and (state.direction == "asc" or state.direction == "desc") then
+    return state.columnId, state.direction
+  end
+  return nil, nil
+end
+
+function Module:SaveEquipmentSortState(state)
+  local liqui = Data.db.global.liqui
+  local settings = liqui.windows.Equipment
+  local columnId, direction = normalizeEquipmentSortState(state)
+  local character = self.equipmentCharacter
+  if settings.separateSortByCharacter == true and character
+    and type(character.GUID) == "string" then
+    if type(settings.characterSortStates) ~= "table" then
+      settings.characterSortStates = {}
+    end
+    -- Keep a record for an explicit right-click reset instead of treating it
+    -- as a character that has never selected a sort order.
+    settings.characterSortStates[character.GUID] = {
+      columnId = columnId or false,
+      direction = direction or false,
+    }
+  else
+    -- Do not let a shared SavedVariables table alias the mutable LiqUI state.
+    liqui.tables.Equipment.sortState = {columnId = columnId, direction = direction}
+  end
+end
+
+function Module:RestoreEquipmentSortState(character)
+  if not self.dataTable then return end
+  local perCharacter = Data.db.global.liqui.windows.Equipment.separateSortByCharacter == true
+  local saved = getEquipmentSortState(character, perCharacter)
+  local columnId, direction = normalizeEquipmentSortState(saved)
+  local state = self.dataTable.sortState
+  if state.columnId == columnId and state.direction == direction then
+    return
+  end
+  -- Render calls SetData below, which sorts and redraws the table. Assign the
+  -- state first to avoid an extra sort/render of the previous character's rows.
+  -- Rechecking the persisted state also handles settings received from peers.
+  state.columnId = columnId
+  state.direction = direction
+end
+
 -- Item sets can also include non-tier equipment. Restrict the indicator to
 -- the five armor slots used by class tier sets; the set ID is saved per alt.
 local TIER_SET_SLOTS = {
@@ -82,7 +146,7 @@ end
 
 ---@param tableFrame table
 ---@param rows LiqUI_TableData
-local function sizeEquipmentColumnsToContent(tableFrame, rows)
+local function sizeEquipmentColumnsToContent(tableFrame, rows, showTierSetAsterisk)
   if not tableFrame or not tableFrame.options or not tableFrame.options.columns then
     return
   end
@@ -110,7 +174,7 @@ local function sizeEquipmentColumnsToContent(tableFrame, rows)
             itemName = itemID and C_Item.GetItemNameByID(itemID) or tostring(cell.data)
           end
           local displayedName = "[" .. itemName .. "]"
-          if isTierSetPiece(row.item) then
+          if showTierSetAsterisk and isTierSetPiece(row.item) then
             displayedName = displayedName .. " *"
           end
           measuredWidth = measureEquipmentColumnText(displayedName, "GameFontHighlightSmall") + 20
@@ -132,6 +196,39 @@ local function sizeEquipmentColumnsToContent(tableFrame, rows)
   fitColumn(4) -- Upgrade Level
   fitColumn(6) -- Enchant
   fitColumn(7) -- Gems
+end
+
+-- Keep the iLevel number exactly centered; the optional marker is separate
+-- so it cannot shift the text when the column uses CENTER alignment.
+---@param tableFrame LiqUI_TableInstance
+local function updateEquipmentItemLevelMarkers(tableFrame)
+  local itemLevelColumn = tableFrame:getColumnById("ilevel")
+  for rowIndex, row in ipairs(tableFrame.data) do
+    local rowFrame = tableFrame.rowFrames[rowIndex]
+    if rowFrame then
+      -- Cells are reused when sorting or hiding columns, so hide the previous
+      -- marker before positioning it against the currently active iLevel cell.
+      if rowFrame.itemLevelMarker then
+        rowFrame.itemLevelMarker:Hide()
+      end
+
+      local cellFrame = itemLevelColumn and rowFrame.cells[itemLevelColumn]
+      if row.showLowItemLevelAsterisk and cellFrame and cellFrame.label then
+        local marker = cellFrame.itemLevelMarker
+        if not marker then
+          marker = cellFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+          marker:SetWordWrap(false)
+          marker:SetText(WHITE_FONT_COLOR:WrapTextInColorCode("*"))
+          cellFrame.itemLevelMarker = marker
+        end
+        marker:ClearAllPoints()
+        marker:SetPoint("LEFT", cellFrame.label, "CENTER",
+          (cellFrame.label:GetStringWidth() or 0) / 2 + 3, 0)
+        marker:Show()
+        rowFrame.itemLevelMarker = marker
+      end
+    end
+  end
 end
 
 ---@param itemLink string?
@@ -242,7 +339,7 @@ local function colorUpgradeLevelText(text, complete, muted)
 end
 
 -- Match BetterUpgradeTooltip's Midnight upgrade-track colors while keeping
--- the numeric rank separate: incomplete ranks stay white and the max rank is green.
+-- the numeric rank separate: incomplete ranks stay white and ranks at or above max are green.
 local UPGRADE_TRACK_COLORS = {
   Adventurer = WHITE_FONT_COLOR,
   Veteran = UNCOMMON_GREEN_COLOR,
@@ -321,7 +418,7 @@ local function formatUpgradeTrackLabel(trackName, level, maxLevel, muted, crafte
 
   local trackColor = UPGRADE_TRACK_COLORS[trackName]
   local coloredTrack = trackColor and trackColor:WrapTextInColorCode(displayTrackName) or displayTrackName
-  local coloredRank = (level == maxLevel or isMythBonusRank) and GREEN_FONT_COLOR:WrapTextInColorCode(rankText) or rankText
+  local coloredRank = level >= maxLevel and GREEN_FONT_COLOR:WrapTextInColorCode(rankText) or rankText
 
   if eligibility and not ascendant then
     local starColor = eligibility == "ready" and RARE_BLUE_COLOR or RED_FONT_COLOR
@@ -649,11 +746,20 @@ end
 local EQUIPMENT_REFRESH_RETRY_DELAYS = {0.10, 0.35, 1.00}
 
 function Module:RefreshEquipment()
-  Data:UpdateEquipment()
-  self:Render()
+  if InCombatLockdown and InCombatLockdown() then
+    self.equipmentRefreshAfterCombat = true
+    return
+  end
+  if Data:UpdateEquipment() then
+    self:Render()
+  end
 end
 
 function Module:QueueEquipmentRefresh()
+  if InCombatLockdown and InCombatLockdown() then
+    self.equipmentRefreshAfterCombat = true
+    return
+  end
   -- Equipment/inventory events can fire before Blizzard has refreshed the item
   -- tooltip data that contains permanent enchant information. Refresh once
   -- immediately, then retry quickly so an already-active enchant does not sit
@@ -681,6 +787,12 @@ function Module:OnEnable()
   end
   addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_EQUIPMENT_CHANGED", onEquipmentChanged)
   addon.Libs.LiqUI.Events:RegisterEvent("UNIT_INVENTORY_CHANGED", onEquipmentChanged, nil, "player")
+  addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+    if self.equipmentRefreshAfterCombat then
+      self.equipmentRefreshAfterCombat = false
+      self:QueueEquipmentRefresh()
+    end
+  end, true)
 
   -- Keep snapshots current after buffs/spec changes, but never overwrite a
   -- good snapshot with secret combat values. The shared event bucket coalesces
@@ -749,6 +861,42 @@ function Module:Render()
           tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
           tooltip:AddLine("Show the saved Critical Strike, Haste, Mastery and Versatility ratings and percentages in this window's title.", nil, nil, nil, true)
         end)
+        menu:CreateCheckbox(
+          "Show tier-set item markers",
+          function() return windows.Equipment.showTierSetAsterisk == true end,
+          function()
+            windows.Equipment.showTierSetAsterisk = not (windows.Equipment.showTierSetAsterisk == true)
+            Module:Render()
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Show a white asterisk after tier-set item names in the Equipment window.", nil, nil, nil, true)
+        end)
+        menu:CreateCheckbox(
+          "Enable Hero of the Mist Item Level Check",
+          function() return windows.Equipment.showLowItemLevelAsterisk == true end,
+          function()
+            windows.Equipment.showLowItemLevelAsterisk = not (windows.Equipment.showLowItemLevelAsterisk == true)
+            Module:Render()
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Show a white asterisk after the item level of equipment below 321 iLevel.", nil, nil, nil, true)
+        end)
+        menu:CreateCheckbox(
+          "Use separate sorting for each character",
+          function() return windows.Equipment.separateSortByCharacter == true end,
+          function()
+            windows.Equipment.separateSortByCharacter = not (windows.Equipment.separateSortByCharacter == true)
+            Module:Render()
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Remember a different Equipment column and sort direction for each character. When disabled, all characters use the shared sorting order.", nil, nil, nil, true)
+        end)
       end,
     }
     self.window = LiqUI:NewElement("Window", windowOptions)
@@ -771,9 +919,13 @@ function Module:Render()
         enabled = true,
         defaultOrder = "asc",
         defaultCompare = compareEquipmentSlotColumn,
+        onStateChanged = function(state)
+          Module:SaveEquipmentSortState(state)
+        end,
       },
     }
     self.dataTable = LiqUI:NewElement("Table", tableOptions)
+    hooksecurefunc(self.dataTable, "Render", updateEquipmentItemLevelMarkers)
     self.dataTable:SetParent(self.window.body)
     self.dataTable:SetPoint("TOPLEFT", self.window.body, "TOPLEFT", 0, 0)
     self.dataTable:SetPoint("BOTTOMRIGHT", self.window.body, "BOTTOMRIGHT", 0, 0)
@@ -797,9 +949,13 @@ function Module:Render()
     window:Hide()
     return
   end
+  self:RestoreEquipmentSortState(character)
 
   ---@type LiqUI_TableData
   local rows = {}
+  local equipmentSettings = Data.db.global.liqui.windows.Equipment
+  local showTierSetAsterisk = equipmentSettings.showTierSetAsterisk == true
+  local showLowItemLevelAsterisk = equipmentSettings.showLowItemLevelAsterisk == true
 
   local isCurrentCharacter = character.GUID == UnitGUID("player")
   local tooltipDataBySlot = {}
@@ -968,10 +1124,11 @@ function Module:Render()
     local enchantSort = enchantTooltip ~= "" and enchantTooltip or enchantText
     local gemCount = TableCount(socketTexts)
     local _, _, _, itemLevelColorCode = C_Item.GetItemQualityColor(item.itemQuality or Enum.ItemQuality.Common)
-
+    local itemLevelText = WrapTextInColorCode(tostring(floor(item.itemLevel)), itemLevelColorCode)
     ---@type AE_EquipmentTableRow
     local row = {
       item = item,
+      showLowItemLevelAsterisk = showLowItemLevelAsterisk and item.itemLevel < 321,
       upgradeSort = upgradeSort,
       embellishmentSort = embellishmentSort,
       enchantSort = enchantSort,
@@ -980,7 +1137,7 @@ function Module:Render()
         {data = _G[item.itemSlotName]},
         {
           data = "|T" .. item.itemTexture .. ":0|t " .. item.itemLink
-            .. (isTierSetPiece(item) and (" " .. WHITE_FONT_COLOR:WrapTextInColorCode("*")) or ""),
+            .. (showTierSetAsterisk and isTierSetPiece(item) and (" " .. WHITE_FONT_COLOR:WrapTextInColorCode("*")) or ""),
           onEnter = function(cellFrame)
             GameTooltip:SetOwner(cellFrame, "ANCHOR_RIGHT")
             GameTooltip:SetHyperlink(item.itemLink)
@@ -999,7 +1156,7 @@ function Module:Render()
             end
           end,
         },
-        {data = WrapTextInColorCode(tostring(floor(item.itemLevel)), itemLevelColorCode)},
+        {data = itemLevelText},
         {
           data = upgradeLevel,
           onEnter = function(cellFrame)
@@ -1112,7 +1269,7 @@ function Module:Render()
     statsText = formatSecondaryStatsTitle(character.secondaryStats)
   end
   self.window:SetTitle(format("%s%s (%s)%s%s%s", positionPrefix, nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText, embellishmentStatusText, statsText))
-  sizeEquipmentColumnsToContent(self.dataTable, rows)
+  sizeEquipmentColumnsToContent(self.dataTable, rows, showTierSetAsterisk)
   self.dataTable:SetData(rows)
   local bodyWidth, bodyHeight = self.dataTable:GetSize()
   local requiredWidth = bodyWidth > 0 and bodyWidth or tableWidth

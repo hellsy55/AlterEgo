@@ -76,6 +76,7 @@ local pendingSettingsShares = {}
 local pendingCombatSettings = {}
 
 local FingerprintCharacter
+local GetKnownCharacterFingerprint
 local SendSyncHello
 local ScheduleSyncHello
 local QueueCatchUpFromPeerVersions
@@ -379,7 +380,7 @@ local function SendCharacterRecord(character, password, channels, forced, batchI
     batchId = batchId,
     batchTotal = batchTotal,
     transmissionId = transmissionId,
-    fingerprint = FingerprintCharacter(character),
+    fingerprint = GetKnownCharacterFingerprint(character),
     bonusRollSourceID = Data.db.global.kithixBonusRollSourceID,
   }
 
@@ -540,14 +541,32 @@ end
 -- The receiver sometimes preserves fields that older versions omitted. Keep
 -- the original owner's hash separately so those protected fields don't cause
 -- endless equal-revision repair loops after reloads.
-local function GetKnownCharacterFingerprint(character)
+-- Fingerprints are expensive: they recursively sort and hash every character field.
+-- Locally owned snapshots advance syncRevision whenever syncable data changes, so
+-- reuse their hash within that revision. Received snapshots continue to use the
+-- persisted sender fingerprint below; no cached hash enters SavedVariables.
+local ownedFingerprintCache = {} -- [GUID] = {character, revision, hash}
+GetKnownCharacterFingerprint = function(character)
   if not character then return nil end
+  local revision = GetCharacterRevision(character)
   local sync = Data.db.global.sync
   local fingerprints = sync and sync.receivedFingerprints
   local saved = fingerprints and fingerprints[character.GUID]
-  if saved and not Data:IsCharacterSyncAuthoritative(character)
-    and saved.revision == GetCharacterRevision(character) and type(saved.hash) == "string" then
+  local authoritative = Data:IsCharacterSyncAuthoritative(character)
+  if saved and not authoritative
+    and saved.revision == revision and type(saved.hash) == "string" then
     return saved.hash
+  end
+  if authoritative and character.GUID then
+    local cached = ownedFingerprintCache[character.GUID]
+    if cached and cached.character == character and cached.revision == revision then
+      return cached.hash
+    end
+    local hash = FingerprintCharacter(character)
+    ownedFingerprintCache[character.GUID] = {
+      character = character, revision = revision, hash = hash,
+    }
+    return hash
   end
   return FingerprintCharacter(character)
 end
@@ -810,6 +829,14 @@ SendSyncHello = function(target, responseTo, requestId, force)
     return false
   end
 
+  -- Do not hash the entire roster when there is no usable broadcast
+  -- channel (the periodic heartbeat also runs while playing solo).
+  local channels
+  if not target then
+    channels = GetUsableChannels(false)
+    if #channels == 0 then return false end
+  end
+
   local payload = {
     password = password,
     hello = true,
@@ -827,8 +854,6 @@ SendSyncHello = function(target, responseTo, requestId, force)
     return true
   end
 
-  local channels = GetUsableChannels(false)
-  if #channels == 0 then return false end
   lastHelloAt = now
   for _, channel in ipairs(channels) do
     SendPayload(CONTROL_PREFIX, payload, channel, "NORMAL")
@@ -1291,7 +1316,12 @@ local function BuildSettingsPayload()
         showCharacterScrollArrows = mainWindow.showCharacterScrollArrows ~= false,
         collapsingRowLabelsDisplaysAllIcons = mainWindow.collapsingRowLabelsDisplaysAllIcons ~= false,
       },
-      Equipment = { showSecondaryStats = Data.db.global.liqui.windows.Equipment.showSecondaryStats == true },
+      Equipment = {
+        showSecondaryStats = Data.db.global.liqui.windows.Equipment.showSecondaryStats == true,
+        showTierSetAsterisk = Data.db.global.liqui.windows.Equipment.showTierSetAsterisk == true,
+        showLowItemLevelAsterisk = Data.db.global.liqui.windows.Equipment.showLowItemLevelAsterisk == true,
+        separateSortByCharacter = Data.db.global.liqui.windows.Equipment.separateSortByCharacter == true,
+      },
       RaidLockouts = {
         checkOnEntrance = Data.db.global.liqui.windows.RaidLockouts.checkOnEntrance == true,
         sortColumn = Data.db.global.liqui.windows.RaidLockouts.sortColumn or "status",
@@ -1376,8 +1406,13 @@ local function ApplySettingsPayload(settings)
     end
   end
   local equipmentSettings = type(sharedWindows) == "table" and sharedWindows.Equipment
-  if type(equipmentSettings) == "table" and type(equipmentSettings.showSecondaryStats) == "boolean" then
-    Data.db.global.liqui.windows.Equipment.showSecondaryStats = equipmentSettings.showSecondaryStats
+  if type(equipmentSettings) == "table" then
+    local equipmentLocal = Data.db.global.liqui.windows.Equipment
+    for _, key in ipairs({ "showSecondaryStats", "showTierSetAsterisk", "showLowItemLevelAsterisk", "separateSortByCharacter" }) do
+      if type(equipmentSettings[key]) == "boolean" then
+        equipmentLocal[key] = equipmentSettings[key]
+      end
+    end
   end
   local raidShared = type(sharedWindows) == "table" and sharedWindows.RaidLockouts
   if type(raidShared) == "table" then
@@ -1512,17 +1547,10 @@ local pendingCombatApplies = {} -- [GUID] = {character, isNew, acks = {...}}; co
 -- session-only. See where it's used in OnCommReceived for why.
 local warnedCorrupted = {}
 
--- Dedupes the EXACT same update arriving on more than one channel -- e.g.
--- Sync Channel set to "Both" sends the identical payload over GUILD and
--- PARTY at once, and both copies decode and reassemble independently
--- (different channels never share a reassembly slot, so neither gets
--- corrupted by the other -- see the header comment on batchInProgress in
--- the sending code). Without this, the SAME update would get applied and
--- Render()'d twice, and -- for a forced "Sync Now" push -- ack'd back to
--- the sender twice. Keyed by GUID + the character's own Sync revision,
--- so a genuinely NEWER update for the same character (a real, separate
--- change) is never mistaken for a duplicate.
-local processedUpdates = {}
+-- Only the most recently applied revision per GUID is needed to recognize
+-- the second copy of a record arriving over both GUILD and PARTY. Keeping
+-- GUID|revision strings forever caused unbounded growth in long sessions.
+local processedUpdates = {} -- [GUID] = last applied syncRevision
 
 ---Clear session-only Sync bookkeeping tied to a character that was explicitly
 ---removed from AlterEgo. Persistent lastSentRevision metadata is cleared by
@@ -1533,6 +1561,7 @@ function addon.Core:ForgetSyncCharacterMetadata(GUID)
 
   pendingCombatApplies[GUID] = nil
   catchupPendingGUIDs[GUID] = nil
+  ownedFingerprintCache[GUID] = nil
   local sync = Data.db.global.sync
   if sync and sync.receivedFingerprints then sync.receivedFingerprints[GUID] = nil end
   for transmissionId, confirmation in pairs(pendingConfirmations) do
@@ -1545,12 +1574,7 @@ function addon.Core:ForgetSyncCharacterMetadata(GUID)
     if peer.fingerprints then peer.fingerprints[GUID] = nil end
   end
 
-  local prefix = GUID .. "|"
-  for updateKey in pairs(processedUpdates) do
-    if string.sub(updateKey, 1, #prefix) == prefix then
-      processedUpdates[updateKey] = nil
-    end
-  end
+  processedUpdates[GUID] = nil
 end
 
 -- How long to wait, after the most recently-arrived character of an
@@ -1848,9 +1872,22 @@ end
 ---chat line, everything else would just be noise.
 ---@param remote AE_Character
 ---@param isNew boolean
+local receivedRenderQueued = false
+local function ScheduleReceivedRender()
+  if receivedRenderQueued then return end
+  receivedRenderQueued = true
+  -- Several records from one batch can complete in successive frames; one
+  -- redraw at the end of a short window avoids rebuilding the character UI
+  -- repeatedly without changing the stored/acknowledged data.
+  C_Timer.After(0.2, function()
+    receivedRenderQueued = false
+    addon.Core:Render()
+  end)
+end
+
 local function ApplyReceivedCharacter(remote, isNew)
   Data.db.global.characters[remote.GUID] = remote
-  addon.Core:Render()
+  ScheduleReceivedRender()
   if isNew then
     local account = remote.accountId and Data.db.global.accounts[remote.accountId]
     local accountName = account and account.name or remote.accountId or "?"
@@ -1908,7 +1945,7 @@ addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
     if status == "applied" then
       ApplyReceivedCharacter(pending.character, pending.isNew)
       RememberReceivedFingerprint(pending.character, pending.fingerprint)
-      processedUpdates[GUID .. "|" .. tostring(GetCharacterRevision(pending.character))] = true
+      processedUpdates[GUID] = GetCharacterRevision(pending.character)
     end
     for index, ack in ipairs(pending.acks) do
       -- Only the first delivery applied a new snapshot. Other deliveries
@@ -1972,7 +2009,7 @@ local function ApplySharedBonusRollSource(value)
   end
 end
 
-function addon.Core:OnCommReceived(prefix, message, distribution, sender)
+local function ProcessReceivedMessage(self, prefix, message, distribution, sender)
   if prefix ~= COMM_PREFIX and prefix ~= CONTROL_PREFIX and prefix ~= SETTINGS_PREFIX then return end
   if not Data.db.global.sync.enabled then return end
 
@@ -2166,21 +2203,27 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
   if remote.GUID == UnitGUID("player") then return end -- shouldn't happen, but never let a record overwrite the live character
 
   local remoteRevision = GetCharacterRevision(remote)
-  -- Recompute on decoded contents: a supplied hash is advisory, not trusted.
-  local incomingHash = FingerprintCharacter(remote)
-  local updateKey = remote.GUID .. "|" .. tostring(remoteRevision)
   local current = Data.db.global.characters[remote.GUID]
-  local differsAtSameRevision = current and GetCharacterRevision(current) == remoteRevision
-    and incomingHash ~= GetKnownCharacterFingerprint(current)
   local mainAccountId = Data.GetMainAccountId and Data:GetMainAccountId()
   if current and mainAccountId and current.accountId == mainAccountId then
     RespondForCharacter(remote, sender, distribution, payload, "rejected", "main-account-authority", false)
     return
   end
+  -- Stale records cannot change the roster: reject them without recursively
+  -- hashing their potentially large equipment/currency/vault snapshots.
+  if current and remoteRevision < GetCharacterRevision(current) then
+    RespondForCharacter(remote, sender, distribution, payload, "rejected", "stale-revision", false)
+    return
+  end
+  -- Recompute on decoded contents: the wire-provided hash is advisory.
+  -- Equal revisions still require a content comparison for divergence repair.
+  local incomingHash = FingerprintCharacter(remote)
+  local differsAtSameRevision = current and GetCharacterRevision(current) == remoteRevision
+    and incomingHash ~= GetKnownCharacterFingerprint(current)
 
   -- Previously applied versions only count as current while they are STILL
   -- the version stored. The same GUID may have advanced later this session.
-  if processedUpdates[updateKey] and current and GetCharacterRevision(current) == remoteRevision
+  if processedUpdates[remote.GUID] == remoteRevision and current and GetCharacterRevision(current) == remoteRevision
     and not differsAtSameRevision then
     RespondForCharacter(remote, sender, distribution, payload, "alreadyCurrent", nil, false)
     return
@@ -2292,9 +2335,59 @@ function addon.Core:OnCommReceived(prefix, message, distribution, sender)
 
   ApplyReceivedCharacter(remote, isNew)
   RememberReceivedFingerprint(remote, incomingHash)
-  processedUpdates[updateKey] = true
+  processedUpdates[remote.GUID] = remoteRevision
   RespondForCharacter(remote, sender, distribution, payload, "applied", nil, isNew)
 end
+
+-- AceComm has already assembled multipart messages here. Process at most one
+-- completed character-prefix packet per frame instead of decoding several
+-- full character snapshots on the same event frame. HELLO and settings keep
+-- their original immediate handling; FIFO ordering preserves ACK/batch order.
+local incomingPackets = {}
+local firstIncomingPacket, lastIncomingPacket = 1, 0
+local incomingPacketScheduled = false
+local function ProcessNextIncomingPacket()
+  -- A received full-record payload can be expensive even without a UI
+  -- redraw. Leave it queued during pulls, then resume after combat.
+  if InCombatLockdown() then
+    incomingPacketScheduled = false
+    return
+  end
+  local packet = incomingPackets[firstIncomingPacket]
+  incomingPackets[firstIncomingPacket] = nil
+  firstIncomingPacket = firstIncomingPacket + 1
+  if firstIncomingPacket <= lastIncomingPacket then
+    C_Timer.After(0, ProcessNextIncomingPacket)
+  else
+    firstIncomingPacket, lastIncomingPacket = 1, 0
+    incomingPacketScheduled = false
+  end
+  -- Schedule the next packet before running user data through the parser so
+  -- a malformed packet cannot permanently stall subsequent queued packets.
+  ProcessReceivedMessage(addon.Core, COMM_PREFIX, packet[1], packet[2], packet[3])
+end
+
+function addon.Core:OnCommReceived(prefix, message, distribution, sender)
+  if prefix ~= COMM_PREFIX then
+    return ProcessReceivedMessage(self, prefix, message, distribution, sender)
+  end
+  if not Data.db.global.sync.enabled then return end
+  if sender == Ambiguate(UnitName("player"), "none") then return end
+  if not Data.db.global.sync.password or Data.db.global.sync.password == "" then return end
+  lastIncomingPacket = lastIncomingPacket + 1
+  incomingPackets[lastIncomingPacket] = {message, distribution, sender}
+  if not incomingPacketScheduled and not InCombatLockdown() then
+    incomingPacketScheduled = true
+    C_Timer.After(0, ProcessNextIncomingPacket)
+  end
+end
+
+addon.Libs.LiqUI.Events:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+  if firstIncomingPacket <= lastIncomingPacket and not incomingPacketScheduled then
+    incomingPacketScheduled = true
+    C_Timer.After(0, ProcessNextIncomingPacket)
+  end
+end, true)
 
 -- Advertise presence/version state when this client becomes reachable on a relevant
 -- transport. The short debounce coalesces the burst of roster/guild events that commonly
