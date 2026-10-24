@@ -131,6 +131,8 @@ Data.defaultDB = {
           showSecondaryStats = false,
           showTierSetAsterisk = false,
           showLowItemLevelAsterisk = false,
+          showMissingEmbellishmentWarning = true,
+          showMissingTierSetWarning = true,
           separateSortByCharacter = false,
         },
         VaultPreview = {},
@@ -2301,37 +2303,50 @@ end
 ---uses different weighting than Blizzard's formula and wouldn't match the character panel if
 ---displayed directly. Adding a non-negative delta on top keeps the displayed equipped value
 ---exactly what the character panel shows, while guaranteeing "in bags" is never lower than it.
+-- Cached only for this session. Inventory and equipment events invalidate the result;
+-- the short TTL is a fallback for API changes that do not fire either event.
+local BAG_UPGRADE_SLOT_EQUIP_LOCS = {
+  [INVSLOT_HEAD] = { "INVTYPE_HEAD" },
+  [INVSLOT_NECK] = { "INVTYPE_NECK" },
+  [INVSLOT_SHOULDER] = { "INVTYPE_SHOULDER" },
+  [INVSLOT_BACK] = { "INVTYPE_CLOAK" },
+  [INVSLOT_CHEST] = { "INVTYPE_CHEST", "INVTYPE_ROBE" },
+  [INVSLOT_WRIST] = { "INVTYPE_WRIST" },
+  [INVSLOT_HAND] = { "INVTYPE_HAND" },
+  [INVSLOT_WAIST] = { "INVTYPE_WAIST" },
+  [INVSLOT_LEGS] = { "INVTYPE_LEGS" },
+  [INVSLOT_FEET] = { "INVTYPE_FEET" },
+  [INVSLOT_FINGER1] = { "INVTYPE_FINGER" },
+  [INVSLOT_FINGER2] = { "INVTYPE_FINGER" },
+  [INVSLOT_TRINKET1] = { "INVTYPE_TRINKET" },
+  [INVSLOT_TRINKET2] = { "INVTYPE_TRINKET" },
+  [INVSLOT_MAINHAND] = { "INVTYPE_WEAPON", "INVTYPE_2HWEAPON", "INVTYPE_WEAPONMAINHAND", "INVTYPE_RANGED", "INVTYPE_RANGEDRIGHT", "INVTYPE_RELIC" },
+  [INVSLOT_OFFHAND] = { "INVTYPE_WEAPON", "INVTYPE_WEAPONOFFHAND", "INVTYPE_SHIELD", "INVTYPE_HOLDABLE" },
+}
+local BAG_UPGRADE_TWO_HAND_EQUIP_LOCS = { INVTYPE_2HWEAPON = true, INVTYPE_RANGED = true, INVTYPE_RANGEDRIGHT = true }
+
+
+function Data:InvalidateBagItemLevelUpgrade()
+  self.cache.bagItemLevelUpgrade = nil
+end
+
 ---@return number delta Always >= 0
 function Data:CalculateBagItemLevelUpgrade()
-  local slotEquipLocs = {
-    [INVSLOT_HEAD] = { "INVTYPE_HEAD" },
-    [INVSLOT_NECK] = { "INVTYPE_NECK" },
-    [INVSLOT_SHOULDER] = { "INVTYPE_SHOULDER" },
-    [INVSLOT_BACK] = { "INVTYPE_CLOAK" },
-    [INVSLOT_CHEST] = { "INVTYPE_CHEST", "INVTYPE_ROBE" },
-    [INVSLOT_WRIST] = { "INVTYPE_WRIST" },
-    [INVSLOT_HAND] = { "INVTYPE_HAND" },
-    [INVSLOT_WAIST] = { "INVTYPE_WAIST" },
-    [INVSLOT_LEGS] = { "INVTYPE_LEGS" },
-    [INVSLOT_FEET] = { "INVTYPE_FEET" },
-    [INVSLOT_FINGER1] = { "INVTYPE_FINGER" },
-    [INVSLOT_FINGER2] = { "INVTYPE_FINGER" },
-    [INVSLOT_TRINKET1] = { "INVTYPE_TRINKET" },
-    [INVSLOT_TRINKET2] = { "INVTYPE_TRINKET" },
-    [INVSLOT_MAINHAND] = { "INVTYPE_WEAPON", "INVTYPE_2HWEAPON", "INVTYPE_WEAPONMAINHAND", "INVTYPE_RANGED", "INVTYPE_RANGEDRIGHT", "INVTYPE_RELIC" },
-    [INVSLOT_OFFHAND] = { "INVTYPE_WEAPON", "INVTYPE_WEAPONOFFHAND", "INVTYPE_SHIELD", "INVTYPE_HOLDABLE" },
-  }
-  local twoHandEquipLocs = { INVTYPE_2HWEAPON = true, INVTYPE_RANGED = true, INVTYPE_RANGEDRIGHT = true }
+  local cached = self.cache.bagItemLevelUpgrade
+  local now = GetTime()
+  if cached and now - cached.updatedAt < 30 then
+    return cached.delta
+  end
 
   local equippedMainHandLink = GetInventoryItemLink("player", INVSLOT_MAINHAND)
   local mainHandIsTwoHanded = false
   if equippedMainHandLink then
     local _, _, _, mainHandEquipLoc = C_Item.GetItemInfoInstant(equippedMainHandLink)
-    mainHandIsTwoHanded = mainHandEquipLoc ~= nil and twoHandEquipLocs[mainHandEquipLoc] == true
+    mainHandIsTwoHanded = mainHandEquipLoc ~= nil and BAG_UPGRADE_TWO_HAND_EQUIP_LOCS[mainHandEquipLoc] == true
   end
 
-  -- Index bag items by equip location for quick lookup.
-  local bagItemsByEquipLoc = {}
+  -- Each bag item is queried once even when multiple slots accept its equip location.
+  local bestBagLevelByEquipLoc = {}
   for bag = 0, NUM_BAG_SLOTS do
     local numSlots = C_Container.GetContainerNumSlots(bag) or 0
     for containerSlot = 1, numSlots do
@@ -2339,38 +2354,34 @@ function Data:CalculateBagItemLevelUpgrade()
       if itemLink then
         local _, _, _, equipLoc = C_Item.GetItemInfoInstant(itemLink)
         if equipLoc and equipLoc ~= "" and equipLoc ~= "INVTYPE_NON_EQUIP_IGNORE" then
-          bagItemsByEquipLoc[equipLoc] = bagItemsByEquipLoc[equipLoc] or {}
-          table.insert(bagItemsByEquipLoc[equipLoc], itemLink)
+          local itemLevel = C_Item.GetDetailedItemLevelInfo(itemLink)
+          if itemLevel and itemLevel > (bestBagLevelByEquipLoc[equipLoc] or 0) then
+            bestBagLevelByEquipLoc[equipLoc] = itemLevel
+          end
         end
       end
     end
   end
 
   local deltaTotal, count = 0, 0
-  for slotID, equipLocs in pairs(slotEquipLocs) do
+  for slotID, equipLocs in pairs(BAG_UPGRADE_SLOT_EQUIP_LOCS) do
     if not (slotID == INVSLOT_OFFHAND and mainHandIsTwoHanded) then
       local equippedLink = GetInventoryItemLink("player", slotID)
       local equippedLevel = equippedLink and C_Item.GetDetailedItemLevelInfo(equippedLink)
       if equippedLevel and equippedLevel > 0 then
         local bestLevel = equippedLevel
-
         for _, equipLoc in ipairs(equipLocs) do
-          for _, itemLink in ipairs(bagItemsByEquipLoc[equipLoc] or {}) do
-            local itemLevel = C_Item.GetDetailedItemLevelInfo(itemLink)
-            if itemLevel and itemLevel > bestLevel then
-              bestLevel = itemLevel
-            end
-          end
+          bestLevel = math.max(bestLevel, bestBagLevelByEquipLoc[equipLoc] or 0)
         end
-
         deltaTotal = deltaTotal + (bestLevel - equippedLevel)
         count = count + 1
       end
     end
   end
 
-  if count == 0 then return 0 end
-  return deltaTotal / count
+  local delta = count > 0 and deltaTotal / count or 0
+  self.cache.bagItemLevelUpgrade = {updatedAt = now, delta = delta}
+  return delta
 end
 
 ---Refresh general character info from the API
@@ -2378,6 +2389,8 @@ function Data:UpdateCharacterInfo()
   local character = self:GetCharacter()
   if not character then return end
 
+  local previousInfo = TableCopy(character.info)
+  local previousLastUpdate = character.lastUpdate
   local playerName = UnitName("player")
   local playerRealm = GetRealmName()
   local playerLevel = UnitLevel("player")
@@ -2427,8 +2440,16 @@ function Data:UpdateCharacterInfo()
   character.info.guild.isInGuild = isInGuild
 
   character.lastUpdate = GetServerTime()
-  self:MarkCharacterSyncChanged(character)
-  addon.Core:Render()
+  if not SavedSnapshotEqual(previousInfo, character.info) then
+    self:MarkCharacterSyncChanged(character)
+    addon.Core:Render()
+  elseif previousLastUpdate ~= character.lastUpdate
+    and self.db.global.sorting == "lastUpdate"
+    and addon.Module_Main and addon.Module_Main.window
+    and addon.Module_Main.window:IsVisible() then
+    -- The visible main window sorts by this local refresh timestamp.
+    addon.Module_Main:Render()
+  end
 end
 
 ---Store the current zone so the character tooltip can show where this
@@ -3107,6 +3128,7 @@ function Data:UpdateEquipment()
   local statsChanged = self:UpdateSecondaryStats()
   local previousEquipment = character.equipment
   local equipmentSnapshot = {}
+  local missingItemData = false
 
   local upgradePattern = ITEM_UPGRADE_TOOLTIP_FORMAT_STRING
   upgradePattern = upgradePattern:gsub("%%d", "%%s")
@@ -3120,7 +3142,10 @@ function Data:UpdateEquipment()
     local itemName, itemLink, itemQuality, itemLevel, itemMinLevel, itemType, itemSubType,
     itemStackCount, itemEquipLoc, itemTexture, sellPrice, classID, subclassID, bindType,
     expansionID, setID, isCraftingReagent = C_Item.GetItemInfo(inventoryItemLink)
-    if itemName == nil then return end
+    if itemName == nil then
+      missingItemData = true
+      return
+    end
 
     local upgradeInfo = C_Item.GetItemUpgradeInfo(inventoryItemLink)
     if upgradeInfo and upgradeInfo.trackString and upgradeInfo.trackString ~= "" and upgradeInfo.currentLevel > 0 and upgradeInfo.maxLevel > 0 then
@@ -3173,6 +3198,9 @@ function Data:UpdateEquipment()
       end)
     end
 
+    if enchantID > 0 and not enchantTooltipLine then
+      missingItemData = true
+    end
     local embellishmentInfo = self:GetEquipmentEmbellishmentInfo(itemLink or inventoryItemLink, tooltipData)
 
     ---@type AE_Equipment
@@ -3216,11 +3244,11 @@ function Data:UpdateEquipment()
   end)
   if SavedSnapshotEqual(previousEquipment or {}, equipmentSnapshot) then
     character.equipment = previousEquipment or equipmentSnapshot
-    return statsChanged
+    return statsChanged, missingItemData
   end
   character.equipment = equipmentSnapshot
   self:MarkCharacterSyncChanged(character)
-  return true
+  return true, missingItemData
 end
 
 local function isKeystoneAnnounceBlocked()
@@ -3286,6 +3314,13 @@ function Data:UpdateKeystoneItem()
   local seasonKeystoneItemID = self:GetKeystoneItemID()
   local characterKeystoneMapID = character.mythicplus.keystone.mapId
   local characterKeystoneLevel = character.mythicplus.keystone.level
+  local previousKeystone = TableCopy(character.mythicplus.keystone)
+  local function finish()
+    if not SavedSnapshotEqual(previousKeystone, character.mythicplus.keystone) then
+      self:MarkCharacterSyncChanged(character)
+      addon.Core:Render()
+    end
+  end
 
   do -- Base keystone data
     local keyStoneMapID = C_MythicPlus.GetOwnedKeystoneMapID()
@@ -3315,19 +3350,19 @@ function Data:UpdateKeystoneItem()
     end
   end
 
-  if not keystoneItemLink then return addon.Core:Render() end
-  if not LinkUtil.IsLinkType(keystoneItemLink, "keystone") then return addon.Core:Render() end
+  if not keystoneItemLink then return finish() end
+  if not LinkUtil.IsLinkType(keystoneItemLink, "keystone") then return finish() end
 
   local _, linkOptions = LinkUtil.ExtractLink(keystoneItemLink)
-  if not linkOptions then return addon.Core:Render() end
+  if not linkOptions then return finish() end
 
   local _, linkChallengeModeID, linkLevel = LinkUtil.SplitLinkOptions(linkOptions)
-  if not linkChallengeModeID or not linkLevel then return addon.Core:Render() end
+  if not linkChallengeModeID or not linkLevel then return finish() end
   local keystoneChallengeModeID = tonumber(linkChallengeModeID) or 0
   local keystoneLevel = tonumber(linkLevel) or 0
 
   local dungeon = TableGet(dungeons, "challengeModeID", keystoneChallengeModeID)
-  if not dungeon then return addon.Core:Render() end
+  if not dungeon then return finish() end
   local dungeonMapId = tonumber(dungeon.mapId) or 0
 
   local newKeystone = false
@@ -3363,8 +3398,7 @@ function Data:UpdateKeystoneItem()
     sendNewKeystoneAnnounce(keystoneItemLink, dungeon, keystoneLevel)
   end
 
-  addon.Core:Render()
-  self:MarkCharacterSyncChanged(character)
+  finish()
 end
 
 ---Record that the player actually opened the native Great Vault for this
@@ -3519,11 +3553,18 @@ end
 function Data:UpdateVault()
   local character = self:GetCharacter()
   if not character then return end
-  character.vault.lastUpdatedAt = time()
+  local vault = character.vault
+  local previousEncounters = vault.activityEncounterInfo or {}
+  local previousSlots = vault.slots or {}
+  local previousWorldProgress = vault.worldActivityProgress or {}
+  local previousAvailable = vault.hasAvailableRewards
+  local previousSnapshot = vault.lastSnapshot
+  vault.lastUpdatedAt = time()
 
-  character.vault.activityEncounterInfo = wipe(character.vault.activityEncounterInfo or {})
-  character.vault.slots = wipe(character.vault.slots or {})
-  character.vault.worldActivityProgress = wipe(character.vault.worldActivityProgress or {})
+  -- Do not wipe the old arrays before comparing the new API snapshot.
+  vault.activityEncounterInfo = {}
+  vault.slots = {}
+  vault.worldActivityProgress = {}
 
   TableForEach(self.vaultTypes or {}, function(vaultType)
     for index = 1, 3 do
@@ -3566,10 +3607,21 @@ function Data:UpdateVault()
     -- Update() (which already happened, above).
     if activity.rewards and #activity.rewards > 0 then
       local ok, err = pcall(resolveBestVaultItemReward, activity.rewards, function(itemLink)
-        if not itemLink then return end
+        if not itemLink or (slot.exampleRewardLink == itemLink and slot.rewardIsConcrete) then return end
+        -- A newer Vault refresh may have replaced this slot while item data
+        -- was loading. Do not apply obsolete callbacks to the current state.
+        local isCurrentSlot = false
+        for _, currentSlot in ipairs(character.vault.slots or {}) do
+          if currentSlot == slot then
+            isCurrentSlot = true
+            break
+          end
+        end
+        if not isCurrentSlot then return end
         slot.exampleRewardLink = itemLink
         slot.rewardIsConcrete = true
         self:ArchiveVaultSnapshot(character)
+        self:MarkCharacterSyncChanged(character)
         addon.Core:Render()
       end)
       if not ok then
@@ -3600,8 +3652,19 @@ function Data:UpdateVault()
     -- stale data sitting around forever.
     character.vault.lastSnapshot = nil
   end
-  addon.Core:Render()
-  self:MarkCharacterSyncChanged(character)
+  local okEncounters, sameEncounters = pcall(SavedSnapshotEqual, previousEncounters, vault.activityEncounterInfo)
+  local okSlots, sameSlots = pcall(SavedSnapshotEqual, previousSlots, vault.slots)
+  local okWorld, sameWorld = pcall(SavedSnapshotEqual, previousWorldProgress, vault.worldActivityProgress)
+  if not okEncounters or not sameEncounters or not okSlots or not sameSlots
+    or not okWorld or not sameWorld or previousAvailable ~= vault.hasAvailableRewards
+    or not SavedSnapshotEqual(previousSnapshot, vault.lastSnapshot) then
+    self:MarkCharacterSyncChanged(character)
+    addon.Core:Render()
+  elseif addon.Module_VaultPreview and addon.Module_VaultPreview.character == character
+    and addon.Module_VaultPreview.window and addon.Module_VaultPreview.window:IsVisible() then
+    -- Keep the visible "Updated on" metadata current without redrawing every module.
+    addon.Module_VaultPreview:Render()
+  end
 end
 
 ---Refresh Mythic+ data from the API
@@ -3609,6 +3672,16 @@ function Data:UpdateMythicPlus()
   local character = self:GetCharacter()
   if not character then return end
 
+  local oldMythicplus = character.mythicplus
+  local previous = {
+    rating = oldMythicplus.rating,
+    runHistory = oldMythicplus.runHistory,
+    bestSeasonScore = oldMythicplus.bestSeasonScore,
+    bestSeasonNumber = oldMythicplus.bestSeasonNumber,
+    completed = oldMythicplus.numCompletedDungeonRuns,
+    dungeons = oldMythicplus.dungeons,
+    available = character.vault.hasAvailableRewards,
+  }
   local dungeons = LiqUI.Data:GetDungeons()
   local ratingSummary = C_PlayerInfo.GetPlayerMythicPlusRatingSummary("player")
   local runHistory = C_MythicPlus.GetRunHistory(true, true)
@@ -3629,7 +3702,7 @@ function Data:UpdateMythicPlus()
     mythicPlus = numMythicPlus or 0,
   }
 
-  character.mythicplus.dungeons = wipe(character.mythicplus.dungeons or {})
+  character.mythicplus.dungeons = {}
   for _, dataDungeon in pairs(dungeons) do
     local bestTimedRun, bestNotTimedRun = C_MythicPlus.GetSeasonBestForMap(dataDungeon.challengeModeID)
     local affixScores, bestOverAllScore = C_MythicPlus.GetSeasonBestAffixScoreInfoForMap(dataDungeon.challengeModeID)
@@ -3671,6 +3744,18 @@ function Data:UpdateMythicPlus()
     end
     table.insert(character.mythicplus.dungeons, dungeon)
   end
-  addon.Core:Render()
-  self:MarkCharacterSyncChanged(character)
+  local updated = character.mythicplus
+  local ok, same = pcall(SavedSnapshotEqual, previous, {
+    rating = updated.rating,
+    runHistory = updated.runHistory,
+    bestSeasonScore = updated.bestSeasonScore,
+    bestSeasonNumber = updated.bestSeasonNumber,
+    completed = updated.numCompletedDungeonRuns,
+    dungeons = updated.dungeons,
+    available = character.vault.hasAvailableRewards,
+  })
+  if not ok or not same then
+    self:MarkCharacterSyncChanged(character)
+    addon.Core:Render()
+  end
 end

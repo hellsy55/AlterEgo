@@ -255,6 +255,7 @@ end
 function Core:OnEnable()
   local function onEquipmentChanged()
     -- Equipment scans and enchant retries belong to Equipment:OnEnable.
+    Data:InvalidateBagItemLevelUpgrade()
     self:QueueUpdate("UpdateCharacterInfo")
   end
   Events:RegisterEvent("PLAYER_EQUIPMENT_CHANGED", onEquipmentChanged)
@@ -346,6 +347,13 @@ function Core:OnEnable()
       self:QueueUpdate("UpdateRaidInstances")
     end
   )
+  Events:RegisterEvent("BAG_UPDATE_DELAYED", function()
+    Data:InvalidateBagItemLevelUpgrade()
+  end, true)
+  Events:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Data:InvalidateBagItemLevelUpgrade()
+  end, true)
+  local keystoneFlushQueued = false
   Events:RegisterEvent(
     {
       "BAG_UPDATE_DELAYED",
@@ -357,9 +365,13 @@ function Core:OnEnable()
     }, function()
       self:QueueUpdate("UpdateKeystoneItem")
       self:QueueUpdate("UpdateCurrencies")
-      C_Timer.After(2, function()
-        Data:FlushPendingKeystoneAnnounce()
-      end)
+      if not keystoneFlushQueued then
+        keystoneFlushQueued = true
+        C_Timer.After(2, function()
+          keystoneFlushQueued = false
+          Data:FlushPendingKeystoneAnnounce()
+        end)
+      end
     end
   )
   Events:RegisterEvent(
@@ -388,6 +400,7 @@ function Core:OnEnable()
     end
   )
   Events:RegisterEvent("GET_ITEM_INFO_RECEIVED", function(_, _, ...)
+    Data:InvalidateBagItemLevelUpgrade()
     self:OnGetItemInfoReceived(...)
   end)
   Events:RegisterEvent(
@@ -418,6 +431,9 @@ function Core:OnEnable()
     end,
     true
   )
+  -- Scenario and widget changes belong to Labyrinth tracking. The Vault
+  -- already receives dedicated WEEKLY_REWARDS_UPDATE and scenario-completion
+  -- signals; avoid querying every Vault activity for unrelated widgets.
   addon.Libs.LiqUI.Events:RegisterEvent({
     "SCENARIO_UPDATE",
     "SCENARIO_CRITERIA_UPDATE",
@@ -425,7 +441,6 @@ function Core:OnEnable()
     "UPDATE_UI_WIDGET",
   }, function()
     self:QueueUpdate("UpdateLabyrinthProgress")
-    self:QueueUpdate("UpdateVault")
   end)
   addon.Libs.LiqUI.Events:RegisterEvent(
     "MYTHIC_PLUS_CURRENT_AFFIX_UPDATE",

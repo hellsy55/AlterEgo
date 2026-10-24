@@ -95,6 +95,26 @@ local function isTierSetPiece(item)
     and TIER_SET_SLOTS[item.itemSlotID] == true
 end
 
+-- Both warnings share one red title suffix, but each has its own setting.
+local function formatMissingEquipmentStatus(tierPieces, missingEmbellishments, settings)
+  local missing = {}
+  if settings.showMissingEmbellishmentWarning ~= false and missingEmbellishments > 0 then
+    missing[#missing + 1] = missingEmbellishments == 1
+      and "1 embellishment" or format("%d embellishments", missingEmbellishments)
+  end
+
+  if settings.showMissingTierSetWarning ~= false then
+    if tierPieces < 2 then
+      missing[#missing + 1] = "2P"
+    elseif tierPieces < 4 then
+      missing[#missing + 1] = "4P"
+    end
+  end
+
+  if #missing == 0 then return "" end
+  return " - " .. DIM_RED_FONT_COLOR:WrapTextInColorCode("Missing " .. table.concat(missing, " and "))
+end
+
 ---Format one stat label and percentage in its color, leaving the numeric rating white.
 local function formatColoredSecondaryStat(name, rating, percent, color)
   return color:WrapTextInColorCode(name .. ": ")
@@ -750,9 +770,11 @@ function Module:RefreshEquipment()
     self.equipmentRefreshAfterCombat = true
     return
   end
-  if Data:UpdateEquipment() then
+  local changed, missingItemData = Data:UpdateEquipment()
+  if changed then
     self:Render()
   end
+  return missingItemData == true
 end
 
 function Module:QueueEquipmentRefresh()
@@ -760,25 +782,26 @@ function Module:QueueEquipmentRefresh()
     self.equipmentRefreshAfterCombat = true
     return
   end
-  -- Equipment/inventory events can fire before Blizzard has refreshed the item
-  -- tooltip data that contains permanent enchant information. Refresh once
-  -- immediately, then retry quickly so an already-active enchant does not sit
-  -- on "Missing" until another inventory event happens several seconds later.
+  -- Always run one settling retry for enchant updates whose tooltip is late.
+  -- Continue the remaining retries only while item/enchant data is missing.
   self:RefreshEquipment()
-
-  if self.equipmentRefreshTimers then
-    for _, timer in ipairs(self.equipmentRefreshTimers) do
-      self:CancelTimer(timer, true)
-    end
+  if self.equipmentRefreshTimer then
+    self:CancelTimer(self.equipmentRefreshTimer, true)
+    self.equipmentRefreshTimer = nil
   end
 
-  self.equipmentRefreshTimers = {}
-  for _, delay in ipairs(EQUIPMENT_REFRESH_RETRY_DELAYS) do
-    local timer = self:ScheduleTimer(function()
-      self:RefreshEquipment()
+  local function scheduleRetry(index)
+    if index > #EQUIPMENT_REFRESH_RETRY_DELAYS then return end
+    local previousDelay = EQUIPMENT_REFRESH_RETRY_DELAYS[index - 1] or 0
+    local delay = EQUIPMENT_REFRESH_RETRY_DELAYS[index] - previousDelay
+    self.equipmentRefreshTimer = self:ScheduleTimer(function()
+      self.equipmentRefreshTimer = nil
+      if self:RefreshEquipment() then
+        scheduleRetry(index + 1)
+      end
     end, delay)
-    table.insert(self.equipmentRefreshTimers, timer)
   end
+  scheduleRetry(1)
 end
 
 function Module:OnEnable()
@@ -812,7 +835,9 @@ function Module:OnEnable()
   -- Hyperlink tooltips for offline characters may become available shortly
   -- after item data finishes loading. Re-render the open equipment window as
   -- soon as that happens instead of waiting for another unrelated UI update.
-  addon.Libs.LiqUI.Events:RegisterEvent("ITEM_DATA_LOAD_RESULT", function()
+  addon.Libs.LiqUI.Events:RegisterEvent("ITEM_DATA_LOAD_RESULT", function(_, _, itemID, success)
+    if success ~= true or not self.pendingEquipmentItemIDs or not self.pendingEquipmentItemIDs[itemID] then return end
+    self.pendingEquipmentItemIDs[itemID] = nil
     if self.window and self.window:IsVisible() then
       self:Render()
     end
@@ -886,6 +911,30 @@ function Module:Render()
           tooltip:AddLine("Show a white asterisk after the item level of equipment below 321 iLevel.", nil, nil, nil, true)
         end)
         menu:CreateCheckbox(
+          "Show missing embellishment warning",
+          function() return windows.Equipment.showMissingEmbellishmentWarning ~= false end,
+          function()
+            windows.Equipment.showMissingEmbellishmentWarning = not (windows.Equipment.showMissingEmbellishmentWarning ~= false)
+            Module:Render()
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Show a red warning in the Equipment title when fewer than two embellishments are equipped. Does not change per-item column indicators.", nil, nil, nil, true)
+        end)
+        menu:CreateCheckbox(
+          "Show missing tier-set bonus warning",
+          function() return windows.Equipment.showMissingTierSetWarning ~= false end,
+          function()
+            windows.Equipment.showMissingTierSetWarning = not (windows.Equipment.showMissingTierSetWarning ~= false)
+            Module:Render()
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip, elm)
+          tooltip:AddLine(MenuUtil.GetElementText(elm), 1, 1, 1, true)
+          tooltip:AddLine("Show Missing 2P for fewer than two matching tier pieces, or Missing 4P for two or three matching pieces. Different tier sets are not combined.", nil, nil, nil, true)
+        end)
+        menu:CreateCheckbox(
           "Use separate sorting for each character",
           function() return windows.Equipment.separateSortByCharacter == true end,
           function()
@@ -950,6 +999,7 @@ function Module:Render()
     return
   end
   self:RestoreEquipmentSortState(character)
+  self.pendingEquipmentItemIDs = {}
 
   ---@type LiqUI_TableData
   local rows = {}
@@ -962,6 +1012,8 @@ function Module:Render()
   local embellishmentInfoBySlot = {}
   local equippedEmbellishmentCount = 0
   local hasCraftedEquipment = false
+  local tierSlotsBySetID = {}
+  local mostTierPieces = 0
 
   -- Resolve embellishments for the whole equipped set first. The Missing state
   -- is character-wide: crafted slots only need a warning while fewer than two
@@ -979,7 +1031,22 @@ function Module:Render()
     if tooltipData == nil or tooltipData.lines == nil or next(tooltipData.lines) == nil then
       local itemID = C_Item.GetItemIDForItemInfo(item.itemLink)
       if itemID then
+        self.pendingEquipmentItemIDs[itemID] = true
         C_Item.RequestLoadItemDataByID(itemID)
+      end
+    end
+
+    -- Fold the tier bonus check into the existing equipment pre-pass.
+    -- Do not combine different set IDs or count a duplicated slot twice.
+    if equipmentSettings.showMissingTierSetWarning ~= false and isTierSetPiece(item) then
+      local slots = tierSlotsBySetID[item.setID]
+      if not slots then
+        slots = {}
+        tierSlotsBySetID[item.setID] = slots
+      end
+      if not slots[item.itemSlotID] then
+        slots[item.itemSlotID] = true
+        mostTierPieces = math.max(mostTierPieces, TableCount(slots))
       end
     end
 
@@ -1078,6 +1145,7 @@ function Module:Render()
           -- above will re-render and replace this fallback with the real
           -- localized enchant name as soon as the tooltip becomes available.
           if not tooltipEnchantFound and itemID then
+            self.pendingEquipmentItemIDs[itemID] = true
             C_Item.RequestLoadItemDataByID(itemID)
           end
         else
@@ -1264,22 +1332,18 @@ function Module:Render()
     end
   end
 
-  local embellishmentStatusText = ""
-  if missingEmbellishmentCount > 0 then
-    local missingLabel = missingEmbellishmentCount == 1 and "Missing 1 Embellishment" or format("Missing %d Embellishments", missingEmbellishmentCount)
-    embellishmentStatusText = " - " .. DIM_RED_FONT_COLOR:WrapTextInColorCode(missingLabel)
-  end
+  local missingStatusText = formatMissingEquipmentStatus(mostTierPieces, missingEmbellishmentCount, equipmentSettings)
 
   local statsText = ""
   if Data.db.global.liqui.windows.Equipment.showSecondaryStats then
     statsText = formatSecondaryStatsTitle(character.secondaryStats)
   end
-  self.window:SetTitle(format("%s%s (%s)%s%s%s", positionPrefix, nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText, embellishmentStatusText, statsText))
+  self.window:SetTitle(format("%s%s (%s)%s%s%s", positionPrefix, nameColor:WrapTextInColorCode(character.info.name), character.info.realm, ilvlText, missingStatusText, statsText))
   sizeEquipmentColumnsToContent(self.dataTable, rows, showTierSetAsterisk)
   self.dataTable:SetData(rows)
   local bodyWidth, bodyHeight = self.dataTable:GetSize()
   local requiredWidth = bodyWidth > 0 and bodyWidth or tableWidth
-  if statsText ~= "" and self.window.titlebar then
+  if (missingStatusText ~= "" or statsText ~= "") and self.window.titlebar then
     -- Reserve the measured title width plus the native Settings/Close buttons
     -- instead of allowing the longer header to overlap the controls.
     local titleWidth = self.window.titlebar.title:GetStringWidth() or 0

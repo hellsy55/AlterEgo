@@ -1320,6 +1320,8 @@ local function BuildSettingsPayload()
         showSecondaryStats = Data.db.global.liqui.windows.Equipment.showSecondaryStats == true,
         showTierSetAsterisk = Data.db.global.liqui.windows.Equipment.showTierSetAsterisk == true,
         showLowItemLevelAsterisk = Data.db.global.liqui.windows.Equipment.showLowItemLevelAsterisk == true,
+        showMissingEmbellishmentWarning = Data.db.global.liqui.windows.Equipment.showMissingEmbellishmentWarning ~= false,
+        showMissingTierSetWarning = Data.db.global.liqui.windows.Equipment.showMissingTierSetWarning ~= false,
         separateSortByCharacter = Data.db.global.liqui.windows.Equipment.separateSortByCharacter == true,
       },
       RaidLockouts = {
@@ -1408,7 +1410,7 @@ local function ApplySettingsPayload(settings)
   local equipmentSettings = type(sharedWindows) == "table" and sharedWindows.Equipment
   if type(equipmentSettings) == "table" then
     local equipmentLocal = Data.db.global.liqui.windows.Equipment
-    for _, key in ipairs({ "showSecondaryStats", "showTierSetAsterisk", "showLowItemLevelAsterisk", "separateSortByCharacter" }) do
+    for _, key in ipairs({ "showSecondaryStats", "showTierSetAsterisk", "showLowItemLevelAsterisk", "showMissingEmbellishmentWarning", "showMissingTierSetWarning", "separateSortByCharacter" }) do
       if type(equipmentSettings[key]) == "boolean" then
         equipmentLocal[key] = equipmentSettings[key]
       end
