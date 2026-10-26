@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -62,6 +62,106 @@ class ReleaseSelectionTests(unittest.TestCase):
                 self.assertIsNone(checker.latest_svn_tag('fixture'))
         with patch.object(checker, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'failure')):
             self.assertIsNone(checker.latest_svn_tag('fixture'))
+
+
+class SharedSvnQueryTests(unittest.TestCase):
+    root = 'https://repos.wowace.com/wow/ace3'
+    names = ('AceAddon-3.0', 'AceTimer-3.0', 'AceDB-3.0',
+             'AceConsole-3.0', 'AceComm-3.0')
+
+    def entries(self):
+        return {f'Libs/{name}': {'url': f'{self.root}/trunk/{name}',
+                                'tag': 'Release-r1377'} for name in self.names}
+
+    def response(self, output=None, code=0):
+        return subprocess.CompletedProcess([], code,
+            listing([('Release-r1403', 1403)]) if output is None else output, 'failure' if code else '')
+
+    def report(self, response, shared=True, lock=None):
+        output = io.StringIO()
+        resolver = checker.resolve_upstream_version
+        # Omitting the invocation cache reproduces the original query path.
+        def uncached(entry, cache):
+            return resolver(entry)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sys, 'argv', ['checker']))
+            stack.enter_context(patch.object(checker, 'PKGMETA_PATH', __file__))
+            stack.enter_context(patch.object(checker, 'open', mock_open(read_data='externals:'), create=True))
+            stack.enter_context(patch.object(checker, 'parse_externals', return_value=self.entries()))
+            stack.enter_context(patch.object(checker, 'load_lockfile', return_value=lock or {}))
+            stack.enter_context(patch.object(checker, 'find_orphan_lib_folders', return_value=[]))
+            vendor = stack.enter_context(patch.object(checker, 'vendor_lib'))
+            save = stack.enter_context(patch.object(checker, 'save_lockfile'))
+            run = stack.enter_context(patch.object(checker, 'run', return_value=response))
+            if not shared:
+                stack.enter_context(patch.object(checker, 'resolve_upstream_version', side_effect=uncached))
+            stack.enter_context(contextlib.redirect_stdout(output))
+            code = checker.main()
+            vendor.assert_not_called()
+            save.assert_not_called()
+        return code, output.getvalue(), run.call_count
+
+    def test_five_components_share_query_and_keep_export_paths(self):
+        cache = {}
+        with patch.object(checker, 'run', return_value=self.response()) as run:
+            for name, entry in zip(self.names, self.entries().values()):
+                self.assertEqual(checker.resolve_upstream_version(entry, cache),
+                    ('svn-tag', 'Release-r1403', f'{self.root}/tags/Release-r1403/{name}'))
+            run.assert_called_once_with(['svn', 'ls', '--xml', f'{self.root}/tags/'])
+
+    def test_different_roots_do_not_share(self):
+        cache = {}
+        with patch.object(checker, 'run', return_value=self.response()) as run:
+            for root in (self.root, 'https://repos.wowace.com/wow/libstub'):
+                checker.latest_svn_tag(root, cache)
+                checker.latest_svn_tag(root, cache)
+            self.assertEqual(run.call_count, 2)
+
+    def test_query_options_are_part_of_key(self):
+        cache = {('svn', 'ls', f'{self.root}/tags/'): self.response(),
+                 ('svn', 'ls', '--xml', '--verbose', f'{self.root}/tags/'): self.response()}
+        with patch.object(checker, 'run', return_value=self.response()) as run:
+            self.assertEqual(checker.latest_svn_tag(self.root, cache), 'Release-r1403')
+            run.assert_called_once_with(['svn', 'ls', '--xml', f'{self.root}/tags/'])
+
+    def test_reports_match_uncached_and_new_invocations_query_again(self):
+        locks = (None, {path: {'value': 'Release-r1403'} for path in self.entries()},
+                 {path: {'value': 'Release-r1500'} for path in self.entries()})
+        for lock in locks:
+            with self.subTest(lock=lock):
+                original = self.report(self.response(), shared=False, lock=lock)
+                for _ in range(2):
+                    current = self.report(self.response(), lock=lock)
+                    self.assertEqual(current[:2], original[:2])
+                    self.assertEqual((original[2], current[2]), (5, 1))
+
+    def test_unknown_and_failed_responses_are_not_reused(self):
+        responses = (self.response(code=1), self.response(''), self.response('<lists/>'),
+                     self.response('broken XML'), self.response(listing([('Alpha', 1)])))
+        for response in responses:
+            with self.subTest(response=response):
+                original = self.report(response, shared=False)
+                current = self.report(response)
+                self.assertEqual(current, original)
+                self.assertEqual(current[0], 1)
+                self.assertIn('LIBS=unknown\nCHECKED=0\nUNKNOWN=5', current[1])
+                self.assertEqual(current[2], 5)
+
+    def test_failed_query_can_recover_without_cached_failure(self):
+        cache = {}
+        with patch.object(checker, 'run', side_effect=[self.response(code=1), self.response()]) as run:
+            self.assertIsNone(checker.latest_svn_tag(self.root, cache))
+            self.assertEqual(cache, {})
+            self.assertEqual(checker.latest_svn_tag(self.root, cache), 'Release-r1403')
+            self.assertEqual(checker.latest_svn_tag(self.root, cache), 'Release-r1403')
+            self.assertEqual(run.call_count, 2)
+
+    def test_subprocess_exception_propagates_without_cached_failure(self):
+        cache = {}
+        with patch.object(checker, 'run', side_effect=subprocess.TimeoutExpired('svn', 60)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                checker.latest_svn_tag(self.root, cache)
+        self.assertEqual(cache, {})
 
 
 class BaselineTests(unittest.TestCase):

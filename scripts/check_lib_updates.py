@@ -179,9 +179,12 @@ def split_trunk_url(url: str):
     return root, rest.lstrip("/")
 
 
-def latest_svn_tag(repo_root: str):
+def latest_svn_tag(repo_root: str, query_cache=None):
     """Compare stable tags numerically; order different families by SVN history."""
-    result = run(["svn", "ls", "--xml", f"{repo_root}/tags/"])
+    command = ("svn", "ls", "--xml", f"{repo_root}/tags/")
+    result = query_cache.get(command) if query_cache is not None else None
+    if result is None:
+        result = run(list(command))
     if result.returncode != 0:
         return None
     try:
@@ -206,12 +209,16 @@ def latest_svn_tag(repo_root: str):
             return None
         # Revision numbers and semantic versions are not comparable numerically.
         # SVN's tag history establishes which release family is more recent.
-        return max(families.values(), key=lambda item: (item[1], item[2]))[2]
+        selected = max(families.values(), key=lambda item: (item[1], item[2]))[2]
+        # Retain only usable responses, scoped to this checker invocation.
+        if query_cache is not None:
+            query_cache[command] = result
+        return selected
     except (ET.ParseError, KeyError, ValueError):
         return None
 
 
-def resolve_upstream_version(entry: dict):
+def resolve_upstream_version(entry: dict, svn_query_cache=None):
     """
     Retorna (tipo, versao_encontrada, url_para_baixar) para uma entrada de
     external, ou None se não conseguiu resolver.
@@ -223,7 +230,7 @@ def resolve_upstream_version(entry: dict):
 
     if "repos.wowace.com" in url:
         repo_root, subpath = split_trunk_url(url)
-        latest_tag = latest_svn_tag(repo_root)
+        latest_tag = latest_svn_tag(repo_root, svn_query_cache)
         if not latest_tag:
             return None
         export_url = f"{repo_root}/tags/{latest_tag}/{subpath}".rstrip("/")
@@ -321,11 +328,12 @@ def main():
 
     pending = {}
     unknown = 0
+    svn_query_cache = {}
 
     for path, entry in externals.items():
         name = short_name(path)
         try:
-            resolved = resolve_upstream_version(entry)
+            resolved = resolve_upstream_version(entry, svn_query_cache)
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError(f"Version lookup failed for {name}: {error}") from error
 
