@@ -760,17 +760,17 @@ local function compareEquipmentGemsColumn(rowA, rowB)
 end
 
 function Module:OnInitialize()
-  self:Render()
+  -- The UI is allocated only when a character's equipment is opened.
 end
 
 local EQUIPMENT_REFRESH_RETRY_DELAYS = {0.10, 0.35, 1.00}
 
-function Module:RefreshEquipment()
+function Module:RefreshEquipment(forceScan)
   if InCombatLockdown and InCombatLockdown() then
     self.equipmentRefreshAfterCombat = true
     return
   end
-  local changed, missingItemData = Data:UpdateEquipment()
+  local changed, missingItemData = Data:UpdateEquipment(forceScan)
   if changed then
     self:Render()
   end
@@ -782,9 +782,22 @@ function Module:QueueEquipmentRefresh()
     self.equipmentRefreshAfterCombat = true
     return
   end
-  -- Always run one settling retry for enchant updates whose tooltip is late.
-  -- Continue the remaining retries only while item/enchant data is missing.
-  self:RefreshEquipment()
+  -- Multiple equipment/inventory events can fire in the same frame. Collapse
+  -- them before the expensive tooltip scan; keep the existing settling retries.
+  if self.equipmentInitialRefreshQueued then return end
+  self.equipmentInitialRefreshQueued = true
+  C_Timer.After(0, function()
+    self.equipmentInitialRefreshQueued = false
+    if InCombatLockdown and InCombatLockdown() then
+      self.equipmentRefreshAfterCombat = true
+      return
+    end
+    self:RefreshEquipment()
+    self:ScheduleEquipmentSettlingRetries()
+  end)
+end
+
+function Module:ScheduleEquipmentSettlingRetries()
   if self.equipmentRefreshTimer then
     self:CancelTimer(self.equipmentRefreshTimer, true)
     self.equipmentRefreshTimer = nil
@@ -796,7 +809,8 @@ function Module:QueueEquipmentRefresh()
     local delay = EQUIPMENT_REFRESH_RETRY_DELAYS[index] - previousDelay
     self.equipmentRefreshTimer = self:ScheduleTimer(function()
       self.equipmentRefreshTimer = nil
-      if self:RefreshEquipment() then
+      -- The settling pass must refresh tooltips even if the item link is unchanged.
+      if self:RefreshEquipment(true) then
         scheduleRetry(index + 1)
       end
     end, delay)
@@ -847,6 +861,8 @@ end
 ---Opens a new equipment window
 ---@param character AE_Character
 function Module:OpenCharacter(character)
+  if not character then return end
+  if not self.window then self:Render() end
   if not self.window then return end
   if self.equipmentCharacter and self.equipmentCharacter == character and self.window:IsVisible() then
     self.window:Hide()

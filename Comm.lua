@@ -167,6 +167,22 @@ local broadcastPending = false
 -- a manual multi-character batch is still going out, or vice versa) is
 -- exactly that scenario.
 local batchInProgress = false
+-- Disabling Sync invalidates remaining batch steps, but must NOT release the
+-- sender's multipart spool while ChatThrottleLib still holds old chunks.
+-- The current character is allowed to drain; SendNext then releases the guard.
+local batchCancelled = false
+
+-- Chat may be restricted independently of InCombatLockdown (Midnight 12.0.5+).
+local function IsSyncSendRestricted()
+  if InCombatLockdown() then return true end
+  if C_RestrictedActions and C_RestrictedActions.GetAddOnRestrictionState
+    and Enum and Enum.AddOnRestrictionType and Enum.AddOnRestrictionType.Chat
+    and Enum.AddOnRestrictionState then
+    return C_RestrictedActions.GetAddOnRestrictionState(Enum.AddOnRestrictionType.Chat)
+      ~= Enum.AddOnRestrictionState.Inactive
+  end
+  return false
+end
 
 -- If a manual "Sync Now" is interrupted, keep the exact GUIDs that still
 -- need to go out. Additional clicks while the batch is actively sending
@@ -202,7 +218,7 @@ local function ResumeAutomaticSyncIfPending()
     automaticResumePending = false
     return
   end
-  if batchInProgress or InCombatLockdown() then return end
+  if batchInProgress or IsSyncSendRestricted() then return end
 
   automaticResumePending = false
   addon.Core:RequestSyncBroadcast()
@@ -921,9 +937,9 @@ local function PerformBroadcast(verbose, peerFilter)
   -- risks tainting the UI, and there's no good reason Sync can't just
   -- wait until after the pull instead. The automatic path remembers the
   -- interrupted work and resumes quietly once combat/restrictions clear.
-  if InCombatLockdown() then
+  if IsSyncSendRestricted() then
     if verbose then
-      addon.Core:Print("Sync: not sending, you're in combat -- Sync never runs during combat, even inside a raid or Mythic+ (being in the instance is fine; being in a pull isn't). Try again once combat ends.")
+      addon.Core:Print("Sync: not sending while combat or addon chat restrictions are active. Try again once they end.")
     else
       QueueAutomaticResume()
     end
@@ -1047,6 +1063,7 @@ local function PerformBroadcast(verbose, peerFilter)
     activeBatchConfirmedBy = {}
   end
   batchInProgress = true
+  batchCancelled = false
   local function SendNext()
     -- Re-check every step, not just once at the start -- unchecking
     -- "Enable Sync" mid-send should stop the rest of the batch right
@@ -1056,7 +1073,7 @@ local function PerformBroadcast(verbose, peerFilter)
     -- PerformBroadcast for why. The character already in flight when
     -- combat started still finishes normally (it's already been handed
     -- to ChatThrottleLib); this only stops the NEXT one from starting.
-    if not Data.db.global.sync.enabled then
+    if batchCancelled or not Data.db.global.sync.enabled then
       if verbose then
         addon.Core:Print(format("Sync: stopped -- Sync was disabled mid-send. %d of %d character(s) had already gone out: %s. Sync Now will continue with only the remaining character(s) after Sync is enabled again.", #sentNames, #toSend, #sentNames > 0 and JoinWithAnd(sentNames) or "none"))
       end
@@ -1067,9 +1084,9 @@ local function PerformBroadcast(verbose, peerFilter)
       batchInProgress = false
       return
     end
-    if InCombatLockdown() then
+    if IsSyncSendRestricted() then
       if verbose then
-        addon.Core:Print(format("Sync: stopped -- you're in combat now. %d of %d character(s) had already gone out: %s. Sync Now will continue with only the remaining character(s) after combat.", #sentNames, #toSend, #sentNames > 0 and JoinWithAnd(sentNames) or "none"))
+        addon.Core:Print(format("Sync: stopped -- combat or chat restrictions became active. %d of %d character(s) had already gone out: %s. Sync Now will continue with only the remaining character(s) after combat.", #sentNames, #toSend, #sentNames > 0 and JoinWithAnd(sentNames) or "none"))
       else
         QueueAutomaticResume()
       end
@@ -1185,14 +1202,15 @@ local function PerformBroadcast(verbose, peerFilter)
   SendNext()
 end
 
----Emergency escape hatch: force-clears the "a send is already in
----progress" guard (batchInProgress above) immediately. Called when Sync
----gets disabled, so turning it off actually frees up Sync Now again right
----away instead of leaving it locked out until the in-flight send
----eventually finishes on its own (there's no automatic timeout for
----that -- a genuinely slow send is waited out, not abandoned).
+---Stop scheduling new records immediately when Sync is disabled. Existing
+---multipart chunks queued in ChatThrottleLib cannot be removed safely, so
+---the sender guard remains until their final callback has drained.
 function addon.Core:ResetSyncBatchGuard()
-  batchInProgress = false
+  -- A queued ChatThrottleLib multipart send cannot be cancelled here. Releasing
+  -- batchInProgress before its final callback would permit a second AEv1
+  -- message to overwrite the receiver's in-progress AceComm assembly.
+  -- Retain the guard until SendNext observes cancellation after queue drain.
+  if batchInProgress then batchCancelled = true end
   automaticResumePending = false
   activeBatchId = nil
   activeBatchConfirmedBy = {}
@@ -1214,6 +1232,8 @@ end
 ---Debounced + throttled -- safe to call as often as you want. Completely
 ---silent -- see the file header.
 function addon.Core:RequestSyncBroadcast()
+  if not Data.db or not Data.db.global or not Data.db.global.sync
+    or not Data.db.global.sync.enabled then return end
   if broadcastPending then return end
   broadcastPending = true
   C_Timer.After(BROADCAST_DEBOUNCE_SECONDS, PerformBroadcast)
@@ -1966,8 +1986,9 @@ end, true)
 -- Midnight can reject outgoing addon traffic for an encounter-specific restriction even when
 -- the normal combat check alone is not enough to describe why a chunk failed. Resume a pending
 -- automatic batch as soon as Blizzard reports that restriction becoming inactive.
-addon.Libs.LiqUI.Events:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED", function(_, _, _, state)
-  if state == Enum.AddOnRestrictionState.Inactive then
+addon.Libs.LiqUI.Events:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED", function(_, _, restrictionType, state)
+  if restrictionType == Enum.AddOnRestrictionType.Chat
+    and state == Enum.AddOnRestrictionState.Inactive then
     ResumeAutomaticSyncIfPending()
   end
 end, true)

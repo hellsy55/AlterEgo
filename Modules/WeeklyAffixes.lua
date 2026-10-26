@@ -15,7 +15,7 @@ local PLACEHOLDER_BODY_HEIGHT = 80
 local PLACEHOLDER_TEXT = "The weekly schedule is not updated.\nCheck back next addon update!"
 
 function Module:OnInitialize()
-  self:Render()
+  -- Main's weekly-affixes click handler constructs this window on demand.
 end
 
 function Module:Render()

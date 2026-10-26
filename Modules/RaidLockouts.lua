@@ -1488,7 +1488,7 @@ function Module:OnInitialize()
   addon.Core:RegisterComm(COMM_PREFIX, function(prefix, message, distribution, sender)
     Module:OnRaidLockoutComm(prefix, message, distribution, sender)
   end)
-  self:EnsureWindow()
+  -- Keep raid lockout communications active without allocating its window.
 end
 
 function Module:ShowEntranceAlertPreview()

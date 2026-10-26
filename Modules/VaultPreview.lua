@@ -146,7 +146,7 @@ local function buildSlotCell(character, vaultType, index, useSnapshot)
 end
 
 function Module:OnInitialize()
-  self:Render()
+  -- UI is allocated by OpenCharacter on first use.
 end
 
 function Module:OnEnable()
@@ -167,6 +167,8 @@ end
 ---of the live/current data -- used when the live grid has nothing to show
 ---(e.g. right after a weekly reset) but a snapshot from before that does.
 function Module:OpenCharacter(character, useSnapshot)
+  if not character then return end
+  if not self.window then self:Render() end
   if not self.window then return end
   if self.character and self.character == character and self.window:IsVisible() then
     self.window:Hide()

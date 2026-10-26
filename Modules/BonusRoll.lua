@@ -379,9 +379,8 @@ function Module:UpdateCharacter(character)
     saved.updatedAt = time()
     saved.seasonID = seasonID
     importRollTimestamps(character)
-    if Data.MarkCharacterSyncChanged then
-      Data:MarkCharacterSyncChanged(character)
-    end
+    -- A timestamp-only refresh is local metadata, not a new roll. Avoid
+    -- incrementing syncRevision and broadcasting identical history.
     return nil
   end
 
@@ -482,7 +481,10 @@ function Module:RefreshOnInitialLogin()
     end
   end
 
-  tryRefresh()
+  -- SimulationCraft creates a complete text profile to supply one history
+  -- line. Defer the initial export out of the login/loading critical path;
+  -- opening Bonus Roll still performs its normal live refresh immediately.
+  C_Timer.After(5, tryRefresh)
 end
 
 ---------------------------------------------------------------------------

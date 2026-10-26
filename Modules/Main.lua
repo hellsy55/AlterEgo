@@ -191,7 +191,7 @@ function Module:CheckNebulousVoidcoreRaidEntrance(suppressCurrent)
 end
 
 function Module:OnInitialize()
-  self:Render()
+  -- Main is created on first open by Core:ToggleWindow, not at login.
 end
 
 function Module:OnEnable()
@@ -450,12 +450,12 @@ do
         -- Clearing the password leaves Sync enabled but permanently
         -- unable to send/receive anything (GetUsablePassword would
         -- just keep refusing it) -- so treat it the same as flipping
-        -- Enable Sync off by hand: stop immediately, including freeing
-        -- up any in-progress batch guard, and say so.
+        -- Enable Sync off by hand: stop new records, but let queued
+        -- multipart chunks drain before starting another batch.
         if Data.db.global.sync.enabled then
           Data.db.global.sync.enabled = false
           addon.Core:ResetSyncBatchGuard()
-          addon.Core:Print("Sync: password cleared -- Enable Sync turned off and Sync stopped immediately.")
+          addon.Core:Print("Sync: password cleared; new Sync sends stopped. Already queued fragments may finish transmitting.")
         end
         pendingSyncAction = nil
         pendingSyncChannel = nil
@@ -2664,6 +2664,24 @@ local function EnsureRowHighlightPoller(window)
     elapsed = elapsed + dt
     if elapsed < 0.05 then return end
     elapsed = 0
+    if window.virtualizedCharacterCount and window.virtualizedCharacterCount > 0
+      and Data.db.global.liqui.windows.Main.virtualizeColumns ~= false then
+      local area = window.body and window.body.content and window.body.content.scrollArea
+      local scrollBox = area and area.horizontalScrollBox
+      local viewport = area and area.container
+      if scrollBox and viewport then
+        local columnWidth = window.characterScrollColumnWidth or CHARACTER_WIDTH
+        local viewportWidth = viewport:GetWidth() or 0
+        local offset = (scrollBox:GetScrollPercentage() or 0) * (scrollBox:GetDerivedScrollRange() or 0)
+        local first = math.max(1, math.floor(offset / columnWidth))
+        local last = math.min(window.virtualizedCharacterCount,
+          math.ceil((offset + viewportWidth) / columnWidth) + 1)
+        last = math.max(first, last)
+        if first ~= window.virtualFirstCharacter or last ~= window.virtualLastCharacter then
+          Module:Render()
+        end
+      end
+    end
     if not window:IsMouseOver() then
       Module:HideRowHighlight()
       return
@@ -4593,7 +4611,7 @@ function Module:RenderNow()
                   if ShowFirstSyncTutorial() then return MenuResponse.CloseAll end
                   Data.db.global.sync.enabled = false
                   addon.Core:ResetSyncBatchGuard()
-                  addon.Core:Print("Sync: stopped. Nothing will be sent or received until you turn Enable Sync back on.")
+                  addon.Core:Print("Sync: stopped. No new records will start; already queued fragments may finish transmitting.")
                   -- This checkbox also owns the Only Sync Max Level Characters submenu.
                   -- Refresh the open menu explicitly so its checked state updates immediately
                   -- instead of looking off while Sync is already disabled.
@@ -4859,6 +4877,18 @@ function Module:RenderNow()
           tooltip:AddLine("Show Logo Icon Only", 1, 1, 1, true)
           tooltip:AddLine("Show only the AlterEgo logo in the Main window header. This also shrinks the Show/Hide Row Labels hitbox so more header controls can fit on the same row.", nil, nil, nil, true)
         end)
+        menu:CreateCheckbox(
+          "Virtualize Offscreen Characters",
+          function() return settings.virtualizeColumns ~= false end,
+          function()
+            settings.virtualizeColumns = settings.virtualizeColumns == false
+            self:Render()
+            return MenuResponse.Refresh
+          end
+        ):SetTooltip(function(tooltip)
+          tooltip:AddLine("Virtualize Offscreen Characters", 1, 1, 1, true)
+          tooltip:AddLine("Recycle character column frames outside the horizontal viewport. Disable to use the original full-grid rendering if another UI addon needs it.", nil, nil, nil, true)
+        end)
       end,
       titlebarButtons = {
         {
@@ -5032,7 +5062,7 @@ function Module:RenderNow()
   local currencies = TableFilter(allCurrencies, function(currency) return currency.category == nil end)
   local weeklies = TableFilter(allCurrencies, function(currency) return currency.category == "weekly" end)
   local seasonalChores = TableFilter(allCurrencies, function(currency) return currency.category == "seasonalChore" end)
-  local trackerSections = Data:GetTrackerSections()
+  local trackerSections = Data:GetTrackerSections(allCurrencies)
   local trackerMoveState = {}
   TableForEach(trackerSections, function(section, sectionIndex)
     TableForEach(section.items, function(tracker, itemIndex)
@@ -5065,6 +5095,29 @@ function Module:RenderNow()
   ---@type Frame
   local scrollContent = self.window.body.content.scrollArea.content
   local sidebarCollapsed = mainWindowSettings.sidebarCollapsed == true
+
+  local renderFirstCharacter, renderLastCharacter = 1, numCharacters
+  if numCharacters > 0 and mainWindowSettings.virtualizeColumns ~= false then
+    local scrollArea = self.window.body.content.scrollArea
+    local scrollBox = scrollArea.horizontalScrollBox
+    local columnWidth = self.window.characterScrollColumnWidth or CHARACTER_WIDTH
+    local viewportWidth = scrollArea.container:GetWidth() or 0
+    local visibleLimit = tonumber(mainWindowSettings.visibleCharacterLimit) or 15
+    if viewportWidth <= 0 then
+      viewportWidth = math.max(1, windowWidthMax - (sidebarCollapsed and 0 or Constants.sizes.sidebar.width))
+    end
+    if visibleLimit > 0 then
+      viewportWidth = math.min(viewportWidth, visibleLimit * columnWidth)
+    end
+    local scrollRange = scrollBox and scrollBox:GetDerivedScrollRange() or 0
+    local scrollOffset = (scrollBox and scrollBox:GetScrollPercentage() or 0) * scrollRange
+    renderFirstCharacter = math.max(1, math.floor(scrollOffset / columnWidth))
+    renderLastCharacter = math.min(numCharacters, math.ceil((scrollOffset + viewportWidth) / columnWidth) + 1)
+    renderLastCharacter = math.max(renderFirstCharacter, renderLastCharacter)
+  end
+  self.window.virtualizedCharacterCount = numCharacters
+  self.window.virtualFirstCharacter = renderFirstCharacter
+  self.window.virtualLastCharacter = renderLastCharacter
 
   -- Collapsing the sidebar only changes the shared row-label column. The
   -- character grid keeps rendering every cell exactly as before. Re-anchor
@@ -5151,6 +5204,7 @@ function Module:RenderNow()
         end)
         affixFrame:SetScript("OnClick", function()
           if not weeklyAffixesModule then return end
+          if not weeklyAffixesModule.window then weeklyAffixesModule:Render() end
           local affixesWindow = LiqUI:GetElement("Window", addon.name .. "Affixes")
           if affixesWindow then
             affixesWindow:Toggle()
@@ -5987,11 +6041,22 @@ function Module:RenderNow()
     self.window.characterFrames = self.window.characterFrames or {}
     TableForEach(self.window.characterFrames, function(frame) frame:Hide() end)
     TableForEach(characters, function(character, characterIndex)
+      if characterIndex < renderFirstCharacter or characterIndex > renderLastCharacter then
+        windowWidth = windowWidth + CHARACTER_WIDTH
+        return
+      end
+      local poolIndex = characterIndex - renderFirstCharacter + 1
+      local currencyByID = {}
+      for _, currency in ipairs(character.currencies or {}) do
+        if currency.id ~= nil and currencyByID[currency.id] == nil then
+          currencyByID[currency.id] = currency -- Preserve TableGet's first-match semantics.
+        end
+      end
       local rowCount = 0
       local totalHeight = 0
-      local characterFrame = self.window.characterFrames[characterIndex]
+      local characterFrame = self.window.characterFrames[poolIndex]
       if not characterFrame then
-        characterFrame = CreateFrame("Frame", "$parentCharacterColumn" .. characterIndex, scrollContent)
+        characterFrame = CreateFrame("Frame", "$parentCharacterColumn" .. poolIndex, scrollContent)
         characterFrame.infoFrames = {}
         characterFrame.dungeonFrames = {}
         characterFrame.raidFrames = {}
@@ -6002,7 +6067,7 @@ function Module:RenderNow()
         characterFrame.currencyHeaderFrame = CreateFrame("Frame", "$parentCurrencies", characterFrame)
         characterFrame.weekliesHeaderFrame = CreateFrame("Frame", "$parentWeeklies", characterFrame)
         characterFrame.seasonalChoresHeaderFrame = CreateFrame("Frame", "$parentSeasonalChores", characterFrame)
-        self.window.characterFrames[characterIndex] = characterFrame
+        self.window.characterFrames[poolIndex] = characterFrame
       end
 
       characterFrame:SetPoint("TOPLEFT", scrollContent, "TOPLEFT", (characterIndex - 1) * CHARACTER_WIDTH, 0)
@@ -6793,7 +6858,7 @@ function Module:RenderNow()
             characterFrame.currencyFrames[currencyIndex] = currencyFrame
           end
 
-          local characterCurrency = TableGet(character.currencies, "id", currency.id)
+          local characterCurrency = currencyByID[currency.id]
           PopulateCurrencyCell(currencyFrame, currency, characterCurrency, Data.db.global.currencies)
           currencyFrame:SetScript("OnLeave", function()
             GameTooltip:Hide()
@@ -6843,7 +6908,7 @@ function Module:RenderNow()
             characterFrame.weeklyFrames[currencyIndex] = currencyFrame
           end
 
-          local characterCurrency = TableGet(character.currencies, "id", currency.id)
+          local characterCurrency = currencyByID[currency.id]
           PopulateCurrencyCell(currencyFrame, currency, characterCurrency, Data.db.global.weeklies)
           currencyFrame:SetScript("OnLeave", function()
             GameTooltip:Hide()
@@ -6893,7 +6958,7 @@ function Module:RenderNow()
             characterFrame.seasonalChoreFrames[currencyIndex] = currencyFrame
           end
 
-          local characterCurrency = TableGet(character.currencies, "id", currency.id)
+          local characterCurrency = currencyByID[currency.id]
           PopulateCurrencyCell(currencyFrame, currency, characterCurrency, Data.db.global.seasonalChores)
           currencyFrame:SetScript("OnLeave", function()
             GameTooltip:Hide()
@@ -6948,7 +7013,9 @@ function Module:RenderNow()
   if expandSingleVisibleColumn then
     finalCharacterWidth = math.max(CHARACTER_WIDTH, bodyWidth - sidebarWidth)
     for characterIndex = 1, numCharacters do
-      local characterFrame = self.window.characterFrames and self.window.characterFrames[characterIndex]
+      local poolIndex = characterIndex - renderFirstCharacter + 1
+      local characterFrame = characterIndex >= renderFirstCharacter and characterIndex <= renderLastCharacter
+        and self.window.characterFrames and self.window.characterFrames[poolIndex]
       if characterFrame and characterFrame:IsShown() then
         characterFrame:ClearAllPoints()
         characterFrame:SetPoint("TOPLEFT", scrollContent, "TOPLEFT", (characterIndex - 1) * finalCharacterWidth, 0)

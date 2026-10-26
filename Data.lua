@@ -119,6 +119,7 @@ Data.defaultDB = {
       windows = {
         Main = {
           visibleCharacterLimit = 15,
+          virtualizeColumns = true,
           logoIconOnly = false,
           showCharacterScrollArrows = true,
           characterScrollArrowScale = 100,
@@ -518,9 +519,12 @@ function Data:ApplyTrackerOverrides(currencies)
       currency.category = DenormalizeTrackerCategory(category)
       currency.order = order
       if currency.id ~= nil then
-        overrides[currency.id] = overrides[currency.id] or {}
-        overrides[currency.id].category = category
-        overrides[currency.id].order = order
+        local entry = overrides[currency.id]
+        if not entry or entry.category ~= category or entry.order ~= order then
+          entry = entry or {}
+          overrides[currency.id] = entry
+          entry.category, entry.order = category, order
+        end
       end
       order = order + 1
       table.insert(sorted, currency)
@@ -536,8 +540,8 @@ end
 ---moved out of it) still appears here as an empty entry, so the hover arrows know it's a valid
 ---place to move a tracker into.
 ---@return { category: string, items: AE_CurrencyInfo[] }[]
-function Data:GetTrackerSections()
-  local allTrackers = self:GetCurrencies()
+function Data:GetTrackerSections(allTrackers)
+  allTrackers = allTrackers or self:GetCurrencies()
   local sections = {}
   TableForEach(TRACKER_SECTIONS, function(section)
     local sectionSettings = self.db.global[section.settingsKey]
@@ -1356,7 +1360,9 @@ function Data:GetCharacters(unfiltered)
     return (a.order or 0) < (b.order or 0)
   end)
   TableForEach(characters, function(character)
-    self.db.global.characters[character.GUID].order = order
+    if character.order ~= order then
+      character.order = order
+    end
     order = order + 1
   end)
 
@@ -2347,20 +2353,57 @@ function Data:CalculateBagItemLevelUpgrade()
 
   -- Each bag item is queried once even when multiple slots accept its equip location.
   local bestBagLevelByEquipLoc = {}
+  local pendingItemIDs = {}
+  -- A BAG_UPDATE invalidates the aggregate, not every unchanged item's API
+  -- metadata. Reusing per-position link/level data avoids repeated expensive
+  -- detailed item-level lookups while still detecting moved/replaced items.
+  local bagSlots = self.cache.bagItemSlotInfo or {}
+  self.cache.bagItemSlotInfo = bagSlots
   for bag = 0, NUM_BAG_SLOTS do
     local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+    local bagCache = bagSlots[bag] or {}
+    bagSlots[bag] = bagCache
     for containerSlot = 1, numSlots do
       local itemLink = C_Container.GetContainerItemLink(bag, containerSlot)
       if itemLink then
-        local _, _, _, equipLoc = C_Item.GetItemInfoInstant(itemLink)
-        if equipLoc and equipLoc ~= "" and equipLoc ~= "INVTYPE_NON_EQUIP_IGNORE" then
-          local itemLevel = C_Item.GetDetailedItemLevelInfo(itemLink)
-          if itemLevel and itemLevel > (bestBagLevelByEquipLoc[equipLoc] or 0) then
-            bestBagLevelByEquipLoc[equipLoc] = itemLevel
+        local cachedItem = bagCache[containerSlot]
+        local equipLoc, itemLevel
+        if cachedItem and cachedItem.link == itemLink
+          and now - cachedItem.updatedAt < 30 then
+          equipLoc, itemLevel = cachedItem.equipLoc, cachedItem.itemLevel
+        else
+          local _, _, _, instantEquipLoc = C_Item.GetItemInfoInstant(itemLink)
+          equipLoc = instantEquipLoc
+          if equipLoc and equipLoc ~= "" and equipLoc ~= "INVTYPE_NON_EQUIP_IGNORE" then
+            itemLevel = C_Item.GetDetailedItemLevelInfo(itemLink)
+          end
+          if equipLoc then
+            bagCache[containerSlot] = {link = itemLink, equipLoc = equipLoc,
+              itemLevel = itemLevel, updatedAt = now}
+          else
+            bagCache[containerSlot] = nil
           end
         end
+        if equipLoc and equipLoc ~= "" and equipLoc ~= "INVTYPE_NON_EQUIP_IGNORE" then
+          if itemLevel and itemLevel > (bestBagLevelByEquipLoc[equipLoc] or 0) then
+            bestBagLevelByEquipLoc[equipLoc] = itemLevel
+          elseif not itemLevel then
+            local itemID = C_Item.GetItemIDForItemInfo(itemLink)
+            if itemID then pendingItemIDs[itemID] = true end
+          end
+        elseif not equipLoc then
+          local itemID = C_Item.GetItemIDForItemInfo(itemLink)
+          if itemID then pendingItemIDs[itemID] = true end
+        end
+      else
+        bagCache[containerSlot] = nil
       end
     end
+    -- Explicit slot count avoids relying on Lua's undefined # for sparse bags.
+    for containerSlot = numSlots + 1, (bagCache.slotCount or 0) do
+      bagCache[containerSlot] = nil
+    end
+    bagCache.slotCount = numSlots
   end
 
   local deltaTotal, count = 0, 0
@@ -2380,7 +2423,7 @@ function Data:CalculateBagItemLevelUpgrade()
   end
 
   local delta = count > 0 and deltaTotal / count or 0
-  self.cache.bagItemLevelUpgrade = {updatedAt = now, delta = delta}
+  self.cache.bagItemLevelUpgrade = {updatedAt = now, delta = delta, pendingItemIDs = pendingItemIDs}
   return delta
 end
 
@@ -2450,6 +2493,28 @@ function Data:UpdateCharacterInfo()
     -- The visible main window sorts by this local refresh timestamp.
     addon.Module_Main:Render()
   end
+end
+
+---Guild events do not change bag item levels, race, specialization or
+---equipment. Update only guild metadata instead of scanning every bag slot.
+function Data:UpdateGuildInfo()
+  local character = self:GetCharacter()
+  if not character then return end
+  local guildName, guildRankName, guildRankIndex, guildRealm = GetGuildInfo("player")
+  local guild = character.info.guild
+  if type(guild) ~= "table" then
+    guild = TableCopy(self.defaultCharacter.info.guild)
+    character.info.guild = guild
+  end
+  local inGuild = IsInGuild()
+  if guild.name == guildName and guild.rankName == guildRankName
+    and guild.rankIndex == guildRankIndex and guild.realm == guildRealm
+    and guild.isInGuild == inGuild then return end
+  guild.name, guild.rankName, guild.rankIndex = guildName, guildRankName, guildRankIndex
+  guild.realm, guild.isInGuild = guildRealm, inGuild
+  character.lastUpdate = GetServerTime()
+  self:MarkCharacterSyncChanged(character)
+  addon.Core:Render()
 end
 
 ---Store the current zone so the character tooltip can show where this
@@ -3112,7 +3177,7 @@ function Data:UpdateSecondaryStats()
 end
 
 ---Refresh equipment from the API
-function Data:UpdateEquipment()
+function Data:UpdateEquipment(forceScan)
   local character = self:GetCharacter()
   if not character then return end
   -- The core update queue can request a scan independently of Equipment's
@@ -3129,6 +3194,16 @@ function Data:UpdateEquipment()
   local previousEquipment = character.equipment
   local equipmentSnapshot = {}
   local missingItemData = false
+  -- Event bursts often rescan the same item repeatedly for tooltip/enchant
+  -- metadata. Cache complete, unchanged slots for a brief settling interval;
+  -- incomplete records are NEVER cached so delayed tooltip data can resolve.
+  local slotCache = self.cache.equipmentSlots
+  if not slotCache or slotCache.GUID ~= character.GUID then
+    slotCache = { GUID = character.GUID, slots = {} }
+    self.cache.equipmentSlots = slotCache
+  end
+  local cachedSlots = slotCache.slots
+  local scanAt = GetTime()
 
   local upgradePattern = ITEM_UPGRADE_TOOLTIP_FORMAT_STRING
   upgradePattern = upgradePattern:gsub("%%d", "%%s")
@@ -3136,13 +3211,23 @@ function Data:UpdateEquipment()
 
   TableForEach(LiqUI.Data:GetInventorySlots(), function(slot)
     local inventoryItemLink = GetInventoryItemLink("player", slot.id)
-    if not inventoryItemLink then return end
+    if not inventoryItemLink then
+      cachedSlots[slot.id] = nil
+      return
+    end
+    local cachedSlot = cachedSlots[slot.id]
+    if not forceScan and cachedSlot and cachedSlot.link == inventoryItemLink
+      and scanAt - cachedSlot.updatedAt < 0.6 then
+      table.insert(equipmentSnapshot, cachedSlot.record)
+      return
+    end
 
     local itemUpgradeTrack, itemUpgradeLevel, itemUpgradeMax, itemUpgradeColor = "", 0, 0, ""
     local itemName, itemLink, itemQuality, itemLevel, itemMinLevel, itemType, itemSubType,
     itemStackCount, itemEquipLoc, itemTexture, sellPrice, classID, subclassID, bindType,
     expansionID, setID, isCraftingReagent = C_Item.GetItemInfo(inventoryItemLink)
     if itemName == nil then
+      cachedSlots[slot.id] = nil
       missingItemData = true
       return
     end
@@ -3241,6 +3326,11 @@ function Data:UpdateEquipment()
       itemSlotName = slot.token,
     }
     table.insert(equipmentSnapshot, equipment)
+    if enchantID == 0 or enchantTooltipLine then
+      cachedSlots[slot.id] = {link = inventoryItemLink, record = equipment, updatedAt = scanAt}
+    else
+      cachedSlots[slot.id] = nil
+    end
   end)
   if SavedSnapshotEqual(previousEquipment or {}, equipmentSnapshot) then
     character.equipment = previousEquipment or equipmentSnapshot

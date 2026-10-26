@@ -112,12 +112,15 @@ function Core:OnInitialize()
       Data:MarkVaultRewardClaimed(activityId)
     end)
   end
-  self:RenderNow()
+  -- Do not build every optional window on login. Collection, event hooks,
+  -- and Sync are already active; windows are initialized on first use.
 end
 
 ---Toggle the main window
 function Core:ToggleWindow()
-  local window = addon.Module_Main.window
+  local main = addon.Module_Main
+  if not main.window then main:RenderNow() end
+  local window = main.window
   if not window then return end
   window:Toggle()
   if window:IsVisible() then
@@ -152,7 +155,9 @@ end
 ---Render all modules immediately (needed during initial UI setup).
 function Core:RenderNow()
   for _, module in self:IterateModules() do
-    if module.Render ~= nil then
+    -- Hidden windows recalculate their contents on OnShow. Avoid creating
+    -- them, or laying them out, for unrelated background data updates.
+    if module.Render ~= nil and module.window and module.window:IsVisible() then
       module:Render()
     end
   end
@@ -172,6 +177,7 @@ end
 ---Keep the equipment module's enchant-aware refresh/retry implementation.
 local updaters = {
   UpdateCharacterInfo = function() Data:UpdateCharacterInfo() end,
+  UpdateGuildInfo = function() Data:UpdateGuildInfo() end,
   UpdatePreyProgress = function() Data:UpdatePreyProgress() end,
   UpdateLabyrinthProgress = function() Data:UpdateLabyrinthProgress() end,
   UpdateEquipment = function()
@@ -273,7 +279,7 @@ function Core:OnEnable()
       "GUILD_ROSTER_UPDATE",
       "PLAYER_GUILD_UPDATE",
     }, function()
-      self:QueueUpdate("UpdateCharacterInfo")
+      self:QueueUpdate("UpdateGuildInfo")
     end
   )
   Events:RegisterEvent(
@@ -399,9 +405,17 @@ function Core:OnEnable()
       self:QueueUpdate("UpdateCurrencies")
     end
   )
-  Events:RegisterEvent("GET_ITEM_INFO_RECEIVED", function(_, _, ...)
-    Data:InvalidateBagItemLevelUpgrade()
-    self:OnGetItemInfoReceived(...)
+  Events:RegisterEvent("GET_ITEM_INFO_RECEIVED", function(_, _, itemID, success, ...)
+    local bagCache = Data.cache and Data.cache.bagItemLevelUpgrade
+    if success and bagCache and bagCache.pendingItemIDs
+      and bagCache.pendingItemIDs[itemID] then
+      Data:InvalidateBagItemLevelUpgrade()
+      -- The resolved item can be present in any slot; refresh per-slot
+      -- metadata on the next aggregate scan as well.
+      Data.cache.bagItemSlotInfo = nil
+      self:QueueUpdate("UpdateCharacterInfo")
+    end
+    self:OnGetItemInfoReceived(itemID, success, ...)
   end)
   Events:RegisterEvent(
     {

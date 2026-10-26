@@ -517,7 +517,7 @@ addon.Libs.LiqUI.Events:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function(_, _, 
 end, true)
 
 function Module:OnInitialize()
-  self:CreateWindow()
+  -- Delve events stay registered; build the optional list window on open.
 end
 
 function Module:CreateWindow()
