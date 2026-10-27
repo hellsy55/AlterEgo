@@ -1,0 +1,83 @@
+name: Validate AlterEgo
+
+on:
+  push:
+    branches: [new-features]
+    paths:
+      - '**/*.lua'
+      - '**/*.xml'
+      - '**/*.toc'
+      - '.wowluarc.json'
+      - '.pkgmeta'
+      - '.pkgmeta-lock.json'
+      - 'Libs/**'
+      - 'scripts/**'
+      - 'AGENTS.md'
+      - '.agents/**'
+      - '.github/workflows/validate.yml'
+  pull_request:
+    branches: [new-features]
+    paths:
+      - '**/*.lua'
+      - '**/*.xml'
+      - '**/*.toc'
+      - '.wowluarc.json'
+      - '.pkgmeta'
+      - '.pkgmeta-lock.json'
+      - 'Libs/**'
+      - 'scripts/**'
+      - 'AGENTS.md'
+      - '.agents/**'
+      - '.github/workflows/validate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUTF8: '1'
+
+jobs:
+  addon-validation:
+    if: github.ref == 'refs/heads/new-features' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Prepare Lua 5.1 compiler from Ubuntu repositories
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y lua5.1
+          luac5.1 -v
+      - name: Validate working tree
+        run: python -B -X utf8 scripts/validate_addon.py --luac /usr/bin/luac5.1
+
+  maintenance-tests:
+    if: github.ref == 'refs/heads/new-features' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Prepare real compiler for validator integration tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y lua5.1
+      - name: Run isolated maintenance and validation tests
+        env:
+          ALTEREGO_LUAC51: /usr/bin/luac5.1
+        run: python -B -X utf8 -m unittest discover -s scripts/tests -p 'test_*.py' -v

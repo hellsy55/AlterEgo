@@ -1,7 +1,11 @@
 """Exercise the real preparation helper against local fork/upstream repositories."""
 import contextlib
+import io
+import json
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -258,17 +262,46 @@ class CloudCheckoutTests(unittest.TestCase):
             self.assertNotIn(command, source)
 
     def development_entrypoint(self, skill):
-        instructions = (ROOT / '.agents/skills' / skill / 'SKILL.md').read_text()
-        self.assertIn('direct-entrypoint development preparation', instructions)
-        shared = (ROOT / '.agents/references/maintenance-runtime.md').read_text()
-        self.assertIn('--mode development --cloud-work', shared)
+        instructions = (ROOT / '.agents/skills' / skill / 'SKILL.md').read_text(encoding='utf-8')
+        self.assertIn('../../references/maintenance-runtime.md', instructions)
+        shared = (ROOT / '.agents/references/maintenance-runtime.md').read_text(encoding='utf-8')
+        self.assertIn('cloud-environment.md#checkout-preparation', shared)
+        adapter = (ROOT / '.agents/references/cloud-environment.md').read_text(encoding='utf-8')
+        section = adapter.split('## Checkout preparation', 1)[1].split('\n## ', 1)[0]
+        commands = [shlex.split(command) for command in re.findall(r'`([^`]+)`', section)
+                    if 'scripts/prepare_update.py' in command]
+        development = [command for command in commands if '--mode' in command]
+        self.assertEqual(len(development), 1)
+        command = development[0]
+
+        def check_command(tokens):
+            self.assertEqual(tokens[:2], ['<PYTHON>', 'scripts/prepare_update.py'])
+            self.assertCountEqual(tokens[2:], ['--mode', 'development', '--cloud-work'])
+
+        check_command(command)
+        # Reject instructions that accidentally invoke upstream sync or omit
+        # the explicit Cloud host decision, rather than silently accepting them.
+        without_cloud = [token for token in command if token != '--cloud-work']
+        upstream_mode = ['update' if token == 'development' else token for token in command]
+        for invalid in (without_cloud, upstream_mode):
+            with self.subTest(invalid_command=invalid), self.assertRaises(AssertionError):
+                check_command(invalid)
+        with patch.object(preparation, 'git', wraps=preparation.git) as rejected, \
+                patch.object(sys, 'argv', without_cloud[1:]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(preparation.main(), 1)
+        self.assertFalse(any(call.args[0] in ('fetch', 'checkout', 'push', 'reset', 'merge', 'commit')
+                             for call in rejected.call_args_list))
         snapshots = {repo: self.command(repo, 'for-each-ref', '--format=%(refname) %(objectname)')
                      for repo in (self.fork, self.upstream)}
         # Development must not depend on the mirror branch or upstream access.
         self.command(self.fork, 'update-ref', '-d', 'refs/heads/main')
         snapshots[self.fork] = self.command(self.fork, 'for-each-ref', '--format=%(refname) %(objectname)')
-        with patch.object(preparation, 'git', wraps=preparation.git) as calls:
-            result = preparation.prepare(cloud_work=True, mode='development')
+        output = io.StringIO()
+        with patch.object(preparation, 'git', wraps=preparation.git) as calls, \
+                patch.object(sys, 'argv', command[1:]), contextlib.redirect_stdout(output):
+            self.assertEqual(preparation.main(), 0)
+        result = json.loads(output.getvalue())
         self.assertEqual(self.git('branch', '--show-current'), 'new-features')
         self.assertEqual(self.git('rev-parse', 'work'), self.fork_head)
         self.assertEqual(self.git('rev-parse', 'new-features'), self.fork_head)

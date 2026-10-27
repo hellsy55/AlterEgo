@@ -354,11 +354,32 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_install_environment_contract(self):
         skill = (ROOT / '.agents/skills/alterego-install/SKILL.md').read_text(encoding="utf-8")
-        self.assertIn('On Cloud/Linux, stop without invoking PowerShell or offering an install menu', skill)
-        self.assertIn('On local Windows, verify', skill)
-        self.assertIn('powershell -NoProfile -ExecutionPolicy Bypass -File', skill)
-        self.assertIn('new-features', skill)
-        self.assertIn('without a second confirmation', skill)
+
+        def check_contract(text):
+            # Installation is an instruction-driven external workflow, not a
+            # Python API. Check its operative constraints without executing it.
+            normalized = ' '.join(text.split())
+            self.assertRegex(normalized, r'On Cloud/Linux, stop without invoking PowerShell or offering an install menu')
+            self.assertRegex(normalized, r'On local Windows, (?:check|verify) the existing installer and Retail AddOns directory')
+            self.assertRegex(normalized, r'; if either is missing, report installation unavailable and offer no impossible option')
+            self.assertIn('powershell -NoProfile -ExecutionPolicy Bypass -File', normalized)
+            self.assertIn('if the user has not already chosen', normalized)
+            self.assertIn('without a second confirmation', normalized)
+            self.assertIn('The source is the GitHub `new-features` ZIP, never local working-tree files', normalized)
+
+        check_contract(skill)
+        # Each mutation removes a real safety requirement. None may pass.
+        for old, new in (
+                ('stop without invoking PowerShell or offering an install menu', 'run PowerShell'),
+                ('existing installer and Retail AddOns directory', 'existing installer'),
+                ('if either is missing', 'even if either is missing'),
+                ('if the user has not already chosen', 'unconditionally'),
+                ('without a second confirmation', 'with another confirmation'),
+                ('GitHub `new-features` ZIP, never local working-tree files', 'local working-tree files')):
+            with self.subTest(removed_contract=old):
+                self.assertIn(old, skill)
+                with self.assertRaises(AssertionError):
+                    check_contract(skill.replace(old, new))
 
     def test_default_designation_and_aliases(self):
         agents = (ROOT / 'AGENTS.md').read_text(encoding="utf-8")
