@@ -29,8 +29,8 @@ Data.currencies = {
   {seasonID = 18, seasonDisplayID = 2, id = 3028, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Restored Coffer key
   {seasonID = 18, seasonDisplayID = 2, id = 3356, useTotalEarnedForMaxQty = false, currencyType = "delve"},                                                                                                                                           -- Untainted Mana-Crystals
   {seasonID = 18, seasonDisplayID = 2, id = 280562, currencyType = "trackedItem", name = "Ascendant Venomstone", required = 10, tooltipNote = "Use 10 to empower a fully upgraded Season 2 Hero/Myth or maximum-quality Tidal Crafted weapon, trinket, or necklace."},
-  {seasonID = 18, seasonDisplayID = 2, id = 285807, currencyType = "trackedItem", name = "Heroic Soul Fragment", required = 3, tooltipNote = "Combine 3 fragments obtained from the Labyrinth for a Hero-track equipment reward."},
-  {seasonID = 18, seasonDisplayID = 2, id = 285065, currencyType = "trackedItem", name = "Mythical Soul Fragment", required = 3, tooltipNote = "Combine 3 fragments obtained from the Labyrinth for a Myth-track equipment reward."},
+  {seasonID = 18, seasonDisplayID = 2, id = 285801, currencyType = "trackedItem", name = "Heroic Soul Fragment", required = 3, tooltipNote = "Combine 3 fragments obtained from the Labyrinth for a Hero-track equipment reward."},
+  {seasonID = 18, seasonDisplayID = 2, id = 285065, currencyType = "trackedItem", name = "Mythical Soul Fragment", required = 3, tooltipNote = "Exchange 3 fragments with Wah'du in the Labyrinth for a Myth-track equipment reward."},
 
   -- Weeklies (fixed display order: Dundun, Gilded Stash, Trovehunter's Bounty, Purging the Vaults, Trailing Xal'atath, Unity Against the Void)
   {id = 97064, currencyType = "quest", resets = "weekly",  name = "Dundun",  questID = 97064, iconFileID = 647701, category = "weekly", description = "Weekly delve event."},
