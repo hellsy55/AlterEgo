@@ -1828,6 +1828,7 @@ end
 
 ---Perform weekly reset tasks (e.g., vault, weekly-earn currency progress for offline alts)
 function Data:TaskWeeklyReset()
+  local nextWeeklyReset = time() + C_DateAndTime.GetSecondsUntilWeeklyReset()
   if type(self.db.global.weeklyReset) == "number" and self.db.global.weeklyReset <= time() then
     TableForEach(self.db.global.characters, function(character)
       -- Check if vault has available rewards
@@ -1845,13 +1846,16 @@ function Data:TaskWeeklyReset()
       TableForEach(character.mythicplus.runHistory, function(run)
         run.thisWeek = false
       end)
-      -- Weekly Nemesis kill resets with the regional weekly cycle.
+      -- Reset the displayed chamber count for every tracked character, not
+      -- just the weekly total. Keep the active visit/tier state intact.
       if type(character.labyrinth) == "table" then
         local progress = character.labyrinth
         progress.killResetAt = nil
         progress.weeklyChambers = 0
-        progress.weeklyResetAt = nil
-        -- A weekly reset does not end an active physical Labyrinth run.
+        progress.weeklyResetAt = nextWeeklyReset
+        progress.lastChambers = nil
+        progress.chambers = progress.active and 0 or nil
+        progress.lastChamberAt = nil
       end
       -- Reset Prey Hunts, including the Nightmare weekly quest fallback.
       character.prey.questsCompleted = wipe(character.prey.questsCompleted or {})
@@ -1874,7 +1878,7 @@ function Data:TaskWeeklyReset()
       self:MarkCharacterSyncChanged(character)
     end)
   end
-  self.db.global.weeklyReset = time() + C_DateAndTime.GetSecondsUntilWeeklyReset()
+  self.db.global.weeklyReset = nextWeeklyReset
 end
 
 ---Perform season reset tasks

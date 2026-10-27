@@ -16,7 +16,7 @@ local HEADER_HEIGHT = 24
 local FOOTER_HEIGHT = 20
 local ROW_HEIGHT = 22
 local DIFFICULTY_COLUMN_WIDTH = 60
-local MAX_COLUMNS = 5 -- four raid difficulties + one overlapping dungeon column
+local MAX_COLUMNS = 6 -- four raid difficulties + unknown + overlapping dungeon column
 local ICON_SIZE = 18
 local RENDER_BATCH_SIZE = 6 -- limit frame work when showing long histories
 local TEXT_RIGHT_RESERVE = 44 -- space between row text and the difficulty columns (spec/roll-count area + padding)
@@ -26,6 +26,7 @@ local INDENT = {header = 8, instance = 16, boss = 30, item = 44}
 local CHECK_MARKUP = CreateAtlasMarkup("common-icon-checkmark", 14, 14)
 
 local ITEM_CONTEXT_FIELD = 12
+local RAID_DIFFICULTIES = {[14] = true, [15] = true, [16] = true, [17] = true}
 
 local function getEntryKeyValues(currencyID, sourceID, contextID, keyLevel, itemID, specID)
   return table.concat({
@@ -59,6 +60,27 @@ local function getItemContextFromLink(itemLink)
   if not itemString then return 0 end
   local parts = {strsplit(":", itemString)}
   return tonumber(parts[ITEM_CONTEXT_FIELD]) or 0
+end
+
+---The roll prompt or even the won item's context can be zero/unknown. Only
+---use the live raid difficulty when the result is awarded inside its raid.
+---Keep it separate from SimC's original context so the export key stays intact.
+local function getCapturedRaidDifficulty(sourceID)
+  local _, instanceType, difficultyID, _, _, _, _, instanceID = GetInstanceInfo()
+  if instanceType ~= "raid" or not RAID_DIFFICULTIES[difficultyID] then return nil end
+  local source = Data.bonusRollSources[sourceID]
+  if not source or source.kind ~= "raid" then return nil end
+  local matched = source.kithix and instanceID == 3095
+  if not matched then
+    for _, raid in ipairs(Data:GetRaidCatalog()) do
+      if raid.journalInstanceID == source.journalInstanceID and raid.instanceID == instanceID then
+        matched = true
+        break
+      end
+    end
+  end
+  if not matched then return nil end
+  return difficultyID
 end
 
 ---------------------------------------------------------------------------
@@ -198,8 +220,12 @@ function Module:BONUS_ROLL_RESULT(_, typeIdentifier, itemLink, _, specID)
   local pending = self.pendingBonusRoll or {}
   local currencyID = pending.currencyID or 0
   local sourceID = pending.sourceID or 0
-  local contextID = pending.contextID or getItemContextFromLink(itemLink)
+  -- Preserve the SimC prompt context exactly, including 0. Replacing 0 with
+  -- the won item's context would change the export key and detach the link.
+  local contextID = pending.contextID
+  if contextID == nil then contextID = getItemContextFromLink(itemLink) end
   local keyLevel = pending.keyLevel or 0
+  local raidDifficultyID = getCapturedRaidDifficulty(sourceID)
   specID = resolveLootSpecID(specID)
 
   -- Save the complete roll immediately. A character switch can happen before
@@ -217,6 +243,9 @@ function Module:BONUS_ROLL_RESULT(_, typeIdentifier, itemLink, _, specID)
   local entry = {
     currencyID = currencyID, sourceID = sourceID, contextID = contextID,
     keyLevel = keyLevel, itemID = itemID, specID = specID,
+    raidDifficultyID = raidDifficultyID,
+    itemContextID = getItemContextFromLink(itemLink),
+    exactItemLink = itemLink,
     ts = C_DateAndTime and C_DateAndTime.GetServerTimeLocal
       and C_DateAndTime.GetServerTimeLocal() or time(),
   }
@@ -342,8 +371,15 @@ local function importRollTimestamps(character)
 end
 
 local function sameBonusRollResult(first, second)
-  return first.itemID == second.itemID
-    and (first.specID == second.specID or first.specID == 0 or second.specID == 0)
+  if first.itemID ~= second.itemID then return false end
+  if first.specID ~= second.specID and first.specID ~= 0 and second.specID ~= 0 then return false end
+  -- Never attach a won-item link to a different known boss/dungeon source.
+  if first.sourceID ~= second.sourceID and first.sourceID ~= 0 and second.sourceID ~= 0 then
+    return false
+  end
+  local a = Data.bonusRollRaidContexts[first.contextID]
+  local b = Data.bonusRollRaidContexts[second.contextID]
+  return not (a and b and a ~= b)
 end
 
 ---Fetch fresh data for the logged in character and reconcile locally captured
@@ -388,6 +424,32 @@ function Module:UpdateCharacter(character)
   local exactItems = saved and saved.exactItems or {}
   local newExportEntries = getNewExportEntries(saved and saved.raw, entries)
 
+  -- SimC has no raid difficulty field beyond item context. Retain the live
+  -- difficulty captured by AlterEgo for existing exported rolls when SimC's
+  -- history grows. A per-key queue also preserves repeated item rolls.
+  local priorByKey = {}
+  for _, previous in ipairs(saved and saved.entries or {}) do
+    local key = getEntryKey(previous)
+    local bucket = priorByKey[key]
+    if not bucket then
+      bucket = {}
+      priorByKey[key] = bucket
+    end
+    bucket[#bucket + 1] = previous
+  end
+  local offsets = {}
+  for _, exported in ipairs(entries) do
+    local key = getEntryKey(exported)
+    local bucket = priorByKey[key]
+    local index = (offsets[key] or 0) + 1
+    offsets[key] = index
+    if bucket and bucket[index] then
+      exported.raidDifficultyID = bucket[index].raidDifficultyID
+      exported.itemContextID = bucket[index].itemContextID
+      exported.exactItemLink = bucket[index].exactItemLink
+    end
+  end
+
   -- Only match new SimC records against locally recorded results. Comparing
   -- with all historical records would consume a new roll on an older copy of
   -- the same item, dropping a legitimate repeat roll from the history.
@@ -411,6 +473,17 @@ function Module:UpdateCharacter(character)
       local pending = table.remove(pendingEntries, matchIndex)
       local link = exactItems[getEntryKey(pending)]
       if link then exactItems[getEntryKey(exported)] = link end
+      if pending.raidDifficultyID then
+        exported.raidDifficultyID = pending.raidDifficultyID
+      end
+      if pending.itemContextID then
+        exported.itemContextID = pending.itemContextID
+      end
+      if type(pending.exactItemLink) == "string" then
+        exported.exactItemLink = pending.exactItemLink
+      elseif link then
+        exported.exactItemLink = link
+      end
       exported.ts = pending.ts
     end
   end
@@ -493,8 +566,48 @@ end
 
 ---@param entry table
 ---@return number? difficultyID
+-- Look up exact reward variants without crossing known source/spec identities.
+-- Older versions sometimes keyed captured links by the item context while
+-- the SimC export used the zero-valued prompt context.
+local function getExactItemLink(entry)
+  local saved = Module.character and Module.character.bonusRoll
+  local exactItems = saved and saved.exactItems
+  local function valid(link)
+    return type(link) == "string" and tonumber(link:match("item:(%d+):")) == entry.itemID
+  end
+  if valid(entry.exactItemLink) then return entry.exactItemLink end
+  if type(exactItems) ~= "table" then return nil end
+  local direct = exactItems[getEntryKey(entry)]
+  if valid(direct) then return direct end
+  local recovered
+  for key, link in pairs(exactItems) do
+    if type(key) == "string" and valid(link) then
+      local currencyID, sourceID, _, keyLevel, itemID, specID = strsplit(":", key)
+      local expectedDifficulty = Data.bonusRollRaidContexts[entry.contextID] or entry.raidDifficultyID
+      local linkDifficulty = Data.bonusRollRaidContexts[getItemContextFromLink(link)]
+      if tonumber(currencyID) == entry.currencyID
+        and tonumber(sourceID) == entry.sourceID and tonumber(keyLevel) == entry.keyLevel
+        and tonumber(itemID) == entry.itemID and tonumber(specID) == entry.specID
+        and not (expectedDifficulty and linkDifficulty and expectedDifficulty ~= linkDifficulty) then
+        if recovered and recovered ~= link then return nil end
+        recovered = link
+      end
+    end
+  end
+  return recovered
+end
+
 local function getRaidDifficultyID(entry)
-  return Data.bonusRollRaidContexts[entry.contextID]
+  local source = Data.bonusRollSources[entry.sourceID]
+  if source and source.kind ~= "raid" then return nil end
+  -- The observed raid difficulty is authoritative only when recorded inside
+  -- the matching raid. Other known context values are valid evidence too.
+  if RAID_DIFFICULTIES[entry.raidDifficultyID] then return entry.raidDifficultyID end
+  local difficultyID = Data.bonusRollRaidContexts[entry.contextID]
+    or Data.bonusRollRaidContexts[entry.itemContextID]
+  if difficultyID then return difficultyID end
+  local link = getExactItemLink(entry)
+  return link and Data.bonusRollRaidContexts[getItemContextFromLink(link)] or nil
 end
 
 ---@param difficultyID number
@@ -837,18 +950,14 @@ local function getDifficultyText(entry)
     local difficulty = getDifficulty(difficultyID)
     return difficulty and difficulty.name or "Raid"
   end
-  if entry.keyLevel and entry.keyLevel > 0 then
-    return format("Mythic+ %d", entry.keyLevel)
+  local source = Data.bonusRollSources[entry.sourceID]
+  if source and source.kind == "raid" then return "Raid (difficulty unknown)" end
+  if (source and source.kind == "dungeon") or Data.bonusRollKeystoneContexts[entry.contextID] then
+    if entry.keyLevel and entry.keyLevel > 0 then
+      return format("Mythic+ %d", entry.keyLevel)
+    end
   end
   return UNKNOWN
-end
-
----@param entry table
----@return string?
-local function getExactItemLink(entry)
-  local saved = Module.character and Module.character.bonusRoll
-  local exactItems = saved and saved.exactItems
-  return exactItems and exactItems[getEntryKey(entry)] or nil
 end
 
 ---Canonical Season 2 Bonus Roll rewards. These are aligned with the Great Vault
@@ -889,7 +998,9 @@ local function getCanonicalBonusRollReward(entry)
     end
     return RAID_BONUS_ROLL_REWARDS[difficultyID]
   end
-  if Data.bonusRollKeystoneContexts[entry.contextID] then
+  local source = Data.bonusRollSources[entry.sourceID]
+  if (source and source.kind == "dungeon")
+    or (not source and Data.bonusRollKeystoneContexts[entry.contextID]) then
     return getDungeonBonusRollReward(entry.keyLevel)
   end
   return nil
@@ -931,22 +1042,30 @@ local function showItemTooltip(row, entry)
     local reward = getCanonicalBonusRollReward(entry)
     local shown = reward and setCanonicalHistoricalTooltip(entry, reward)
     if not shown then
-      local contextualItemLink = getContextualItemLink(entry)
+      local source = Data.bonusRollSources[entry.sourceID]
+      -- treasureContextLevel is NOT a dungeon level for raid rewards.
+      local contextualItemLink = (not source or source.kind ~= "raid")
+        and getContextualItemLink(entry) or nil
       if contextualItemLink then
         GameTooltip:SetHyperlink(contextualItemLink)
       else
         GameTooltip:SetItemByID(entry.itemID)
       end
     end
+    GameTooltip:AddLine("Exact bonus-roll item link unavailable (historical record).", 0.7, 0.7, 0.7, true)
   end
   GameTooltip:Show()
 end
 
----Show acquisition history only on the item row; difficulty checkmarks
----retain their unmodified Blizzard item tooltip.
+---For a single acquired roll, hovering the item name/icon shows its actual
+---variant, just like hovering its checkmark. Multi-roll rows show the history.
 local function showAcquisitionTooltip(row)
   local data = row.data
   if not data or not data.item then return end
+  if #data.item.entries == 1 then
+    showItemTooltip(row, data.item.entries[1])
+    return
+  end
   local name = getItemDisplay(data.item.itemID)
   GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
   GameTooltip:AddLine(name or ("Item " .. data.item.itemID), 1, 0.82, 0)
@@ -1237,12 +1356,18 @@ end
 ---@param instanceKind string?
 ---@return "key"|number|nil
 local function getEntryColumn(entry, instanceKind)
-  local isKeystone = instanceKind == "dungeon" or Data.bonusRollKeystoneContexts[entry.contextID]
+  local isKeystone = instanceKind == "dungeon"
+    or (instanceKind ~= "raid" and Data.bonusRollKeystoneContexts[entry.contextID])
   if isKeystone then
     -- Any dungeon roll belongs to the same cell, regardless of keystone level.
     return "key"
   end
-  return getRaidDifficultyID(entry)
+  local difficultyID = getRaidDifficultyID(entry)
+  if difficultyID then return difficultyID end
+  -- A raid roll with an unrecoverable difficulty still deserves an obtained
+  -- marker. Keep it in a separate unknown column rather than invent H or M.
+  if instanceKind == "raid" then return "unknown" end
+  return nil
 end
 
 ---Show used raid difficulties at their native spacing, with a dungeon cell
@@ -1266,8 +1391,12 @@ function Module:BuildColumns(rows)
       columnIndex[difficulty.id] = #columns
     end
   end
+  if used.unknown then
+    table.insert(columns, {id = "unknown", label = "?"})
+    columnIndex.unknown = #columns
+  end
   if used.key then
-    -- Do not reserve a fifth difficulty slot for the dungeon column.
+    -- Keep dungeons centered independently of the raid difficulty columns.
     -- It shares the horizontal center without moving any raid difficulty.
     table.insert(columns, {id = "key", label = ""})
     columnIndex.key = #columns

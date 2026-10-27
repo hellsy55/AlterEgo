@@ -21,6 +21,19 @@ do
   Data.bonusRollRaidContexts[enum.RaidNormal or 3] = 14 -- Normal
   Data.bonusRollRaidContexts[enum.RaidHeroic or 5] = 15 -- Heroic
   Data.bonusRollRaidContexts[enum.RaidMythic or 6] = 16 -- Mythic
+  -- Modern item links can use an extended raid creation context instead of
+  -- the four original values. The context still denotes the same raid tier.
+  local extended = {
+    {"RaidNormalExtended", 82, 14}, {"RaidFinderExtended", 83, 17},
+    {"RaidHeroicExtended", 84, 15}, {"RaidMythicExtended", 85, 16},
+    {"RaidNormalExtended_2", 89, 14}, {"RaidFinderExtended_2", 90, 17},
+    {"RaidHeroicExtended_2", 91, 15}, {"RaidMythicExtended_2", 92, 16},
+    {"RaidNormalExtended_3", 93, 14}, {"RaidFinderExtended_3", 94, 17},
+    {"RaidHeroicExtended_3", 95, 15}, {"RaidMythicExtended_3", 96, 16},
+  }
+  for _, item in ipairs(extended) do
+    Data.bonusRollRaidContexts[enum[item[1]] or item[2]] = item[3]
+  end
 end
 
 ---Contexts that mean "rolled in a Mythic+ keystone dungeon" (the keyLevel field is the keystone level).

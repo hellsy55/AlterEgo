@@ -6394,7 +6394,9 @@ function Module:RenderNow()
           -- than leaving the chamber count blank. The weekly kill is separate.
           local tierText = type(progress.tier) == "number" and progress.tier > 0
             and format("T%d", progress.tier) or "T"
-          local chambers = progress.active and progress.chambers or progress.lastChambers
+          -- An older Sync snapshot must not restore last week's chambers.
+          local thisWeek = Data:IsSameWeeklyReset(progress.weeklyResetAt, nextReset)
+          local chambers = thisWeek and (progress.active and progress.chambers or progress.lastChambers)
           local chamberCount = type(chambers) == "number" and math.max(0, math.min(9, chambers)) or 0
           local killMark = CreateAtlasMarkup(killed and "common-icon-checkmark" or "Recurringavailablequesticon", 14, 14)
           frame.Text:SetText(format("%s %d/9 %s", tierText, chamberCount, killMark))
