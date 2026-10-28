@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.4 - 2026-10-28
+
+- Updated tables.
+
 ## v1.3.3 - 2026-10-24
 
 - Updated performance.

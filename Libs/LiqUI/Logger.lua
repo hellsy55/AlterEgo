@@ -41,9 +41,11 @@ local function applyLogText(textBox, text, scrollToEnd)
   end
 end
 
----@param storage LiqUI_LoggerDB
-local function trimLoggerLines(storage)
-  while #storage.lines > LINES_MAX do
+---@param handle LiqUI_LoggerHandle
+local function trimLoggerLines(handle)
+  local storage = handle.storage
+  local limit = handle.maxLines or LINES_MAX
+  while #storage.lines > limit do
     table.remove(storage.lines, 1)
   end
 end
@@ -110,7 +112,7 @@ local function appendLine(handle, level, prefixOrMessage, message)
     lineText = format("[%s] %s", date("%H:%M:%S"), prefixOrMessage)
   end
   table.insert(storage.lines, lineText)
-  trimLoggerLines(storage)
+  trimLoggerLines(handle)
   if storage.autoShow then
     Logger.selectedAddonName = handle.name
     Logger:Show()
@@ -137,13 +139,21 @@ function LiqUI:NewLogger(options)
   if existing then
     existing.title = options.title or existing.title or options.name
     existing.storage = options.storage
+    if type(options.maxLines) == "number" and options.maxLines > 0 then
+      existing.maxLines = math.floor(options.maxLines)
+    end
     return existing
   end
 
+  local maxLines = LINES_MAX
+  if type(options.maxLines) == "number" and options.maxLines > 0 then
+    maxLines = math.floor(options.maxLines)
+  end
   local handle = {
     name = options.name,
     title = options.title or options.name,
     storage = options.storage,
+    maxLines = maxLines,
   }
 
   ---@param loggerHandle LiqUI_LoggerHandle

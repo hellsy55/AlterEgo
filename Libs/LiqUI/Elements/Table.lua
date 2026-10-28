@@ -434,7 +434,11 @@ local function createTable(options)
         headerRowFrame:SetFrameLevel(scrollArea.content:GetFrameLevel() + 1)
       end
 
-      SetBackgroundColor(headerRowFrame, 0, 0, 0, HEADER_BACKGROUND_ALPHA)
+      local headerBackgroundAlpha = HEADER_BACKGROUND_ALPHA
+      if headerConfig and headerConfig.backgroundAlpha ~= nil then
+        headerBackgroundAlpha = headerConfig.backgroundAlpha
+      end
+      SetBackgroundColor(headerRowFrame, 0, 0, 0, headerBackgroundAlpha)
       headerRowFrame:SetHeight(headerHeight)
       headerRowFrame:Show()
 
@@ -529,6 +533,7 @@ local function createTable(options)
     end
 
     TableForEach(frame.rowFrames, function(rowFrame) rowFrame:Hide() end)
+    local stripeIndex = 0
     TableForEach(frame.data, function(rowData, rowIndex)
       local rowHeight = rowData.height or defaultRowHeight
       local rowFrame = frame.rowFrames[rowIndex]
@@ -541,22 +546,34 @@ local function createTable(options)
         frame.rowFrames[rowIndex] = rowFrame
       end
 
+      local countsForStripe = rowData.skipStripe ~= true
+      if countsForStripe then
+        stripeIndex = stripeIndex + 1
+      end
+      local stripeColor = rowStyle and rowStyle.stripeColor
       if rowData.backgroundColor then
         SetBackgroundColor(rowFrame, rowData.backgroundColor)
-      elseif rowStyle and rowStyle.striped and rowIndex % 2 == 1 then
-        SetBackgroundColor(rowFrame, 1, 1, 1, 0.02)
+      elseif rowStyle and rowStyle.striped and countsForStripe and stripeIndex % 2 == 1 then
+        if stripeColor then
+          SetBackgroundColor(rowFrame, stripeColor)
+        else
+          SetBackgroundColor(rowFrame, 1, 1, 1, 0.02)
+        end
       else
         SetBackgroundColor(rowFrame, 0, 0, 0, 0)
       end
 
+      local gapBefore = rowData.gapBefore or 0
+      local gapAfter = rowData.gapAfter or 0
+      rowOffsetY = rowOffsetY + gapBefore
       rowFrame:SetParent(scrollArea.content)
       rowFrame:SetPoint("TOPLEFT", scrollArea.content, "TOPLEFT", 0, -rowOffsetY)
       rowFrame:SetPoint("TOPRIGHT", scrollArea.content, "TOPRIGHT", 0, -rowOffsetY)
       rowFrame:SetFrameLevel(scrollArea.content:GetFrameLevel() + 1)
       rowFrame:SetHeight(rowHeight)
       rowFrame:Show()
-      rowOffsetY = rowOffsetY + rowHeight
-      scrollHeight = scrollHeight + rowHeight
+      rowOffsetY = rowOffsetY + rowHeight + gapAfter
+      scrollHeight = scrollHeight + rowHeight + gapBefore + gapAfter
 
       columnOffsetX = 0
       TableForEach(rowFrame.cells, function(bodyCellFrame) bodyCellFrame:Hide() end)
@@ -584,14 +601,43 @@ local function createTable(options)
           rowFrame.cells[columnIndex] = bodyCellFrame
         end
 
+        if rowData.span and columnIndex > 1 then
+          bodyCellFrame:Hide()
+          return
+        end
+        local cellWidth = columnWidth
+        if rowData.span and columnIndex == 1 then
+          cellWidth = layoutWidth
+        end
         bodyCellFrame:SetPoint("TOPLEFT", rowFrame, "TOPLEFT", columnOffsetX, 0)
         bodyCellFrame:SetPoint("BOTTOMLEFT", rowFrame, "BOTTOMLEFT", columnOffsetX, 0)
-        bodyCellFrame:SetWidth(columnWidth)
+        bodyCellFrame:SetWidth(cellWidth)
+        local indent = 0
+        if columnIndex == 1 and rowData.indent then
+          indent = rowData.indent
+        end
+        local padLeft = defaultPadding + indent
+        local padRight = defaultPadding
+        local padTop = defaultPadding
+        local padBottom = defaultPadding
+        if rowData.padding ~= nil then
+          padLeft = rowData.padding + indent
+          padRight = rowData.padding
+          padTop = rowData.padding
+          padBottom = rowData.padding
+        end
+        if rowData.paddingTop ~= nil then
+          padTop = rowData.paddingTop
+        end
+        if rowData.paddingBottom ~= nil then
+          padBottom = rowData.paddingBottom
+        end
         bodyCellFrame.label:SetFontObject(defaultCellFont)
         bodyCellFrame.label:SetText(displayText)
         bodyCellFrame.label:SetJustifyH(columnAlign)
-        bodyCellFrame.label:SetPoint("TOPLEFT", bodyCellFrame, "TOPLEFT", defaultPadding, -defaultPadding)
-        bodyCellFrame.label:SetPoint("BOTTOMRIGHT", bodyCellFrame, "BOTTOMRIGHT", -defaultPadding, defaultPadding)
+        bodyCellFrame.label:ClearAllPoints()
+        bodyCellFrame.label:SetPoint("TOPLEFT", bodyCellFrame, "TOPLEFT", padLeft, -padTop)
+        bodyCellFrame.label:SetPoint("BOTTOMRIGHT", bodyCellFrame, "BOTTOMRIGHT", -padRight, padBottom)
 
         if cellData and cellData.backgroundColor then
           SetBackgroundColor(bodyCellFrame, cellData.backgroundColor)

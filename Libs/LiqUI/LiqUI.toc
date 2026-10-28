@@ -1,7 +1,7 @@
 ## Interface: 120105
 ## Title: LiqUI
 ## Notes: Shared UI library for Liq addons
-## Version: v1.3.3
+## Version: v1.3.4
 ## Author: Liquidor
 ## X-Website: https://github.com/DennisRas/LiqUI
 ## SavedVariables: LiqUIDB
