@@ -447,6 +447,8 @@ function Module:UpdateCharacter(character)
       exported.raidDifficultyID = bucket[index].raidDifficultyID
       exported.itemContextID = bucket[index].itemContextID
       exported.exactItemLink = bucket[index].exactItemLink
+      -- Keep the original acquisition time when SimC adds other history entries.
+      exported.ts = bucket[index].ts
     end
   end
 
@@ -1053,6 +1055,10 @@ local function showItemTooltip(row, entry)
       end
     end
     GameTooltip:AddLine("Exact bonus-roll item link unavailable (historical record).", 0.7, 0.7, 0.7, true)
+  end
+  -- Only show an acquisition date when it was captured or imported from SimC.
+  if type(entry.ts) == "number" and entry.ts > 0 then
+    GameTooltip:AddLine(format("Obtained on: %s", date("%d/%m/%Y - %H:%M", entry.ts)), 0.7, 0.7, 0.7)
   end
   GameTooltip:Show()
 end

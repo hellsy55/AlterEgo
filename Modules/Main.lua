@@ -3040,7 +3040,11 @@ local function UpdateCharacterScrollEdgeButtons(window)
   local scrollArea = window and window.body and window.body.content and window.body.content.scrollArea
   local scrollBox = scrollArea and scrollArea.horizontalScrollBox
   local settings = Data.db.global.liqui.windows.Main
-  if not navigation or settings.showCharacterScrollArrows == false or not scrollBox or not scrollBox:IsShown() then
+  -- The empty-character overlay hides the body, but these buttons belong to
+  -- the window itself. Hide them before the overlay is shown, even if the
+  -- ScrollBox still reports an old or transient horizontal scroll range.
+  if not navigation or (window.virtualizedCharacterCount or 0) == 0
+    or settings.showCharacterScrollArrows == false or not scrollBox or not scrollBox:IsShown() then
     if navigation then
       navigation.left:Hide()
       navigation.right:Hide()
@@ -4957,6 +4961,36 @@ function Module:RenderNow()
     })
     mainWindow.body.content = content
     content.scrollArea:SetAllPoints()
+    -- The inner WowScrollBox can consume OnMouseWheel before it reaches the
+    -- outer scroll-area container. Bind both input surfaces for Shift+wheel,
+    -- preserving each frame's native handler for ordinary wheel scrolling.
+    -- Do not change LiqUI's shared wheel behavior in other windows.
+    local characterScrollBox = content.scrollArea.horizontalScrollBox
+    local fallbackWheelHandler = content.scrollArea.container:GetScript("OnMouseWheel")
+    local function BindCharacterWheel(frame)
+      if not frame then return end
+      local normalWheelHandler = frame:GetScript("OnMouseWheel") or fallbackWheelHandler
+      frame:EnableMouseWheel(true)
+      frame:SetScript("OnMouseWheel", function(self, delta)
+        if IsShiftKeyDown() and delta ~= 0 then
+          local range = characterScrollBox and characterScrollBox:GetDerivedScrollRange() or 0
+          if (mainWindow.virtualizedCharacterCount or 0) > 0 and range > 0 then
+            if delta > 0 then
+              characterScrollBox:ScrollToBegin()
+            else
+              characterScrollBox:ScrollToEnd()
+            end
+            UpdateCharacterScrollEdgeButtons(mainWindow)
+          end
+          return
+        end
+        if normalWheelHandler then
+          normalWheelHandler(self, delta)
+        end
+      end)
+    end
+    BindCharacterWheel(characterScrollBox)
+    BindCharacterWheel(content.scrollArea.container)
     -- WowScrollBox clips its rendering, but explicitly clip every layer of the
     -- character viewport as well so off-screen columns never leak outside the
     -- visible Main-window character area.

@@ -799,7 +799,16 @@ local function ArmConfirmationTimeout(transmissionId)
     if current ~= confirmation then return end
     pendingConfirmations[transmissionId] = nil
 
-    if confirmation.manual or not Data.db.global.sync.enabled then return end
+    -- A completed send is not proof that the peer applied the record. A
+    -- missing manual ACK is a user-visible, unverified delivery, whereas
+    -- automatic sends retain their existing silent, bounded retry path.
+    if confirmation.manual then
+      if Data.db.global.sync.enabled then
+        addon.Core:Print(format("Sync: WARNING -- no application confirmation for %s within %ds. Delivery is unverified; use Sync Now to reconcile and retry.", confirmation.name or confirmation.GUID or "?", ACK_TIMEOUT_SECONDS))
+      end
+      return
+    end
+    if not Data.db.global.sync.enabled then return end
     local character = GetCurrentlyEligibleCharacter(confirmation.GUID)
     if not character or GetCharacterRevision(character) ~= tonumber(confirmation.revision) then return end
 
@@ -808,7 +817,17 @@ local function ArmConfirmationTimeout(transmissionId)
 
     local retryKey = ConfirmationRetryKey(confirmation.GUID, confirmation.revision)
     local retries = confirmationRetryCounts[retryKey] or 0
-    if retries >= ACK_RETRY_MAX then return end
+    if retries >= ACK_RETRY_MAX then
+      -- The retry budget has been exhausted and an active peer still reports
+      -- this revision missing. Show one actionable warning, not a stream of
+      -- per-change messages. This is an unverified delivery, not proof that
+      -- the peer's data was lost.
+      if retries == ACK_RETRY_MAX then
+        confirmationRetryCounts[retryKey] = ACK_RETRY_MAX + 1
+        addon.Core:Print(format("Sync: WARNING -- automatic sync could not confirm %s after %d retries; a peer still reports it missing or outdated. Use Sync Now to reconcile.", confirmation.name or confirmation.GUID or "?", ACK_RETRY_MAX))
+      end
+      return
+    end
 
     confirmationRetryCounts[retryKey] = retries + 1
     catchupPendingGUIDs[confirmation.GUID] = true
@@ -907,8 +926,11 @@ end
 ---Close a completed character batch with the actual number of records that went out. This
 ---matters when sharing eligibility changes while the batch is running: receivers no longer
 ---wait for characters that were deliberately skipped after the batch began.
-local function SendBatchDone(password, channels, batchId, sentCount, manual)
-  if not batchId then return end
+local function SendBatchDone(password, channels, batchId, sentCount, manual, onDone)
+  if not batchId then
+    if onDone then onDone({}) end
+    return
+  end
   local payload = {
     password = password,
     batchDone = true,
@@ -916,8 +938,29 @@ local function SendBatchDone(password, channels, batchId, sentCount, manual)
     batchTotal = sentCount or 0,
     manual = manual or nil,
   }
+  local encoded = EncodeSyncPayload(payload)
+  local remainingChannels = #channels
+  local failedChannels = {}
+  if remainingChannels == 0 then
+    if onDone then onDone(failedChannels) end
+    return
+  end
+
+  -- This notification shares AEv1 with full character records, but uses
+  -- NORMAL priority even after an automatic BULK batch. Keep the batch
+  -- guard until its final queued chunk has left *every* channel: otherwise
+  -- a new BULK record may be interleaved before a queued NORMAL multipart
+  -- message finishes, corrupting AceComm's per-prefix receive spool.
   for _, channel in ipairs(channels) do
-    SendPayload(COMM_PREFIX, payload, channel, "NORMAL")
+    local failed = false
+    SendOnChannel(COMM_PREFIX, encoded, channel, "NORMAL", function(_, sent, total, didSend)
+      if not didSend then failed = true end
+      if sent >= total then
+        if failed then table.insert(failedChannels, channel) end
+        remainingChannels = remainingChannels - 1
+        if remainingChannels == 0 and onDone then onDone(failedChannels) end
+      end
+    end)
   end
 end
 
@@ -1103,7 +1146,12 @@ local function PerformBroadcast(verbose, peerFilter)
     if not queuedCharacter then
       -- Tell receivers the ACTUAL completed batch size. If sharing eligibility changed
       -- mid-send, this closes the batch without making them wait for skipped records.
-      SendBatchDone(password, channels, batchId, #sentNames, verbose == true)
+      SendBatchDone(password, channels, batchId, #sentNames, verbose == true, function(failedChannels)
+        if verbose and #failedChannels > 0 then
+          addon.Core:Print(format("Sync: WARNING -- the final batch notice was not fully sent over %s. Peer batch completion is unverified.", JoinWithAnd(failedChannels)))
+        end
+        batchInProgress = false
+      end)
 
       if verbose then
         -- Who has confirmed receiving ANY character of this batch so
@@ -1118,7 +1166,7 @@ local function PerformBroadcast(verbose, peerFilter)
         end
         local toClause = #confirmedBy > 0 and format(" to %s", JoinWithAnd(confirmedBy)) or ""
         local sentList = #sentNames > 0 and JoinWithAnd(sentNames) or "none"
-        addon.Core:Print(format("Sync: |cff33ff99successfully|r sent %d character(s)%s over %s in %s: %s", #sentNames, toClause, JoinWithAnd(channels), FormatDuration(GetTime() - startedAt), sentList))
+        addon.Core:Print(format("Sync: |cff33ff99finished sending|r %d character(s)%s over %s in %s: %s. Records without application confirmations will be reported separately.", #sentNames, toClause, JoinWithAnd(channels), FormatDuration(GetTime() - startedAt), sentList))
         if manualPendingGUIDs and next(manualPendingGUIDs) ~= nil then
           local pendingCount = 0
           for _ in pairs(manualPendingGUIDs) do pendingCount = pendingCount + 1 end
@@ -1129,7 +1177,8 @@ local function PerformBroadcast(verbose, peerFilter)
         activeBatchId = nil
         activeBatchConfirmedBy = {}
       end
-      batchInProgress = false
+      -- Do not release batchInProgress here: SendBatchDone's callback
+      -- releases it after the notification actually drains from CTL.
       return
     end
 
@@ -1157,6 +1206,7 @@ local function PerformBroadcast(verbose, peerFilter)
       revision = sentRevision,
       manual = verbose == true,
       batchId = batchId,
+      name = name,
     }
 
     SendCharacterRecord(character, password, channels, verbose, batchId, #toSend, verbose and "NORMAL" or "BULK", transmissionId, function(failedChannels)
@@ -1565,9 +1615,65 @@ end
 -- moment combat ends (PLAYER_REGEN_ENABLED, below).
 local pendingCombatApplies = {} -- [GUID] = {character, isNew, acks = {...}}; confirmations wait for actual combat-safe application
 
--- Which senders we've already warned about an unreadable message --
--- session-only. See where it's used in OnCommReceived for why.
-local warnedCorrupted = {}
+-- Invalid packets cannot be authenticated or matched to a GUID, so do not
+-- claim they caused data loss or print a warning for each stray packet.
+-- Keep bounded, session-only diagnostics available on request instead.
+local unreadableSyncPackets = {} -- [sender] = {decode, inflate, deserialize, total, repairs, lastAt, lastChannel, lastPrefix}
+local UNREADABLE_REPAIR_COOLDOWN_SECONDS = 60
+local UNREADABLE_REPAIR_MAX_ATTEMPTS = 2
+
+local function RecordUnreadableSyncPacket(sender, prefix, distribution, stage)
+  sender = tostring(sender or "?")
+  local record = unreadableSyncPackets[sender]
+  if not record then
+    record = {total = 0, decode = 0, inflate = 0, deserialize = 0, repairs = 0}
+    unreadableSyncPackets[sender] = record
+  end
+  record.total = record.total + 1
+  record[stage] = record[stage] + 1
+  record.lastAt = GetTime()
+  record.lastPrefix = prefix
+  record.lastChannel = distribution
+
+  -- A malformed packet has no trustworthy password/GUID. Repair only for
+  -- a peer already authenticated by an earlier, valid Sync payload, and
+  -- only for character broadcasts. Never respond to unknown senders,
+  -- malformed ACK whispers, or broken HELLO/settings messages.
+  local peer = syncPeers[sender]
+  if prefix ~= COMM_PREFIX or (distribution ~= "GUILD" and distribution ~= "PARTY" and distribution ~= "RAID")
+    or not peer or not peer.lastSeen or GetTime() - peer.lastSeen > PEER_TIMEOUT_SECONDS
+    or record.repairs >= UNREADABLE_REPAIR_MAX_ATTEMPTS
+    or (record.lastRepairAt and GetTime() - record.lastRepairAt < UNREADABLE_REPAIR_COOLDOWN_SECONDS)
+    or IsSyncSendRestricted() then
+    return
+  end
+
+  -- A direct HELLO advertises the actual versions we still hold. The
+  -- sender's existing catch-up logic retransmits only missing/stale records.
+  -- The repair request is silent and rate-limited; success is NOT assumed.
+  if SendSyncHello(sender, nil, nil, true) then
+    record.repairs = record.repairs + 1
+    record.lastRepairAt = GetTime()
+  end
+end
+
+function addon.Core:PrintSyncTransportDiagnostics()
+  local senders = {}
+  for sender in pairs(unreadableSyncPackets) do
+    table.insert(senders, sender)
+  end
+  table.sort(senders)
+  if #senders == 0 then
+    self:Print("Sync diagnostics: no unreadable messages recorded this session.")
+    return
+  end
+  for _, sender in ipairs(senders) do
+    local entry = unreadableSyncPackets[sender]
+    self:Print(format("Sync diagnostics: %s: %d invalid message(s) [decode %d, decompress %d, deserialize %d]; recovery requests %d; last on %s/%s. Invalid packets cannot be linked to a specific character.",
+      sender, entry.total, entry.decode, entry.inflate, entry.deserialize, entry.repairs,
+      tostring(entry.lastChannel), tostring(entry.lastPrefix)))
+  end
+end
 
 -- Only the most recently applied revision per GUID is needed to recognize
 -- the second copy of a record arriving over both GUILD and PARTY. Keeping
@@ -2051,32 +2157,22 @@ local function ProcessReceivedMessage(self, prefix, message, distribution, sende
   local password = Data.db.global.sync.password
   if not password or password == "" then return end
 
-  -- Corrupted/incomplete data (or a genuine prefix collision with some
-  -- unrelated addon that happens to also use "AEv1") -- warn once per
-  -- sender per session rather than every single occurrence, in case
-  -- something keeps producing these back to back.
+  -- A broken packet cannot be mapped to a character or authenticated.
+  -- Record its failure stage and attempt bounded peer reconciliation only
+  -- when we already know this sender from a valid, matching-password Sync.
   local decoded = LibDeflate:DecodeForWoWAddonChannel(message)
   if not decoded then
-    if not warnedCorrupted[sender] then
-      warnedCorrupted[sender] = true
-      addon.Core:Print(format("Sync: %s from %s -- ignored. (couldn't decode the addon-channel data -- likely corrupted in transit, or an unrelated addon reusing the \"%s\" prefix)", DIM_RED_FONT_COLOR:WrapTextInColorCode("got an unreadable message"), tostring(sender), COMM_PREFIX))
-    end
+    RecordUnreadableSyncPacket(sender, prefix, distribution, "decode")
     return
   end
   local decompressed = LibDeflate:DecompressDeflate(decoded)
   if not decompressed then
-    if not warnedCorrupted[sender] then
-      warnedCorrupted[sender] = true
-      addon.Core:Print(format("Sync: %s from %s -- ignored. (decoded fine, but failed to decompress -- the message is likely truncated or corrupted)", DIM_RED_FONT_COLOR:WrapTextInColorCode("got an unreadable message"), tostring(sender)))
-    end
+    RecordUnreadableSyncPacket(sender, prefix, distribution, "inflate")
     return
   end
   local success, payload = LibSerialize:Deserialize(decompressed)
   if not success or type(payload) ~= "table" then
-    if not warnedCorrupted[sender] then
-      warnedCorrupted[sender] = true
-      addon.Core:Print(format("Sync: %s from %s -- ignored. (decompressed fine, but failed to deserialize -- likely a different/incompatible AlterEgo version, or corrupted data)", DIM_RED_FONT_COLOR:WrapTextInColorCode("got an unreadable message"), tostring(sender)))
-    end
+    RecordUnreadableSyncPacket(sender, prefix, distribution, "deserialize")
     return
   end
 

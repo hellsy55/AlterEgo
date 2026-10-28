@@ -37,6 +37,12 @@ function Core:OnInitialize()
       self:Render()
       return
     end
+    if input and input:match("^%s*syncdiag%s*$") then
+      if self.PrintSyncTransportDiagnostics then
+        self:PrintSyncTransportDiagnostics()
+      end
+      return
+    end
     self:ToggleWindow()
   end)
   TableForEach(Constants.commands, function(command)
