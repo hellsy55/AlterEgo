@@ -1128,10 +1128,16 @@ function Module:Render()
               gemTooltipLine = gemTooltipLine .. " " .. qualityMarkup
             end
             table.insert(socketTooltipLines, gemTooltipLine)
-          elseif line.socketType then
+          else
+            -- Any GemSocket without an installed gem is an empty socket,
+            -- even when Blizzard omits the socket type from its tooltip data.
             hasEmptySocket = true
-            local socketTexture = CreateSimpleTextureMarkup(string.format("Interface\\ItemSocketingFrame\\UI-EmptySocket-%s", line.socketType), 14, 14)
-            table.insert(socketTooltipLines, socketTexture .. " " .. line.leftText)
+            if line.socketType then
+              local socketTexture = CreateSimpleTextureMarkup(string.format("Interface\\ItemSocketingFrame\\UI-EmptySocket-%s", line.socketType), 14, 14)
+              table.insert(socketTooltipLines, socketTexture .. " " .. (line.leftText or "Empty Socket"))
+            elseif line.leftText then
+              table.insert(socketTooltipLines, line.leftText)
+            end
           end
         end
       end
@@ -1193,16 +1199,15 @@ function Module:Render()
       embellishmentMissing = true
     end
 
-    local socketSlot = inventorySlot
     local gemsCellText = strjoin(" ", unpack(socketTexts))
-    if socketSlot and socketSlot.canSocket then
-      if hasEmptySocket then
-        -- Socket has been activated (via the slot's socket-adding item) but has no gem in it yet.
-        gemsCellText = DIM_RED_FONT_COLOR:WrapTextInColorCode("Missing")
-      elseif TableCount(socketTexts) == 0 then
-        -- No socket present yet; the slot's socket-adding item can still be used to add one.
-        gemsCellText = RARE_BLUE_COLOR:WrapTextInColorCode("Available")
-      end
+    if hasEmptySocket then
+      -- An existing empty socket requires a gem regardless of equipment slot.
+      -- Preserve icons for any other sockets that already contain gems.
+      local missingText = DIM_RED_FONT_COLOR:WrapTextInColorCode("Missing")
+      gemsCellText = gemsCellText ~= "" and (gemsCellText .. " " .. missingText) or missingText
+    elseif inventorySlot and inventorySlot.canSocket and TableCount(socketTexts) == 0 then
+      -- No socket present; this slot can still receive an additional socket.
+      gemsCellText = RARE_BLUE_COLOR:WrapTextInColorCode("Available")
     end
 
     local enchantSort = enchantTooltip ~= "" and enchantTooltip or enchantText
