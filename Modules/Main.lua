@@ -2780,14 +2780,16 @@ local function LayoutMainTitlebarButtons(window, requestedBodyWidth, bodyHeight)
   -- Secondary controls are intentionally treated as a separate group. When the header needs
   -- more than one row they are always placed below every primary-control row.
   local secondaryButtons = {}
-  if window.affixes and window.affixes:IsVisible() and window.affixes.buttons then
+  -- Secondary buttons can still belong to a hidden overflow row from the previous layout.
+  -- Use their own shown state so this pass can reparent them onto a visible row.
+  if window.affixes and window.affixes:IsShown() and window.affixes.buttons then
     for _, button in ipairs(window.affixes.buttons) do
-      if button and button:IsVisible() then
+      if button and button:IsShown() then
         table.insert(secondaryButtons, button)
       end
     end
   end
-  if window.dailyDelvesButton and window.dailyDelvesButton:IsVisible() then
+  if window.dailyDelvesButton and window.dailyDelvesButton:IsShown() then
     table.insert(secondaryButtons, window.dailyDelvesButton)
   end
 
