@@ -3395,6 +3395,13 @@ local function PopulateCurrencyCell(currencyFrame, currency, characterCurrency, 
     end)
   else
     local infoMaxQuantity = characterCurrency and characterCurrency.maxQuantity or 0
+    -- Seasonal moving caps are shared across characters. Read the current
+    -- cap from the live API, but keep each offline character's earned
+    -- amount and balance from its own saved snapshot.
+    if characterCurrency and currency.useTotalEarnedForMaxQty
+      and type(currency.maxQuantity) == "number" then
+      infoMaxQuantity = currency.maxQuantity
+    end
     local infoMaxWeeklyQuantity = characterCurrency and characterCurrency.maxWeeklyQuantity or 0
     local crestUncapped = currency.currencyType == "crest" and Data:IsSeason2CrestCapLifted()
     if crestUncapped and infoMaxQuantity == 0 then

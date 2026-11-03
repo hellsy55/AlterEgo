@@ -429,8 +429,7 @@ end
 local function formatUpgradeTrackLabel(trackName, level, maxLevel, muted, crafted, ascendant, eligibility)
   local displayTrackName = crafted and format("%s Crafted", trackName) or trackName
   if ascendant then displayTrackName = "Venomforged " .. displayTrackName end
-  local isMythBonusRank = not crafted and trackName == "Myth" and level == 9 and maxLevel == 6
-  local rankText = format("%d/%d%s", level, maxLevel, isMythBonusRank and "*" or "")
+  local rankText = format("%d/%d", level, maxLevel)
 
   if muted then
     return DISABLED_FONT_COLOR:WrapTextInColorCode(format("%s %s", displayTrackName, rankText))
