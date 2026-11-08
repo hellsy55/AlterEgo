@@ -46,7 +46,7 @@ Drive is an additional artifact delivery channel, never a prerequisite for merge
 
 ## Final report
 
-Report in Portuguese for the `new-features` target:
+Report in Portuguese for the `new-features` target, following the update skill's [commit link rules](../skills/alterego-update/SKILL.md#commit-links) for the baseline and final SHAs:
 
 - Initial version when available, initial subject and short SHA.
 - Final version when available, final subject and short SHA, and `initial -> final`.
