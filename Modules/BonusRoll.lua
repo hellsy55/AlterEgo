@@ -18,8 +18,13 @@ local ROW_HEIGHT = 22
 local DIFFICULTY_COLUMN_WIDTH = 60
 local MAX_COLUMNS = 6 -- four raid difficulties + unknown + overlapping dungeon column
 local ICON_SIZE = 18
+local SPEC_ICON_SIZE = ICON_SIZE - 2
+local SPEC_ICON_SPACING = 3
+local ROLLS_ICON_PADDING = 12 -- minimum space on either side of the spec icon group
+local ROLLS_TEXT_GAP = 10 -- keep Loot text away from the Rolls column
+local MIN_ITEM_TEXT_WIDTH = 100 -- preserve a usable Loot column if many specs exist
 local RENDER_BATCH_SIZE = 6 -- limit frame work when showing long histories
-local TEXT_RIGHT_RESERVE = 44 -- space between row text and the difficulty columns (spec/roll-count area + padding)
+local TEXT_RIGHT_RESERVE = 44 -- minimum width of the Rolls column
 local WINDOW_EDGE_MARGIN = 80 -- keep dynamically sized windows inside the usable screen width when possible
 
 local INDENT = {header = 8, instance = 16, boss = 30, item = 44}
@@ -721,29 +726,22 @@ local function buildSections(entries)
         table.sort(boss.entries, sortEntries)
         boss.items = {}
         local itemLookup = {}
-        local itemOrder = {}
         for _, entry in ipairs(boss.entries) do
-          local group = itemLookup[entry.itemID]
-          if not group then
-            group = {specs = {}, order = {}}
-            itemLookup[entry.itemID] = group
-            table.insert(itemOrder, group)
-          end
-          local specID = entry.specID or 0
-          local item = group.specs[specID]
+          local item = itemLookup[entry.itemID]
           if not item then
-            item = {itemID = entry.itemID, specID = specID, entries = {}}
-            group.specs[specID] = item
-            table.insert(group.order, item)
-          end
-          table.insert(item.entries, entry)
-        end
-        -- Keep matching items together while showing each loot spec on its
-        -- own row. Rolls in other difficulties still share that spec's row.
-        for _, group in ipairs(itemOrder) do
-          for _, item in ipairs(group.order) do
+            item = {itemID = entry.itemID, specIDs = {}, seenSpecs = {}, entries = {}}
+            itemLookup[entry.itemID] = item
             table.insert(boss.items, item)
           end
+          -- Rolls are ordered by difficulty, left to right. Record each loot
+          -- spec once, in the order its first difficulty column appears.
+          local specID = entry.specID or 0
+          if specID ~= 0 and not item.seenSpecs[specID] then
+            item.seenSpecs[specID] = true
+            table.insert(item.specIDs, specID)
+          end
+          -- Keep each exact roll for its own difficulty checkmark tooltip.
+          table.insert(item.entries, entry)
         end
       end
       table.sort(instance.bosses, function(a, b)
@@ -876,7 +874,7 @@ end
 
 ---@param rows table[]
 ---@return number leftWidth
-local function calculateLeftWidth(rows, firstIndex, lastIndex, required)
+local function calculateLeftWidth(rows, firstIndex, lastIndex, required, specReserve)
   required = required or LEFT_WIDTH
   for index = firstIndex or 1, lastIndex or #rows do
     local data = rows[index]
@@ -902,7 +900,7 @@ local function calculateLeftWidth(rows, firstIndex, lastIndex, required)
       fontObject = "GameFontHighlight_NoShadow"
     end
     if text then
-      local rowWidth = indent + leadingWidth + measureRowText(text, fontObject) + TEXT_RIGHT_RESERVE + 10
+      local rowWidth = indent + leadingWidth + measureRowText(text, fontObject) + specReserve + ROLLS_TEXT_GAP
       required = math.max(required, rowWidth)
     end
   end
@@ -942,24 +940,6 @@ local function getSpecDisplay(specID)
   if not specID or specID == 0 then return nil end
   local _, name, _, icon = GetSpecializationInfoByID(specID)
   return name, icon
-end
-
----@param entry table
----@return string
-local function getDifficultyText(entry)
-  local difficultyID = getRaidDifficultyID(entry)
-  if difficultyID then
-    local difficulty = getDifficulty(difficultyID)
-    return difficulty and difficulty.name or "Raid"
-  end
-  local source = Data.bonusRollSources[entry.sourceID]
-  if source and source.kind == "raid" then return "Raid (difficulty unknown)" end
-  if (source and source.kind == "dungeon") or Data.bonusRollKeystoneContexts[entry.contextID] then
-    if entry.keyLevel and entry.keyLevel > 0 then
-      return format("Mythic+ %d", entry.keyLevel)
-    end
-  end
-  return UNKNOWN
 end
 
 ---Canonical Season 2 Bonus Roll rewards. These are aligned with the Great Vault
@@ -1058,27 +1038,15 @@ local function showItemTooltip(row, entry)
   end
   -- Only show an acquisition date when it was captured or imported from SimC.
   if type(entry.ts) == "number" and entry.ts > 0 then
-    GameTooltip:AddLine(format("Obtained on: %s", date("%d/%m/%Y - %H:%M", entry.ts)), 0.7, 0.7, 0.7)
-  end
-  GameTooltip:Show()
-end
-
----For a single acquired roll, hovering the item name/icon shows its actual
----variant, just like hovering its checkmark. Multi-roll rows show the history.
-local function showAcquisitionTooltip(row)
-  local data = row.data
-  if not data or not data.item then return end
-  if #data.item.entries == 1 then
-    showItemTooltip(row, data.item.entries[1])
-    return
-  end
-  local name = getItemDisplay(data.item.itemID)
-  GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
-  GameTooltip:AddLine(name or ("Item " .. data.item.itemID), 1, 0.82, 0)
-  for _, entry in ipairs(data.item.entries) do
-    local acquired = type(entry.ts) == "number" and entry.ts > 0
-      and date("%d/%m/%Y %H:%M", entry.ts) or "Date unavailable"
-    GameTooltip:AddDoubleLine(getDifficultyText(entry), acquired, 1, 1, 1, 0.9, 0.9, 0.9)
+    local obtainedOn = format("Obtained on: %s", date("%d/%m/%Y - %H:%M", entry.ts))
+    local specName = getSpecDisplay(entry.specID)
+    if specName then
+      local classFile = Module.character and Module.character.info
+        and Module.character.info.class and Module.character.info.class.file
+      local classColor = classFile and classFile ~= "" and C_ClassColor.GetClassColor(classFile)
+      obtainedOn = obtainedOn .. " as " .. (classColor and classColor:WrapTextInColorCode(specName) or specName)
+    end
+    GameTooltip:AddLine(obtainedOn, 0.7, 0.7, 0.7)
   end
   GameTooltip:Show()
 end
@@ -1110,8 +1078,9 @@ local function createRow(content)
   row.text:SetWordWrap(false)
 
   row.specIcon = row:CreateTexture(nil, "ARTWORK")
-  row.specIcon:SetSize(ICON_SIZE - 2, ICON_SIZE - 2)
+  row.specIcon:SetSize(SPEC_ICON_SIZE, SPEC_ICON_SIZE)
   row.specIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+  row.specIcons = {row.specIcon}
 
   row.count = row:CreateFontString(nil, "OVERLAY")
   row.count:SetFontObject("GameFontDisableSmall")
@@ -1133,7 +1102,7 @@ local function createRow(content)
     cell:SetScript("OnEnter", function(self)
       if not self.entry then return end
       SetHighlightColor(row, 1, 1, 1, 0.10)
-      showItemTooltip(row, self.entry)
+      showItemTooltip(self, self.entry)
     end)
     cell:SetScript("OnLeave", function()
       GameTooltip:Hide()
@@ -1146,8 +1115,8 @@ local function createRow(content)
     local data = self.data
     if not data then return end
     if data.type == "item" then
+      -- Item variants are shown only by hovering their difficulty checkmarks.
       SetHighlightColor(self, 1, 1, 1, 0.10)
-      showAcquisitionTooltip(self)
     elseif data.type == "instance" or data.type == "boss" then
       SetHighlightColor(self, 1, 1, 1, 0.05)
       showInstanceTooltip(self)
@@ -1155,7 +1124,8 @@ local function createRow(content)
   end)
   row:SetScript("OnLeave", function(self)
     SetHighlightColor(self, 1, 1, 1, 0)
-    GameTooltip:Hide()
+    -- An item tooltip belongs to its checkmark cell, not the parent row.
+    if self.data and self.data.type ~= "item" then GameTooltip:Hide() end
   end)
   row:RegisterForClicks("LeftButtonUp")
   row:SetScript("OnClick", function(self, button)
@@ -1167,7 +1137,7 @@ end
 
 local function resetRow(row)
   row.itemIcon:Hide()
-  row.specIcon:Hide()
+  for _, specIcon in ipairs(row.specIcons) do specIcon:Hide() end
   row.count:SetFontObject("GameFontDisableSmall")
   local countFont, countSize, countFlags = GameFontDisableSmall:GetFont()
   if countFont and countSize then
@@ -1456,6 +1426,18 @@ function Module:Render()
   -- window does not resize horizontally on every expand/collapse click.
   local allRows = buildRows(sections)
   local rows = buildRows(sections, self.collapsedSections, self.collapsedInstances)
+  -- Give the Rolls column enough width for the largest distinct spec group.
+  -- Its width remains stable when sections are collapsed or expanded.
+  local specReserve = TEXT_RIGHT_RESERVE
+  for _, data in ipairs(allRows) do
+    if data.type == "item" then
+      local count = #data.item.specIDs
+      if count > 0 then
+        local iconsWidth = count * SPEC_ICON_SIZE + (count - 1) * SPEC_ICON_SPACING
+        specReserve = math.max(specReserve, iconsWidth + 2 * ROLLS_ICON_PADDING)
+      end
+    end
+  end
   local columns, columnIndex = self:BuildColumns(allRows)
   local numColumns = #columns
   local numRaidColumns = numColumns - (columnIndex.key and 1 or 0)
@@ -1474,9 +1456,12 @@ function Module:Render()
     return
   end
   local screenWidth = UIParent and UIParent:GetWidth() or (LEFT_WIDTH + columnsWidth + WINDOW_EDGE_MARGIN)
-  local maxBodyWidth = math.max(LEFT_WIDTH + columnsWidth, screenWidth - WINDOW_EDGE_MARGIN)
-  local maxLeftWidth = math.max(LEFT_WIDTH, maxBodyWidth - columnsWidth)
-  local leftWidth = math.min(desiredLeftWidth, maxLeftWidth)
+  -- Do not let a large spec group squeeze the Loot area into the Rolls column.
+  local minLeftWidth = math.max(LEFT_WIDTH,
+    specReserve + ROLLS_TEXT_GAP + INDENT.item + ICON_SIZE + 6 + MIN_ITEM_TEXT_WIDTH)
+  local maxBodyWidth = math.max(minLeftWidth + columnsWidth, screenWidth - WINDOW_EDGE_MARGIN)
+  local maxLeftWidth = math.max(minLeftWidth, maxBodyWidth - columnsWidth)
+  local leftWidth = math.min(math.max(desiredLeftWidth, minLeftWidth), maxLeftWidth)
   local width = leftWidth + columnsWidth
 
   -- Hide the Loot header until this character has saved Bonus Roll data.
@@ -1501,8 +1486,8 @@ function Module:Render()
     row.data = nil
   end
 
-  local specOffset = columnsWidth + 12
-  local textRight = -(columnsWidth + TEXT_RIGHT_RESERVE)
+  local rollsCenter = columnsWidth + specReserve / 2
+  local textRight = -(columnsWidth + specReserve + ROLLS_TEXT_GAP)
   local totalHeight = 0
   local rowIndex = 1
   local function renderNextRows()
@@ -1527,11 +1512,10 @@ function Module:Render()
       row:SetPoint("TOPRIGHT", self.content, "TOPRIGHT", 0, -totalHeight)
 
       row.specIcon:ClearAllPoints()
-      row.specIcon:SetPoint("RIGHT", row, "RIGHT", -specOffset, 0)
+      row.specIcon:SetPoint("CENTER", row, "RIGHT", -rollsCenter, 0)
       row.count:ClearAllPoints()
-      -- The instance roll count occupies the same visual column as the item spec
-      -- icons. Center it on the icon instead of aligning its right edge there.
-      row.count:SetPoint("CENTER", row.specIcon, "CENTER", 0, 0)
+      -- The Rolls label and counts share the center of the spec icon column.
+      row.count:SetPoint("CENTER", row, "RIGHT", -rollsCenter, 0)
       for cellIndex, cell in ipairs(row.cells) do
         cell:ClearAllPoints()
         local column = columns[cellIndex]
@@ -1600,18 +1584,37 @@ function Module:Render()
         row.text:SetPoint("RIGHT", row, "RIGHT", textRight, 0)
         row.text:SetText(color and color:WrapTextInColorCode(name) or name)
 
-        local _, specIcon = getSpecDisplay(item.specID)
-        if specIcon then
-          row.specIcon:SetTexture(specIcon)
-          row.specIcon:Show()
+        -- Center the unique spec icons as a group in the expandable Rolls
+        -- column, preserving their first-seen difficulty order from left to right.
+        local specTextures = {}
+        for _, specID in ipairs(item.specIDs) do
+          local _, specTexture = getSpecDisplay(specID)
+          if specTexture then table.insert(specTextures, specTexture) end
+        end
+        local iconsWidth = #specTextures * SPEC_ICON_SIZE
+          + math.max(0, #specTextures - 1) * SPEC_ICON_SPACING
+        local firstIconOffset = rollsCenter + (iconsWidth - SPEC_ICON_SIZE) / 2
+        for specIndex, specTexture in ipairs(specTextures) do
+          local specIcon = row.specIcons[specIndex]
+          if not specIcon then
+            specIcon = row:CreateTexture(nil, "ARTWORK")
+            specIcon:SetSize(SPEC_ICON_SIZE, SPEC_ICON_SIZE)
+            specIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+            row.specIcons[specIndex] = specIcon
+          end
+          specIcon:ClearAllPoints()
+          specIcon:SetPoint("CENTER", row, "RIGHT",
+            -firstIconOffset + (specIndex - 1) * (SPEC_ICON_SIZE + SPEC_ICON_SPACING), 0)
+          specIcon:SetTexture(specTexture)
+          specIcon:Show()
         end
 
         for _, entry in ipairs(item.entries) do
           local column = getEntryColumn(entry, data.instance.kind)
           local cell = column and row.cells[columnIndex[column]]
-          -- Each item/spec pair occupies its own row. Within that spec, each
-          -- populated difficulty cell owns the exact roll variant. Repeated
-          -- rolls in the same cell keep the first tooltip (sorted above).
+          -- Each item occupies one row, even across loot specs. A populated
+          -- difficulty cell owns its exact roll variant; repeated rolls in
+          -- the same cell keep the first tooltip (sorted above).
           if cell and not cell.entry then
             cell.entry = entry
             cell:EnableMouse(true)
@@ -1685,7 +1688,7 @@ function Module:Render()
       return
     end
     local lastIndex = math.min(#allRows, nextMeasureIndex + 11)
-    requiredWidth = calculateLeftWidth(allRows, nextMeasureIndex, lastIndex, requiredWidth)
+    requiredWidth = calculateLeftWidth(allRows, nextMeasureIndex, lastIndex, requiredWidth, specReserve)
     nextMeasureIndex = lastIndex + 1
     if nextMeasureIndex <= #allRows then
       C_Timer.After(0, measureNextBatch)
